@@ -1,0 +1,86 @@
+{
+  "name": "vscode-acp",
+  "displayName": "OpenCode ACP",
+  "description": "AI coding agents in VS Code via Agent Client Protocol (ACP). Chat with Claude, OpenCode, and other ACP-compatible agents directly in your editor.",
+  "version": "0.1.0",
+  "publisher": "opencode",
+  "license": "MIT",
+  "icon": "assets/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anthropics/vscode-acp"
+  },
+  "bugs": {
+    "url": "https://github.com/anthropics/vscode-acp/issues"
+  },
+  "homepage": "https://github.com/anthropics/vscode-acp#readme",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "claude",
+    "opencode",
+    "acp",
+    "agent",
+    "chat",
+    "copilot",
+    "coding assistant",
+    "llm"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vscode-acp.startChat",
+        "title": "OpenCode: Start Chat"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencode",
+          "title": "OpenCode",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencode": [
+        {
+          "type": "webview",
+          "id": "vscode-acp.chatView",
+          "name": "Chat"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild ./src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
+    "watch": "npm run compile -- --watch",
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "devDependencies": {
+    "@types/marked": "^5.0.2",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.74.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.19.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.12.0",
+    "marked": "^17.0.1",
+    "vscode-jsonrpc": "^8.2.0"
+  }
+}

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="url(#bg)"/>
+  <!-- Terminal/code bracket left -->
+  <path d="M 30 45 L 45 64 L 30 83" 
+        stroke="white" 
+        stroke-width="6" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" 
+        fill="none"/>
+  <!-- Terminal/code bracket right -->
+  <path d="M 98 45 L 83 64 L 98 83" 
+        stroke="white" 
+        stroke-width="6" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" 
+        fill="none"/>
+  <!-- AI sparkle/dot in center -->
+  <circle cx="64" cy="64" r="8" fill="white"/>
+  <!-- Small sparkle dots -->
+  <circle cx="64" cy="48" r="3" fill="white" opacity="0.7"/>
+  <circle cx="64" cy="80" r="3" fill="white" opacity="0.7"/>
+</svg>
