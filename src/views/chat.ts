@@ -609,7 +609,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     function selectCommand(index) {
-      const commands = getFilteredCommands(inputEl.value);
+      const firstWord = inputEl.value.split(/\\s/)[0];
+      const commands = getFilteredCommands(firstWord);
       if (index >= 0 && index < commands.length) {
         const cmd = commands[index];
         inputEl.value = '/' + cmd.name + ' ';
