@@ -3,6 +3,7 @@
 > AI coding agents in VS Code via the Agent Client Protocol (ACP)
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/omercnet.vscode-acp?style=flat-square&label=VS%20Code%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=omercnet.vscode-acp)
+[![Open VSX](https://img.shields.io/open-vsx/v/omercnet/vscode-acp?style=flat-square&label=Open%20VSX)](https://open-vsx.org/extension/omercnet/vscode-acp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
 
 Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your editor. No context switching, no copy-pasting code.

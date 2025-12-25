@@ -1,4 +1,4 @@
-import { ChildProcess, spawn } from "child_process";
+import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 import {
   ClientSideConnection,
@@ -28,6 +28,19 @@ export type ACPConnectionState =
 
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: SessionNotification) => void;
+type StderrCallback = (data: string) => void;
+
+export type SpawnFunction = (
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+) => ChildProcess;
+
+export interface ACPClientOptions {
+  agentConfig?: AgentConfig;
+  spawn?: SpawnFunction;
+  skipAvailabilityCheck?: boolean;
+}
 
 export class ACPClient {
   private process: ChildProcess | null = null;
@@ -35,12 +48,23 @@ export class ACPClient {
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
-  private onStateChange: StateChangeCallback | null = null;
-  private onSessionUpdate: SessionUpdateCallback | null = null;
+  private stateChangeListeners: Set<StateChangeCallback> = new Set();
+  private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
+  private stderrListeners: Set<StderrCallback> = new Set();
   private agentConfig: AgentConfig;
+  private spawnFn: SpawnFunction;
+  private skipAvailabilityCheck: boolean;
 
-  constructor(agentConfig?: AgentConfig) {
-    this.agentConfig = agentConfig ?? getDefaultAgent();
+  constructor(options?: ACPClientOptions | AgentConfig) {
+    if (options && "id" in options) {
+      this.agentConfig = options;
+      this.spawnFn = nodeSpawn as SpawnFunction;
+      this.skipAvailabilityCheck = false;
+    } else {
+      this.agentConfig = options?.agentConfig ?? getDefaultAgent();
+      this.spawnFn = options?.spawn ?? (nodeSpawn as SpawnFunction);
+      this.skipAvailabilityCheck = options?.skipAvailabilityCheck ?? false;
+    }
   }
 
   setAgent(config: AgentConfig): void {
@@ -54,12 +78,19 @@ export class ACPClient {
     return this.agentConfig.id;
   }
 
-  setOnStateChange(callback: StateChangeCallback): void {
-    this.onStateChange = callback;
+  setOnStateChange(callback: StateChangeCallback): () => void {
+    this.stateChangeListeners.add(callback);
+    return () => this.stateChangeListeners.delete(callback);
   }
 
-  setOnSessionUpdate(callback: SessionUpdateCallback): void {
-    this.onSessionUpdate = callback;
+  setOnSessionUpdate(callback: SessionUpdateCallback): () => void {
+    this.sessionUpdateListeners.add(callback);
+    return () => this.sessionUpdateListeners.delete(callback);
+  }
+
+  setOnStderr(callback: StderrCallback): () => void {
+    this.stderrListeners.add(callback);
+    return () => this.stderrListeners.delete(callback);
   }
 
   isConnected(): boolean {
@@ -75,7 +106,7 @@ export class ACPClient {
       throw new Error("Already connected or connecting");
     }
 
-    if (!isAgentAvailable(this.agentConfig.id)) {
+    if (!this.skipAvailabilityCheck && !isAgentAvailable(this.agentConfig.id)) {
       throw new Error(
         `Agent "${this.agentConfig.name}" is not installed. ` +
           `Please install "${this.agentConfig.command}" and try again.`,
@@ -85,13 +116,19 @@ export class ACPClient {
     this.setState("connecting");
 
     try {
-      this.process = spawn(this.agentConfig.command, this.agentConfig.args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
-      });
+      this.process = this.spawnFn(
+        this.agentConfig.command,
+        this.agentConfig.args,
+        {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: { ...process.env },
+        },
+      );
 
       this.process.stderr?.on("data", (data: Buffer) => {
-        console.error("[ACP stderr]", data.toString());
+        const text = data.toString();
+        console.error("[ACP stderr]", text);
+        this.stderrListeners.forEach((cb) => cb(text));
       });
 
       this.process.on("error", (error) => {
@@ -119,7 +156,6 @@ export class ACPClient {
             "[ACP] Permission request:",
             JSON.stringify(params, null, 2),
           );
-          // Auto-approve by selecting the first "allow" option
           const allowOption = params.options.find(
             (opt) => opt.kind === "allow_once" || opt.kind === "allow_always",
           );
@@ -136,8 +172,12 @@ export class ACPClient {
           return { outcome: { outcome: "cancelled" } };
         },
         sessionUpdate: async (params: SessionNotification): Promise<void> => {
-          console.log("[ACP] Session update:", JSON.stringify(params, null, 2));
-          this.onSessionUpdate?.(params);
+          const updateType = params.update?.sessionUpdate ?? "unknown";
+          console.log(`[ACP] Session update: ${updateType}`);
+          if (updateType === "agent_message_chunk") {
+            console.log("[ACP] CHUNK:", JSON.stringify(params.update));
+          }
+          this.sessionUpdateListeners.forEach((cb) => cb(params));
         },
       };
 
@@ -248,7 +288,7 @@ export class ACPClient {
   private setState(state: ACPConnectionState): void {
     if (this.state !== state) {
       this.state = state;
-      this.onStateChange?.(state);
+      this.stateChangeListeners.forEach((cb) => cb(state));
     }
   }
 }
