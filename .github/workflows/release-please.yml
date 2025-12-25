@@ -52,6 +52,7 @@ jobs:
           files: "*.vsix"
 
       - name: Publish to VS Code Marketplace
+        if: false # Disabled for now
         run: npx vsce publish --no-dependencies
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
