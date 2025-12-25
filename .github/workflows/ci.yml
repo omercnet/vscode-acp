@@ -40,11 +40,12 @@ jobs:
           path: coverage/
 
       - name: Coverage Report
-        uses: romeovs/lcov-reporter-action@dec824dedfa2d92733a4f3a17d63dc86a9ec3ee7 # v0.4.0
+        uses: zgosalvez/github-actions-report-lcov@a546f89c1e3291d25a533ba90e238718397039f1 # v4
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         with:
-          lcov-file: coverage/lcov.info
+          coverage-files: coverage/lcov.info
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          update-comment: true
 
       - name: Package extension
         run: npx vsce package --no-dependencies
