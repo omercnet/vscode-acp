@@ -134,9 +134,9 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/marked": "^5.0.2",
+    "@types/marked": "^6.0.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "18.x",
+    "@types/node": "24.x",
     "@types/vscode": "^1.74.0",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.5.2",
