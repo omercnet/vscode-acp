@@ -6,7 +6,7 @@ let acpClient: ACPClient | undefined;
 let chatProvider: ChatViewProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log("OpenCode ACP extension is now active");
+  console.log("VSCode ACP extension is now active");
 
   acpClient = new ACPClient();
   chatProvider = new ChatViewProvider(
@@ -34,11 +34,9 @@ export function activate(context: vscode.ExtensionContext) {
       if (!acpClient?.isConnected()) {
         try {
           await acpClient?.connect();
-          vscode.window.showInformationMessage("OpenCode ACP connected");
+          vscode.window.showInformationMessage("VSCode ACP connected");
         } catch (error) {
-          vscode.window.showErrorMessage(
-            `Failed to connect to OpenCode: ${error}`,
-          );
+          vscode.window.showErrorMessage(`Failed to connect: ${error}`);
         }
       }
     }),
@@ -52,6 +50,6 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  console.log("OpenCode ACP extension deactivating");
+  console.log("VSCode ACP extension deactivating");
   acpClient?.dispose();
 }

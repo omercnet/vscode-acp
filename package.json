@@ -1,19 +1,19 @@
 {
   "name": "vscode-acp",
-  "displayName": "OpenCode ACP",
+  "displayName": "VSCode ACP",
   "description": "AI coding agents in VS Code via Agent Client Protocol (ACP). Chat with Claude, OpenCode, and other ACP-compatible agents directly in your editor.",
   "version": "0.1.0",
-  "publisher": "opencode",
+  "publisher": "omercnet",
   "license": "MIT",
   "icon": "assets/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anthropics/vscode-acp"
+    "url": "https://github.com/omercnet/vscode-acp"
   },
   "bugs": {
-    "url": "https://github.com/anthropics/vscode-acp/issues"
+    "url": "https://github.com/omercnet/vscode-acp/issues"
   },
-  "homepage": "https://github.com/anthropics/vscode-acp#readme",
+  "homepage": "https://github.com/omercnet/vscode-acp#readme",
   "engines": {
     "vscode": "^1.74.0"
   },
@@ -40,20 +40,20 @@
     "commands": [
       {
         "command": "vscode-acp.startChat",
-        "title": "OpenCode: Start Chat"
+        "title": "VSCode ACP: Start Chat"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "opencode",
-          "title": "OpenCode",
+          "id": "vscode-acp",
+          "title": "VSCode ACP",
           "icon": "assets/icon.svg"
         }
       ]
     },
     "views": {
-      "opencode": [
+      "vscode-acp": [
         {
           "type": "webview",
           "id": "vscode-acp.chatView",

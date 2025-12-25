@@ -267,7 +267,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <title>OpenCode Chat</title>
+  <title>VSCode ACP Chat</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -530,7 +530,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   </div>
   <div id="messages"></div>
   <div id="input-container">
-    <textarea id="input" rows="1" placeholder="Ask OpenCode..."></textarea>
+    <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
     <button id="send">Send</button>
   </div>
   <div id="options-bar">
