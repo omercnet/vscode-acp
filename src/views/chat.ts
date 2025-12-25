@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { marked } from "marked";
-import { ACPClient, type SessionMetadata } from "../acp/client";
+import { ACPClient } from "../acp/client";
 import {
   getAgent,
   getAgentsWithStatus,
@@ -22,7 +22,10 @@ interface WebviewMessage {
     | "selectAgent"
     | "selectMode"
     | "selectModel"
-    | "connect";
+    | "connect"
+    | "newChat"
+    | "clearChat"
+    | "copyMessage";
   text?: string;
   agentId?: string;
   modeId?: string;
@@ -30,6 +33,8 @@ interface WebviewMessage {
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
+  public static readonly viewType = "vscode-acp.chatView";
+
   private view?: vscode.WebviewView;
   private hasSession = false;
   private globalState: vscode.Memento;
@@ -58,6 +63,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnSessionUpdate((update) => {
       this.handleSessionUpdate(update);
+    });
+
+    this.acpClient.setOnStderr((text) => {
+      this.handleStderr(text);
     });
   }
 
@@ -100,6 +109,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "connect":
           await this.handleConnect();
           break;
+        case "newChat":
+          await this.handleNewChat();
+          break;
+        case "clearChat":
+          this.handleClearChat();
+          break;
+        case "copyMessage":
+          if (message.text) {
+            await vscode.env.clipboard.writeText(message.text);
+            vscode.window.showInformationMessage("Message copied to clipboard");
+          }
+          break;
         case "ready":
           this.postMessage({
             type: "connectionState",
@@ -121,15 +142,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  public newChat(): void {
+    this.postMessage({ type: "triggerNewChat" });
+  }
+
+  public clearChat(): void {
+    this.postMessage({ type: "triggerClearChat" });
+  }
+
+  private stderrBuffer = "";
+
+  private handleStderr(text: string): void {
+    this.stderrBuffer += text;
+
+    const errorMatch = this.stderrBuffer.match(
+      /(\w+Error):\s*(\w+)?\s*\n?\s*data:\s*\{([^}]+)\}/,
+    );
+    if (errorMatch) {
+      const errorType = errorMatch[1];
+      const errorData = errorMatch[3];
+      const providerMatch = errorData.match(/providerID:\s*"([^"]+)"/);
+      const modelMatch = errorData.match(/modelID:\s*"([^"]+)"/);
+
+      let message = `Agent error: ${errorType}`;
+      if (providerMatch && modelMatch) {
+        message = `Model not found: ${providerMatch[1]}/${modelMatch[1]}`;
+      }
+
+      this.postMessage({ type: "agentError", text: message });
+      this.stderrBuffer = "";
+    }
+
+    if (this.stderrBuffer.length > 10000) {
+      this.stderrBuffer = this.stderrBuffer.slice(-5000);
+    }
+  }
+
   private handleSessionUpdate(notification: SessionNotification): void {
     const update = notification.update;
-    console.log(
-      "[Chat] Handling update type:",
-      update.sessionUpdate,
-      JSON.stringify(update, null, 2),
-    );
+    console.log("[Chat] Session update received:", update.sessionUpdate);
 
     if (update.sessionUpdate === "agent_message_chunk") {
+      console.log("[Chat] Chunk content:", JSON.stringify(update.content));
       if (update.content.type === "text") {
         this.streamingText += update.content.text;
         this.postMessage({ type: "streamChunk", text: update.content.text });
@@ -174,6 +228,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       this.streamingText = "";
+      this.stderrBuffer = "";
       this.postMessage({ type: "streamStart" });
       console.log("[Chat] Sending message to ACP...");
       const response = await this.acpClient.sendMessage(text);
@@ -181,12 +236,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         "[Chat] Prompt response received:",
         JSON.stringify(response, null, 2),
       );
-      const renderedHtml = marked.parse(this.streamingText) as string;
-      this.postMessage({
-        type: "streamEnd",
-        stopReason: response.stopReason,
-        html: renderedHtml,
-      });
+
+      if (this.streamingText.length === 0 && this.stderrBuffer.length > 0) {
+        this.postMessage({
+          type: "error",
+          text: "Agent returned no response. Check the agent logs for errors.",
+        });
+        this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
+      } else {
+        const renderedHtml = marked.parse(this.streamingText) as string;
+        this.postMessage({
+          type: "streamEnd",
+          stopReason: response.stopReason,
+          html: renderedHtml,
+        });
+      }
       this.streamingText = "";
     } catch (error) {
       this.postMessage({
@@ -245,6 +309,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleNewChat(): Promise<void> {
+    this.hasSession = false;
+    this.streamingText = "";
+    this.postMessage({ type: "chatCleared" });
+    this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+
+    try {
+      if (this.acpClient.isConnected()) {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+        await this.acpClient.newSession(workingDir);
+        this.hasSession = true;
+        this.sendSessionMetadata();
+      }
+    } catch (error) {
+      console.error("[Chat] Failed to create new session:", error);
+    }
+  }
+
+  private handleClearChat(): void {
+    this.postMessage({ type: "chatCleared" });
+  }
+
   private sendSessionMetadata(): void {
     const metadata = this.acpClient.getSessionMetadata();
     this.postMessage({
@@ -261,282 +348,67 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private getHtmlContent(webview: vscode.Webview): string {
     const nonce = this.getNonce();
 
+    const styleResetUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "media", "reset.css"),
+    );
+    const styleVSCodeUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "media", "vscode.css"),
+    );
+    const styleMainUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "media", "main.css"),
+    );
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+  <link href="${styleResetUri}" rel="stylesheet">
+  <link href="${styleVSCodeUri}" rel="stylesheet">
+  <link href="${styleMainUri}" rel="stylesheet">
   <title>VSCode ACP Chat</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
-      color: var(--vscode-foreground);
-      background: var(--vscode-sideBar-background);
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-    }
-    #top-bar {
-      padding: 6px 10px;
-      font-size: 11px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .status-indicator {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--vscode-errorForeground);
-    }
-    .status-dot.connected { background: var(--vscode-testing-iconPassed); }
-    .status-dot.connecting { background: var(--vscode-editorWarning-foreground); }
-    .inline-select {
-      padding: 2px 6px;
-      background: var(--vscode-dropdown-background);
-      color: var(--vscode-dropdown-foreground);
-      border: 1px solid var(--vscode-dropdown-border);
-      border-radius: 3px;
-      font-size: 11px;
-      cursor: pointer;
-      max-width: 140px;
-      text-overflow: ellipsis;
-    }
-    .inline-select:focus { outline: 1px solid var(--vscode-focusBorder); }
-    .inline-select:disabled { opacity: 0.5; cursor: default; }
-    #connect-btn {
-      padding: 2px 10px;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      border: none;
-      border-radius: 3px;
-      cursor: pointer;
-      font-size: 11px;
-    }
-    #connect-btn:hover { background: var(--vscode-button-hoverBackground); }
-    .spacer { flex: 1; }
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .message {
-      padding: 10px 14px;
-      border-radius: 8px;
-      max-width: 90%;
-      word-wrap: break-word;
-      white-space: pre-wrap;
-    }
-    .message.user {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      align-self: flex-end;
-    }
-    .message.assistant {
-      background: var(--vscode-editor-background);
-      border: 1px solid var(--vscode-panel-border);
-      align-self: flex-start;
-    }
-    .message.error {
-      background: var(--vscode-inputValidation-errorBackground);
-      border: 1px solid var(--vscode-inputValidation-errorBorder);
-      color: var(--vscode-errorForeground);
-      align-self: center;
-    }
-    .message.tool {
-      background: var(--vscode-textBlockQuote-background);
-      border-left: 3px solid var(--vscode-textLink-foreground);
-      font-size: 0.9em;
-      align-self: flex-start;
-    }
-    .message.assistant code {
-      background: var(--vscode-textCodeBlock-background);
-      padding: 1px 4px;
-      border-radius: 3px;
-      font-family: var(--vscode-editor-font-family), monospace;
-      font-size: 0.9em;
-    }
-    .message.assistant pre {
-      background: var(--vscode-textCodeBlock-background);
-      padding: 10px;
-      border-radius: 4px;
-      overflow-x: auto;
-      margin: 8px 0;
-    }
-    .message.assistant pre code {
-      background: none;
-      padding: 0;
-      font-size: 0.85em;
-      line-height: 1.4;
-    }
-    .message.assistant h1, .message.assistant h2, .message.assistant h3 {
-      margin: 12px 0 6px 0;
-      font-weight: 600;
-    }
-    .message.assistant h1 { font-size: 1.3em; }
-    .message.assistant h2 { font-size: 1.15em; }
-    .message.assistant h3 { font-size: 1.05em; }
-    .message.assistant p { margin: 6px 0; }
-    .message.assistant ul, .message.assistant ol {
-      margin: 6px 0;
-      padding-left: 20px;
-    }
-    .message.assistant li { margin: 3px 0; }
-    .message.assistant blockquote {
-      border-left: 3px solid var(--vscode-textBlockQuote-border);
-      margin: 8px 0;
-      padding-left: 10px;
-      color: var(--vscode-textBlockQuote-foreground);
-    }
-    .message.assistant a {
-      color: var(--vscode-textLink-foreground);
-    }
-    .message.assistant hr {
-      border: none;
-      border-top: 1px solid var(--vscode-panel-border);
-      margin: 12px 0;
-    }
-    #input-container {
-      padding: 8px 12px;
-      border-top: 1px solid var(--vscode-panel-border);
-      display: flex;
-      gap: 8px;
-    }
-    #input {
-      flex: 1;
-      padding: 8px 12px;
-      border: 1px solid var(--vscode-input-border);
-      background: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
-      border-radius: 4px;
-      font-family: inherit;
-      font-size: inherit;
-      resize: none;
-    }
-    #input:focus { outline: 1px solid var(--vscode-focusBorder); }
-    #send {
-      padding: 8px 16px;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    #send:hover { background: var(--vscode-button-hoverBackground); }
-    #send:disabled { opacity: 0.5; cursor: not-allowed; }
-    #options-bar {
-      padding: 6px 10px;
-      font-size: 11px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .thinking { display: inline-block; }
-    .thinking::after {
-      content: '';
-      animation: dots 1.5s steps(4, end) infinite;
-    }
-    @keyframes dots {
-      0%, 20% { content: ''; }
-      40% { content: '.'; }
-      60% { content: '..'; }
-      80%, 100% { content: '...'; }
-    }
-    .tool-details {
-      margin-top: 6px;
-      font-size: 11px;
-      color: var(--vscode-descriptionForeground);
-    }
-    .tool-details summary {
-      cursor: pointer;
-      user-select: none;
-      list-style: none;
-    }
-    .tool-details summary::-webkit-details-marker { display: none; }
-    .tool-details summary::before {
-      content: '▶';
-      display: inline-block;
-      margin-right: 4px;
-      font-size: 9px;
-      transition: transform 0.15s;
-    }
-    .tool-details[open] summary::before { transform: rotate(90deg); }
-    .tool-list {
-      margin: 4px 0 0 14px;
-      padding: 0;
-      list-style: none;
-    }
-    .tool-list li {
-      padding: 2px 0;
-      font-family: var(--vscode-editor-font-family), monospace;
-    }
-    .tool-status {
-      display: inline-block;
-      width: 14px;
-      text-align: center;
-      margin-right: 4px;
-    }
-    .tool-item {
-      margin: 2px 0;
-    }
-    .tool-item summary {
-      cursor: pointer;
-      list-style: none;
-    }
-    .tool-item summary::-webkit-details-marker { display: none; }
-    .tool-input {
-      font-family: var(--vscode-editor-font-family), monospace;
-      color: var(--vscode-terminal-ansiGreen);
-      margin-bottom: 4px;
-      font-size: 11px;
-    }
-    .tool-output {
-      margin: 4px 0 0 18px;
-      padding: 6px 8px;
-      background: var(--vscode-textCodeBlock-background);
-      border-radius: 3px;
-      font-size: 10px;
-      line-height: 1.3;
-      overflow-x: auto;
-      max-height: 150px;
-      overflow-y: auto;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-  </style>
 </head>
 <body>
-  <div id="top-bar">
-    <span class="status-indicator">
-      <span class="status-dot" id="status-dot"></span>
+  <div id="top-bar" role="toolbar" aria-label="Chat controls">
+    <span class="status-indicator" role="status" aria-live="polite">
+      <span class="status-dot" id="status-dot" aria-hidden="true"></span>
       <span id="status-text">Disconnected</span>
     </span>
-    <button id="connect-btn">Connect</button>
-    <select id="agent-selector" class="inline-select"></select>
+    <button id="connect-btn" aria-label="Connect to agent">Connect</button>
+    <select id="agent-selector" class="inline-select" aria-label="Select AI agent"></select>
   </div>
-  <div id="messages"></div>
+  
+  <div id="welcome-view" class="welcome-view" role="main" aria-label="Welcome">
+    <h3>Welcome to VSCode ACP</h3>
+    <p>Chat with AI coding agents directly in VS Code.</p>
+    <button class="welcome-btn" id="welcome-connect-btn">Connect to Agent</button>
+    <p class="help-links">
+      <a href="https://github.com/sst/opencode" target="_blank" rel="noopener">Install OpenCode</a>
+      <span aria-hidden="true">·</span>
+      <a href="https://claude.ai/code" target="_blank" rel="noopener">Install Claude Code</a>
+    </p>
+  </div>
+  
+  <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" tabindex="0"></div>
+  
   <div id="input-container">
-    <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
-    <button id="send">Send</button>
+    <textarea 
+      id="input" 
+      rows="1" 
+      placeholder="Ask your agent..." 
+      aria-label="Message input"
+      aria-describedby="input-hint"
+    ></textarea>
+    <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
   </div>
-  <div id="options-bar">
-    <select id="mode-selector" class="inline-select" style="display: none;"></select>
-    <select id="model-selector" class="inline-select" style="display: none;"></select>
+  <span id="input-hint" class="sr-only">Press Enter to send, Shift+Enter for new line, Escape to clear</span>
+  
+  <div id="options-bar" role="toolbar" aria-label="Session options">
+    <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
+    <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
   </div>
+  
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const messagesEl = document.getElementById('messages');
@@ -546,13 +418,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const statusText = document.getElementById('status-text');
     const agentSelector = document.getElementById('agent-selector');
     const connectBtn = document.getElementById('connect-btn');
+    const welcomeConnectBtn = document.getElementById('welcome-connect-btn');
     const modeSelector = document.getElementById('mode-selector');
     const modelSelector = document.getElementById('model-selector');
+    const welcomeView = document.getElementById('welcome-view');
 
     let currentAssistantMessage = null;
     let currentAssistantText = '';
     let thinkingEl = null;
     let tools = {};
+    let isConnected = false;
+    let messageTexts = new Map();
 
     function updateSelectLabel(select, prefix) {
       Array.from(select.options).forEach(opt => {
@@ -564,13 +440,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    function addMessage(text, type) {
+    function addMessage(text, type, id) {
       const div = document.createElement('div');
       div.className = 'message ' + type;
+      div.setAttribute('role', 'article');
+      div.setAttribute('tabindex', '0');
+      
+      const label = type === 'user' ? 'Your message' : 
+                    type === 'assistant' ? 'Agent response' : 
+                    type === 'error' ? 'Error message' : 'System message';
+      div.setAttribute('aria-label', label);
+      
+      if (type === 'assistant' || type === 'user') {
+        div.addEventListener('contextmenu', (e) => {
+          e.preventDefault();
+          const msgText = messageTexts.get(div) || div.textContent;
+          vscode.postMessage({ type: 'copyMessage', text: msgText });
+        });
+      }
+      
       div.textContent = text;
+      if (id) messageTexts.set(div, text);
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
+      
+      announceToScreenReader(label + ': ' + text.substring(0, 100));
       return div;
+    }
+
+    function announceToScreenReader(message) {
+      const announcement = document.createElement('div');
+      announcement.setAttribute('role', 'status');
+      announcement.setAttribute('aria-live', 'polite');
+      announcement.className = 'sr-only';
+      announcement.textContent = message;
+      document.body.appendChild(announcement);
+      setTimeout(() => announcement.remove(), 1000);
     }
 
     function escapeHtml(str) {
@@ -583,6 +488,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const toolItems = toolIds.map(id => {
         const tool = tools[id];
         const statusIcon = tool.status === 'completed' ? '✓' : tool.status === 'failed' ? '✗' : '⋯';
+        const statusClass = tool.status === 'running' ? 'running' : '';
         let detailsContent = '';
         if (tool.input) {
           detailsContent += '<div class="tool-input"><strong>$</strong> ' + escapeHtml(tool.input) + '</div>';
@@ -592,20 +498,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           detailsContent += '<pre class="tool-output">' + escapeHtml(truncated) + '</pre>';
         }
         if (detailsContent) {
-          return '<li><details class="tool-item"><summary><span class="tool-status">' + statusIcon + '</span> ' + escapeHtml(tool.name) + '</summary>' + detailsContent + '</details></li>';
+          return '<li><details class="tool-item"><summary><span class="tool-status ' + statusClass + '" aria-label="' + tool.status + '">' + statusIcon + '</span> ' + escapeHtml(tool.name) + '</summary>' + detailsContent + '</details></li>';
         }
-        return '<li><span class="tool-status">' + statusIcon + '</span> ' + escapeHtml(tool.name) + '</li>';
+        return '<li><span class="tool-status ' + statusClass + '" aria-label="' + tool.status + '">' + statusIcon + '</span> ' + escapeHtml(tool.name) + '</li>';
       }).join('');
-      return '<details class="tool-details" open><summary>' + toolIds.length + ' tool' + (toolIds.length > 1 ? 's' : '') + '</summary><ul class="tool-list">' + toolItems + '</ul></details>';
+      return '<details class="tool-details" open><summary aria-label="' + toolIds.length + ' tools used">' + toolIds.length + ' tool' + (toolIds.length > 1 ? 's' : '') + '</summary><ul class="tool-list" role="list">' + toolItems + '</ul></details>';
     }
 
     function showThinking() {
       if (!thinkingEl) {
         thinkingEl = document.createElement('div');
         thinkingEl.className = 'message assistant';
+        thinkingEl.setAttribute('role', 'status');
+        thinkingEl.setAttribute('aria-label', 'Agent is thinking');
         messagesEl.appendChild(thinkingEl);
       }
-      let html = '<span class="thinking">Thinking</span>';
+      let html = '<span class="thinking" aria-label="Processing">Thinking</span>';
       html += getToolsHtml();
       thinkingEl.innerHTML = html;
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -627,6 +535,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         error: 'Error'
       };
       statusText.textContent = labels[state] || state;
+      isConnected = state === 'connected';
+      updateViewState();
+    }
+
+    function updateViewState() {
+      const hasMessages = messagesEl.children.length > 0;
+      welcomeView.style.display = (!isConnected && !hasMessages) ? 'flex' : 'none';
+      messagesEl.style.display = (isConnected || hasMessages) ? 'flex' : 'none';
     }
 
     function send() {
@@ -638,16 +554,68 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       sendBtn.disabled = true;
     }
 
+    function clearInput() {
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      inputEl.focus();
+    }
+
     sendBtn.addEventListener('click', send);
+    
     inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        clearInput();
       }
     });
+    
     inputEl.addEventListener('input', () => {
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+
+    messagesEl.addEventListener('keydown', (e) => {
+      const messages = Array.from(messagesEl.querySelectorAll('.message'));
+      const currentIndex = messages.indexOf(document.activeElement);
+      
+      if (e.key === 'ArrowDown' && currentIndex < messages.length - 1) {
+        e.preventDefault();
+        messages[currentIndex + 1].focus();
+      } else if (e.key === 'ArrowUp' && currentIndex > 0) {
+        e.preventDefault();
+        messages[currentIndex - 1].focus();
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        messages[0]?.focus();
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        messages[messages.length - 1]?.focus();
+      }
+    });
+
+    connectBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'connect' });
+    });
+
+    welcomeConnectBtn.addEventListener('click', () => {
+      vscode.postMessage({ type: 'connect' });
+    });
+
+    agentSelector.addEventListener('change', () => {
+      vscode.postMessage({ type: 'selectAgent', agentId: agentSelector.value });
+    });
+
+    modeSelector.addEventListener('change', () => {
+      updateSelectLabel(modeSelector, 'Mode');
+      vscode.postMessage({ type: 'selectMode', modeId: modeSelector.value });
+    });
+
+    modelSelector.addEventListener('change', () => {
+      updateSelectLabel(modelSelector, 'Model');
+      vscode.postMessage({ type: 'selectModel', modelId: modelSelector.value });
     });
 
     window.addEventListener('message', (e) => {
@@ -655,7 +623,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       switch (msg.type) {
         case 'userMessage':
           addMessage(msg.text, 'user');
+          messageTexts.set(messagesEl.lastChild, msg.text);
           showThinking();
+          updateViewState();
           break;
         case 'streamStart':
           currentAssistantText = '';
@@ -675,11 +645,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             let html = msg.html || '';
             html += getToolsHtml();
             currentAssistantMessage.innerHTML = html;
+            messageTexts.set(currentAssistantMessage, currentAssistantText);
           }
           currentAssistantMessage = null;
           currentAssistantText = '';
           tools = {};
           sendBtn.disabled = false;
+          inputEl.focus();
           break;
         case 'toolCallStart':
           tools[msg.toolCallId] = { name: msg.name, input: null, output: null, status: 'running' };
@@ -700,6 +672,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           hideThinking();
           addMessage(msg.text, 'error');
           sendBtn.disabled = false;
+          inputEl.focus();
+          break;
+        case 'agentError':
+          addMessage(msg.text, 'error');
           break;
         case 'connectionState':
           updateStatus(msg.state);
@@ -719,10 +695,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           break;
         case 'agentChanged':
+        case 'chatCleared':
           messagesEl.innerHTML = '';
           currentAssistantMessage = null;
+          messageTexts.clear();
           modeSelector.style.display = 'none';
           modelSelector.style.display = 'none';
+          updateViewState();
+          break;
+        case 'triggerNewChat':
+          vscode.postMessage({ type: 'newChat' });
+          break;
+        case 'triggerClearChat':
+          vscode.postMessage({ type: 'clearChat' });
           break;
         case 'sessionMetadata':
           const hasModes = msg.modes && msg.modes.availableModes && msg.modes.availableModes.length > 0;
@@ -769,24 +754,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    agentSelector.addEventListener('change', () => {
-      vscode.postMessage({ type: 'selectAgent', agentId: agentSelector.value });
-    });
-
-    connectBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'connect' });
-    });
-
-    modeSelector.addEventListener('change', () => {
-      updateSelectLabel(modeSelector, 'Mode');
-      vscode.postMessage({ type: 'selectMode', modeId: modeSelector.value });
-    });
-
-    modelSelector.addEventListener('change', () => {
-      updateSelectLabel(modelSelector, 'Model');
-      vscode.postMessage({ type: 'selectModel', modelId: modelSelector.value });
-    });
-
+    updateViewState();
     vscode.postMessage({ type: 'ready' });
   </script>
 </body>

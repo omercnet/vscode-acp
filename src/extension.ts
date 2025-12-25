@@ -4,9 +4,18 @@ import { ChatViewProvider } from "./views/chat";
 
 let acpClient: ACPClient | undefined;
 let chatProvider: ChatViewProvider | undefined;
+let statusBarItem: vscode.StatusBarItem | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   console.log("VSCode ACP extension is now active");
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.openDevTools", () => {
+      vscode.commands.executeCommand(
+        "workbench.action.webview.openDeveloperTools",
+      );
+    }),
+  );
 
   acpClient = new ACPClient();
   chatProvider = new ChatViewProvider(
@@ -15,9 +24,23 @@ export function activate(context: vscode.ExtensionContext) {
     context.globalState,
   );
 
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Left,
+    100,
+  );
+  statusBarItem.command = "vscode-acp.startChat";
+  statusBarItem.tooltip = "VSCode ACP - Click to open chat";
+  updateStatusBar("disconnected");
+  statusBarItem.show();
+  context.subscriptions.push(statusBarItem);
+
+  acpClient.setOnStateChange((state) => {
+    updateStatusBar(state);
+  });
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
-      "vscode-acp.chatView",
+      ChatViewProvider.viewType,
       chatProvider,
       {
         webviewOptions: {
@@ -42,11 +65,58 @@ export function activate(context: vscode.ExtensionContext) {
     }),
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.newChat", () => {
+      chatProvider?.newChat();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.clearChat", () => {
+      chatProvider?.clearChat();
+    }),
+  );
+
   context.subscriptions.push({
     dispose: () => {
       acpClient?.dispose();
     },
   });
+}
+
+function updateStatusBar(
+  state: "disconnected" | "connecting" | "connected" | "error",
+): void {
+  if (!statusBarItem) return;
+
+  const icons: Record<string, string> = {
+    disconnected: "$(debug-disconnect)",
+    connecting: "$(sync~spin)",
+    connected: "$(check)",
+    error: "$(error)",
+  };
+
+  const labels: Record<string, string> = {
+    disconnected: "ACP: Disconnected",
+    connecting: "ACP: Connecting...",
+    connected: "ACP: Connected",
+    error: "ACP: Error",
+  };
+
+  statusBarItem.text = `${icons[state] || icons.disconnected} ACP`;
+  statusBarItem.tooltip = labels[state] || labels.disconnected;
+
+  if (state === "error") {
+    statusBarItem.backgroundColor = new vscode.ThemeColor(
+      "statusBarItem.errorBackground",
+    );
+  } else if (state === "connecting") {
+    statusBarItem.backgroundColor = new vscode.ThemeColor(
+      "statusBarItem.warningBackground",
+    );
+  } else {
+    statusBarItem.backgroundColor = undefined;
+  }
 }
 
 export function deactivate() {
