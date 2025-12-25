@@ -24,13 +24,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests (Linux)
-        run: xvfb-run -a npm test
+      - name: Run tests with coverage (Linux)
+        run: xvfb-run -a npm run coverage
         if: runner.os == 'Linux'
 
-      - name: Run tests (non-Linux)
-        run: npm test
+      - name: Run tests with coverage (non-Linux)
+        run: npm run coverage
         if: runner.os != 'Linux'
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: runner.os == 'Linux'
+        with:
+          name: coverage-report
+          path: coverage/
+
+      - name: Coverage Report
+        uses: romeovs/lcov-reporter-action@dec824dedfa2d92733a4f3a17d63dc86a9ec3ee7 # v0.4.0
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        with:
+          lcov-file: coverage/lcov.info
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Package extension
         run: npx vsce package --no-dependencies
