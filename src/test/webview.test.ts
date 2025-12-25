@@ -1,7 +1,21 @@
 import * as assert from "assert";
 import { JSDOM, DOMWindow } from "jsdom";
+import {
+  escapeHtml,
+  getToolsHtml,
+  updateSelectLabel,
+  getElements,
+  WebviewController,
+  initWebview,
+  type VsCodeApi,
+  type Tool,
+  type WebviewElements,
+} from "../views/webview/main";
 
-function createMockVsCodeApi() {
+function createMockVsCodeApi(): VsCodeApi & {
+  _getMessages: () => unknown[];
+  _clearMessages: () => void;
+} {
   let state: Record<string, unknown> = {};
   const messages: unknown[] = [];
 
@@ -58,333 +72,556 @@ function createWebviewHTML(): string {
 }
 
 suite("Webview", () => {
-  let dom: JSDOM;
-  let document: Document;
-  let window: DOMWindow;
-  let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
-
-  setup(() => {
-    dom = new JSDOM(createWebviewHTML(), {
-      runScripts: "dangerously",
-      url: "https://localhost",
-    });
-    document = dom.window.document;
-    window = dom.window;
-    mockVsCode = createMockVsCodeApi();
-
-    (window as unknown as Record<string, unknown>).acquireVsCodeApi = () =>
-      mockVsCode;
-  });
-
-  teardown(() => {
-    dom.window.close();
-  });
-
-  suite("DOM elements", () => {
-    test("should have all required elements", () => {
-      assert.ok(document.getElementById("messages"));
-      assert.ok(document.getElementById("input"));
-      assert.ok(document.getElementById("send"));
-      assert.ok(document.getElementById("status-dot"));
-      assert.ok(document.getElementById("status-text"));
-      assert.ok(document.getElementById("agent-selector"));
-      assert.ok(document.getElementById("connect-btn"));
-      assert.ok(document.getElementById("welcome-connect-btn"));
-      assert.ok(document.getElementById("mode-selector"));
-      assert.ok(document.getElementById("model-selector"));
-      assert.ok(document.getElementById("welcome-view"));
-    });
-  });
-
-  suite("VS Code API mock", () => {
-    test("should capture posted messages", () => {
-      mockVsCode.postMessage({ type: "test", data: "hello" });
-      const messages = mockVsCode._getMessages();
-
-      assert.strictEqual(messages.length, 1);
-      assert.deepStrictEqual(messages[0], { type: "test", data: "hello" });
+  suite("escapeHtml", () => {
+    test("escapes ampersands", () => {
+      assert.strictEqual(escapeHtml("foo & bar"), "foo &amp; bar");
     });
 
-    test("should persist state", () => {
-      mockVsCode.setState({ inputValue: "test input", isConnected: true });
-      const state = mockVsCode.getState<{
-        inputValue: string;
-        isConnected: boolean;
-      }>();
-
-      assert.strictEqual(state?.inputValue, "test input");
-      assert.strictEqual(state?.isConnected, true);
+    test("escapes less than", () => {
+      assert.strictEqual(escapeHtml("a < b"), "a &lt; b");
     });
 
-    test("should return empty object for initial state", () => {
-      const freshMock = createMockVsCodeApi();
-      const state = freshMock.getState();
-      assert.deepStrictEqual(state, {});
-    });
-  });
-
-  suite("Input handling", () => {
-    test("should have empty input by default", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      assert.strictEqual(input.value, "");
+    test("escapes greater than", () => {
+      assert.strictEqual(escapeHtml("a > b"), "a &gt; b");
     });
 
-    test("should allow setting input value", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      input.value = "Hello, agent!";
-      assert.strictEqual(input.value, "Hello, agent!");
-    });
-  });
-
-  suite("Status display", () => {
-    test("should show Disconnected by default", () => {
-      const statusText = document.getElementById("status-text");
-      assert.strictEqual(statusText?.textContent, "Disconnected");
-    });
-
-    test("should have status dot element", () => {
-      const statusDot = document.getElementById("status-dot");
-      assert.ok(statusDot);
-      assert.strictEqual(statusDot?.className, "status-dot");
-    });
-  });
-
-  suite("Welcome view", () => {
-    test("should exist with correct structure", () => {
-      const welcomeView = document.getElementById("welcome-view");
-      assert.ok(welcomeView);
-      assert.ok(welcomeView?.querySelector("h3"));
-      assert.ok(document.getElementById("welcome-connect-btn"));
-    });
-  });
-
-  suite("Agent selector", () => {
-    test("should be an empty select element", () => {
-      const selector = document.getElementById(
-        "agent-selector",
-      ) as HTMLSelectElement;
-      assert.ok(selector);
-      assert.strictEqual(selector.tagName, "SELECT");
-      assert.strictEqual(selector.options.length, 0);
-    });
-
-    test("should allow adding options", () => {
-      const selector = document.getElementById(
-        "agent-selector",
-      ) as HTMLSelectElement;
-      const option = document.createElement("option");
-      option.value = "opencode";
-      option.textContent = "OpenCode";
-      selector.appendChild(option);
-
-      assert.strictEqual(selector.options.length, 1);
-      assert.strictEqual(selector.options[0].value, "opencode");
-    });
-  });
-
-  suite("Mode and Model selectors", () => {
-    test("should be hidden by default", () => {
-      const modeSelector = document.getElementById(
-        "mode-selector",
-      ) as HTMLSelectElement;
-      const modelSelector = document.getElementById(
-        "model-selector",
-      ) as HTMLSelectElement;
-
-      assert.strictEqual(modeSelector.style.display, "none");
-      assert.strictEqual(modelSelector.style.display, "none");
-    });
-
-    test("should be able to show mode selector", () => {
-      const modeSelector = document.getElementById(
-        "mode-selector",
-      ) as HTMLSelectElement;
-      modeSelector.style.display = "inline-block";
-
-      assert.strictEqual(modeSelector.style.display, "inline-block");
-    });
-  });
-
-  suite("Messages container", () => {
-    test("should start empty", () => {
-      const messages = document.getElementById("messages");
-      assert.strictEqual(messages?.children.length, 0);
-    });
-
-    test("should allow adding message elements", () => {
-      const messages = document.getElementById("messages")!;
-      const msgDiv = document.createElement("div");
-      msgDiv.className = "message user";
-      msgDiv.textContent = "Hello!";
-      messages.appendChild(msgDiv);
-
-      assert.strictEqual(messages.children.length, 1);
+    test("escapes all special characters together", () => {
       assert.strictEqual(
-        (messages.children[0] as HTMLElement).textContent,
-        "Hello!",
+        escapeHtml("<script>alert('xss')</script>"),
+        "&lt;script&gt;alert('xss')&lt;/script&gt;",
       );
-      assert.ok(messages.children[0].classList.contains("user"));
     });
 
-    test("should support multiple message types", () => {
-      const messages = document.getElementById("messages")!;
+    test("returns empty string for empty input", () => {
+      assert.strictEqual(escapeHtml(""), "");
+    });
 
-      const userMsg = document.createElement("div");
-      userMsg.className = "message user";
-      userMsg.textContent = "User message";
-
-      const assistantMsg = document.createElement("div");
-      assistantMsg.className = "message assistant";
-      assistantMsg.textContent = "Assistant response";
-
-      const errorMsg = document.createElement("div");
-      errorMsg.className = "message error";
-      errorMsg.textContent = "Error occurred";
-
-      messages.appendChild(userMsg);
-      messages.appendChild(assistantMsg);
-      messages.appendChild(errorMsg);
-
-      assert.strictEqual(messages.children.length, 3);
-      assert.ok(messages.children[0].classList.contains("user"));
-      assert.ok(messages.children[1].classList.contains("assistant"));
-      assert.ok(messages.children[2].classList.contains("error"));
+    test("preserves normal text", () => {
+      assert.strictEqual(escapeHtml("Hello World"), "Hello World");
     });
   });
 
-  suite("Button interactions", () => {
-    test("send button should be clickable", () => {
-      const sendBtn = document.getElementById("send") as HTMLButtonElement;
-      let clicked = false;
-      sendBtn.addEventListener("click", () => {
-        clicked = true;
-      });
-      sendBtn.click();
-
-      assert.strictEqual(clicked, true);
+  suite("getToolsHtml", () => {
+    test("returns empty string for no tools", () => {
+      assert.strictEqual(getToolsHtml({}), "");
     });
 
-    test("connect button should be clickable", () => {
-      const connectBtn = document.getElementById(
-        "connect-btn",
-      ) as HTMLButtonElement;
-      let clicked = false;
-      connectBtn.addEventListener("click", () => {
-        clicked = true;
-      });
-      connectBtn.click();
-
-      assert.strictEqual(clicked, true);
+    test("renders running tool with spinner icon", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "bash",
+          input: null,
+          output: null,
+          status: "running",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("⋯"));
+      assert.ok(html.includes("bash"));
+      assert.ok(html.includes("running"));
     });
 
-    test("send button can be disabled", () => {
-      const sendBtn = document.getElementById("send") as HTMLButtonElement;
-      sendBtn.disabled = true;
-
-      assert.strictEqual(sendBtn.disabled, true);
-    });
-  });
-
-  suite("Keyboard events", () => {
-    test("should handle Enter key in input", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      let enterPressed = false;
-
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          enterPressed = true;
-        }
-      });
-
-      const event = new window.KeyboardEvent("keydown", {
-        key: "Enter",
-        shiftKey: false,
-      });
-      input.dispatchEvent(event);
-
-      assert.strictEqual(enterPressed, true);
+    test("renders completed tool with checkmark", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "read_file",
+          input: "path/to/file",
+          output: "file contents",
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("✓"));
+      assert.ok(html.includes("read_file"));
     });
 
-    test("should not trigger send on Shift+Enter", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      let shouldSend = false;
-
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          shouldSend = true;
-        }
-      });
-
-      const event = new window.KeyboardEvent("keydown", {
-        key: "Enter",
-        shiftKey: true,
-      });
-      input.dispatchEvent(event);
-
-      assert.strictEqual(shouldSend, false);
+    test("renders failed tool with X", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "write_file",
+          input: null,
+          output: "Permission denied",
+          status: "failed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("✗"));
     });
 
-    test("should handle Escape key", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      let escapePressed = false;
-
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          escapePressed = true;
-        }
-      });
-
-      const event = new window.KeyboardEvent("keydown", { key: "Escape" });
-      input.dispatchEvent(event);
-
-      assert.strictEqual(escapePressed, true);
+    test("escapes tool name to prevent XSS", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "<script>alert(1)</script>",
+          input: null,
+          output: null,
+          status: "running",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("&lt;script&gt;"));
+      assert.ok(!html.includes("<script>alert"));
     });
-  });
 
-  suite("Window message events", () => {
-    test("should receive message events", () => {
-      let receivedMessage: unknown = null;
+    test("truncates long output", () => {
+      const longOutput = "x".repeat(600);
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "test",
+          input: null,
+          output: longOutput,
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("..."));
+      assert.ok(!html.includes("x".repeat(600)));
+    });
 
-      window.addEventListener("message", (e) => {
-        receivedMessage = e.data;
-      });
+    test("shows tool count in summary", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": { name: "a", input: null, output: null, status: "completed" },
+        "tool-2": { name: "b", input: null, output: null, status: "completed" },
+        "tool-3": { name: "c", input: null, output: null, status: "completed" },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("3 tools"));
+    });
 
-      const event = new window.MessageEvent("message", {
-        data: { type: "connectionState", state: "connected" },
-      });
-      window.dispatchEvent(event);
-
-      assert.deepStrictEqual(receivedMessage, {
-        type: "connectionState",
-        state: "connected",
-      });
+    test("shows singular tool for single tool", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": { name: "a", input: null, output: null, status: "completed" },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes(">1 tool<"));
     });
   });
 
-  suite("HTML escaping (security)", () => {
-    test("textContent prevents script injection", () => {
-      const messages = document.getElementById("messages")!;
-      const maliciousDiv = document.createElement("div");
-      maliciousDiv.className = "message assistant";
-      maliciousDiv.textContent = '<script>alert("xss")</script>';
-      messages.appendChild(maliciousDiv);
+  suite("updateSelectLabel", () => {
+    let dom: JSDOM;
+    let document: Document;
 
-      assert.ok(maliciousDiv.textContent?.includes("<script>"));
-      assert.strictEqual(maliciousDiv.querySelector("script"), null);
+    setup(() => {
+      dom = new JSDOM(
+        '<!DOCTYPE html><select id="test"><option value="1" data-label="First">First</option><option value="2" data-label="Second">Second</option></select>',
+      );
+      document = dom.window.document;
+    });
+
+    teardown(() => {
+      dom.window.close();
+    });
+
+    test("prepends prefix to selected option", () => {
+      const select = document.getElementById("test") as HTMLSelectElement;
+      select.selectedIndex = 0;
+      updateSelectLabel(select, "Mode");
+      assert.strictEqual(select.options[0].textContent, "Mode: First");
+    });
+
+    test("resets other options to their data-label", () => {
+      const select = document.getElementById("test") as HTMLSelectElement;
+      select.options[1].textContent = "Modified";
+      select.selectedIndex = 0;
+      updateSelectLabel(select, "Mode");
+      assert.strictEqual(select.options[1].textContent, "Second");
     });
   });
 
-  suite("Accessibility", () => {
-    test("messages container supports log role", () => {
-      const messages = document.getElementById("messages")!;
-      messages.setAttribute("role", "log");
-      assert.strictEqual(messages.getAttribute("role"), "log");
+  suite("getElements", () => {
+    let dom: JSDOM;
+    let document: Document;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML());
+      document = dom.window.document;
     });
 
-    test("input supports aria-label", () => {
-      const input = document.getElementById("input") as HTMLTextAreaElement;
-      input.setAttribute("aria-label", "Message input");
-      assert.strictEqual(input.getAttribute("aria-label"), "Message input");
+    teardown(() => {
+      dom.window.close();
+    });
+
+    test("returns all required elements", () => {
+      const elements = getElements(document);
+      assert.ok(elements.messagesEl);
+      assert.ok(elements.inputEl);
+      assert.ok(elements.sendBtn);
+      assert.ok(elements.statusDot);
+      assert.ok(elements.statusText);
+      assert.ok(elements.agentSelector);
+      assert.ok(elements.connectBtn);
+      assert.ok(elements.welcomeConnectBtn);
+      assert.ok(elements.modeSelector);
+      assert.ok(elements.modelSelector);
+      assert.ok(elements.welcomeView);
+    });
+
+    test("returns correct element types", () => {
+      const elements = getElements(document);
+      assert.strictEqual(elements.inputEl.tagName, "TEXTAREA");
+      assert.strictEqual(elements.sendBtn.tagName, "BUTTON");
+      assert.strictEqual(elements.agentSelector.tagName, "SELECT");
+    });
+  });
+
+  suite("WebviewController", () => {
+    let dom: JSDOM;
+    let document: Document;
+    let window: DOMWindow;
+    let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
+    let elements: WebviewElements;
+    let controller: WebviewController;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML(), {
+        runScripts: "dangerously",
+        url: "https://localhost",
+      });
+      document = dom.window.document;
+      window = dom.window;
+      mockVsCode = createMockVsCodeApi();
+      elements = getElements(document);
+      controller = new WebviewController(
+        mockVsCode,
+        elements,
+        document,
+        window as unknown as Window,
+      );
+    });
+
+    teardown(() => {
+      dom.window.close();
+    });
+
+    test("sends ready message on initialization", () => {
+      const messages = mockVsCode._getMessages();
+      assert.ok(
+        messages.some((m: unknown) => (m as { type: string }).type === "ready"),
+      );
+    });
+
+    suite("addMessage", () => {
+      test("adds user message to DOM", () => {
+        controller.addMessage("Hello!", "user");
+        const msgs = elements.messagesEl.querySelectorAll(".message.user");
+        assert.strictEqual(msgs.length, 1);
+        assert.strictEqual(msgs[0].textContent, "Hello!");
+      });
+
+      test("adds assistant message to DOM", () => {
+        controller.addMessage("Hi there!", "assistant");
+        const msgs = elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.strictEqual(msgs.length, 1);
+        assert.strictEqual(msgs[0].textContent, "Hi there!");
+      });
+
+      test("adds error message to DOM", () => {
+        controller.addMessage("Error occurred", "error");
+        const msgs = elements.messagesEl.querySelectorAll(".message.error");
+        assert.strictEqual(msgs.length, 1);
+      });
+
+      test("sets accessibility attributes", () => {
+        const msg = controller.addMessage("Test", "user");
+        assert.strictEqual(msg.getAttribute("role"), "article");
+        assert.strictEqual(msg.getAttribute("tabindex"), "0");
+        assert.strictEqual(msg.getAttribute("aria-label"), "Your message");
+      });
+
+      test("returns the created element", () => {
+        const msg = controller.addMessage("Test", "user");
+        assert.ok(msg instanceof dom.window.HTMLElement);
+        assert.strictEqual(msg.textContent, "Test");
+      });
+    });
+
+    suite("updateStatus", () => {
+      test("updates status text for connected", () => {
+        controller.updateStatus("connected");
+        assert.strictEqual(elements.statusText.textContent, "Connected");
+      });
+
+      test("updates status text for disconnected", () => {
+        controller.updateStatus("disconnected");
+        assert.strictEqual(elements.statusText.textContent, "Disconnected");
+      });
+
+      test("updates status text for connecting", () => {
+        controller.updateStatus("connecting");
+        assert.strictEqual(elements.statusText.textContent, "Connecting...");
+      });
+
+      test("updates status dot class", () => {
+        controller.updateStatus("connected");
+        assert.ok(elements.statusDot.className.includes("connected"));
+      });
+
+      test("saves state after update", () => {
+        controller.updateStatus("connected");
+        const state = mockVsCode.getState<{ isConnected: boolean }>();
+        assert.strictEqual(state?.isConnected, true);
+      });
+    });
+
+    suite("showThinking/hideThinking", () => {
+      test("showThinking adds thinking element", () => {
+        controller.showThinking();
+        const thinking = elements.messagesEl.querySelector(".thinking");
+        assert.ok(thinking);
+      });
+
+      test("hideThinking removes thinking element", () => {
+        controller.showThinking();
+        controller.hideThinking();
+        const thinking = elements.messagesEl.querySelector(".thinking");
+        assert.strictEqual(thinking, null);
+      });
+    });
+
+    suite("handleMessage", () => {
+      test("handles userMessage", () => {
+        controller.handleMessage({ type: "userMessage", text: "Hello" });
+        const msgs = elements.messagesEl.querySelectorAll(".message.user");
+        assert.strictEqual(msgs.length, 1);
+      });
+
+      test("handles connectionState", () => {
+        controller.handleMessage({
+          type: "connectionState",
+          state: "connected",
+        });
+        assert.strictEqual(elements.statusText.textContent, "Connected");
+        assert.strictEqual(elements.connectBtn.style.display, "none");
+      });
+
+      test("handles error", () => {
+        controller.handleMessage({
+          type: "error",
+          text: "Something went wrong",
+        });
+        const msgs = elements.messagesEl.querySelectorAll(".message.error");
+        assert.strictEqual(msgs.length, 1);
+      });
+
+      test("handles agents list", () => {
+        controller.handleMessage({
+          type: "agents",
+          agents: [
+            { id: "opencode", name: "OpenCode", available: true },
+            { id: "claude", name: "Claude", available: false },
+          ],
+          selected: "opencode",
+        });
+        assert.strictEqual(elements.agentSelector.options.length, 2);
+        assert.strictEqual(elements.agentSelector.value, "opencode");
+      });
+
+      test("handles sessionMetadata with modes", () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          modes: {
+            availableModes: [
+              { id: "code", name: "Code" },
+              { id: "architect", name: "Architect" },
+            ],
+            currentModeId: "code",
+          },
+          models: null,
+        });
+        assert.strictEqual(elements.modeSelector.style.display, "inline-block");
+        assert.strictEqual(elements.modeSelector.options.length, 2);
+      });
+
+      test("handles chatCleared", () => {
+        controller.addMessage("Test", "user");
+        controller.handleMessage({ type: "chatCleared" });
+        assert.strictEqual(elements.messagesEl.children.length, 0);
+      });
+
+      test("handles toolCallStart", () => {
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "bash",
+        });
+        const tools = controller.getTools();
+        assert.ok(tools["tool-1"]);
+        assert.strictEqual(tools["tool-1"].status, "running");
+      });
+
+      test("handles toolCallComplete", () => {
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "bash",
+        });
+        controller.handleMessage({
+          type: "toolCallComplete",
+          toolCallId: "tool-1",
+          status: "completed",
+          rawInput: { command: "ls -la" },
+          rawOutput: { output: "file1\nfile2" },
+        });
+        const tools = controller.getTools();
+        assert.strictEqual(tools["tool-1"].status, "completed");
+        assert.strictEqual(tools["tool-1"].input, "ls -la");
+      });
+
+      test("handles streaming", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamChunk", text: "Hello " });
+        controller.handleMessage({ type: "streamChunk", text: "World" });
+
+        const msgs = elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.strictEqual(msgs.length, 1);
+        assert.strictEqual(msgs[0].textContent, "Hello World");
+      });
+
+      test("handles streamEnd with HTML", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamChunk", text: "**bold**" });
+        controller.handleMessage({
+          type: "streamEnd",
+          html: "<strong>bold</strong>",
+        });
+
+        const msgs = elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.ok(msgs[0].innerHTML.includes("<strong>"));
+      });
+    });
+
+    suite("button interactions", () => {
+      test("connect button posts connect message", () => {
+        mockVsCode._clearMessages();
+        elements.connectBtn.click();
+        const messages = mockVsCode._getMessages();
+        assert.ok(
+          messages.some(
+            (m: unknown) => (m as { type: string }).type === "connect",
+          ),
+        );
+      });
+
+      test("welcome connect button posts connect message", () => {
+        mockVsCode._clearMessages();
+        elements.welcomeConnectBtn.click();
+        const messages = mockVsCode._getMessages();
+        assert.ok(
+          messages.some(
+            (m: unknown) => (m as { type: string }).type === "connect",
+          ),
+        );
+      });
+    });
+
+    suite("input handling", () => {
+      test("Enter key sends message", () => {
+        mockVsCode._clearMessages();
+        elements.inputEl.value = "Test message";
+        const event = new window.KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: false,
+        });
+        elements.inputEl.dispatchEvent(event);
+
+        const messages = mockVsCode._getMessages();
+        assert.ok(
+          messages.some(
+            (m: unknown) =>
+              (m as { type: string; text?: string }).type === "sendMessage" &&
+              (m as { type: string; text?: string }).text === "Test message",
+          ),
+        );
+      });
+
+      test("Shift+Enter does not send message", () => {
+        mockVsCode._clearMessages();
+        elements.inputEl.value = "Test message";
+        const event = new window.KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: true,
+        });
+        elements.inputEl.dispatchEvent(event);
+
+        const messages = mockVsCode._getMessages();
+        assert.ok(
+          !messages.some(
+            (m: unknown) => (m as { type: string }).type === "sendMessage",
+          ),
+        );
+      });
+
+      test("empty input does not send message", () => {
+        mockVsCode._clearMessages();
+        elements.inputEl.value = "   ";
+        const event = new window.KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: false,
+        });
+        elements.inputEl.dispatchEvent(event);
+
+        const messages = mockVsCode._getMessages();
+        assert.ok(
+          !messages.some(
+            (m: unknown) => (m as { type: string }).type === "sendMessage",
+          ),
+        );
+      });
+
+      test("Escape clears input", () => {
+        elements.inputEl.value = "Test message";
+        const event = new window.KeyboardEvent("keydown", { key: "Escape" });
+        elements.inputEl.dispatchEvent(event);
+        assert.strictEqual(elements.inputEl.value, "");
+      });
+    });
+
+    suite("state persistence", () => {
+      test("restores input value from state", () => {
+        mockVsCode.setState({ isConnected: false, inputValue: "saved text" });
+        new WebviewController(
+          mockVsCode,
+          elements,
+          document,
+          window as unknown as Window,
+        );
+        assert.strictEqual(elements.inputEl.value, "saved text");
+      });
+
+      test("restores connection state from state", () => {
+        mockVsCode.setState({ isConnected: true, inputValue: "" });
+        const restoredController = new WebviewController(
+          mockVsCode,
+          elements,
+          document,
+          window as unknown as Window,
+        );
+        assert.strictEqual(restoredController.getIsConnected(), true);
+      });
+    });
+  });
+
+  suite("initWebview", () => {
+    let dom: JSDOM;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML(), {
+        runScripts: "dangerously",
+        url: "https://localhost",
+      });
+    });
+
+    teardown(() => {
+      dom.window.close();
+    });
+
+    test("creates and returns WebviewController", () => {
+      const mockVsCode = createMockVsCodeApi();
+      const controller = initWebview(
+        mockVsCode,
+        dom.window.document,
+        dom.window as unknown as Window,
+      );
+      assert.ok(controller instanceof WebviewController);
     });
   });
 });
