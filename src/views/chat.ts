@@ -208,6 +208,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (update.sessionUpdate === "current_mode_update") {
       this.postMessage({ type: "modeUpdate", modeId: update.currentModeId });
+    } else if (update.sessionUpdate === "available_commands_update") {
+      this.postMessage({
+        type: "availableCommands",
+        commands: update.availableCommands,
+      });
     }
   }
 
@@ -338,6 +343,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       type: "sessionMetadata",
       modes: metadata?.modes ?? null,
       models: metadata?.models ?? null,
+      commands: metadata?.commands ?? null,
     });
   }
 
@@ -393,16 +399,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" tabindex="0"></div>
   
   <div id="input-container">
+    <div id="command-autocomplete" role="listbox" aria-label="Slash commands"></div>
     <textarea 
       id="input" 
       rows="1" 
-      placeholder="Ask your agent..." 
+      placeholder="Ask your agent... (type / for commands)" 
       aria-label="Message input"
       aria-describedby="input-hint"
+      aria-autocomplete="list"
+      aria-controls="command-autocomplete"
     ></textarea>
     <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
   </div>
-  <span id="input-hint" class="sr-only">Press Enter to send, Shift+Enter for new line, Escape to clear</span>
+  <span id="input-hint" class="sr-only">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
@@ -422,6 +431,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const modeSelector = document.getElementById('mode-selector');
     const modelSelector = document.getElementById('model-selector');
     const welcomeView = document.getElementById('welcome-view');
+    const commandAutocomplete = document.getElementById('command-autocomplete');
 
     let currentAssistantMessage = null;
     let currentAssistantText = '';
@@ -429,6 +439,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let tools = {};
     let isConnected = false;
     let messageTexts = new Map();
+    let availableCommands = [];
+    let selectedCommandIndex = -1;
 
     function updateSelectLabel(select, prefix) {
       Array.from(select.options).forEach(opt => {
@@ -558,11 +570,95 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       inputEl.value = '';
       inputEl.style.height = 'auto';
       inputEl.focus();
+      hideCommandAutocomplete();
+    }
+
+    function getFilteredCommands(query) {
+      if (!query.startsWith('/')) return [];
+      const search = query.slice(1).toLowerCase();
+      return availableCommands.filter(cmd => 
+        cmd.name.toLowerCase().startsWith(search) ||
+        cmd.description?.toLowerCase().includes(search)
+      );
+    }
+
+    function showCommandAutocomplete(commands) {
+      if (commands.length === 0) {
+        hideCommandAutocomplete();
+        return;
+      }
+      
+      commandAutocomplete.innerHTML = commands.map((cmd, i) => {
+        const hint = cmd.input?.hint ? '<div class="command-hint">' + escapeHtml(cmd.input.hint) + '</div>' : '';
+        return '<div class="command-item' + (i === selectedCommandIndex ? ' selected' : '') + '" data-index="' + i + '" role="option" aria-selected="' + (i === selectedCommandIndex) + '">' +
+          '<div class="command-name">' + escapeHtml(cmd.name) + '</div>' +
+          '<div class="command-description">' + escapeHtml(cmd.description || '') + '</div>' +
+          hint +
+        '</div>';
+      }).join('');
+      
+      commandAutocomplete.classList.add('visible');
+      inputEl.setAttribute('aria-expanded', 'true');
+    }
+
+    function hideCommandAutocomplete() {
+      commandAutocomplete.classList.remove('visible');
+      commandAutocomplete.innerHTML = '';
+      selectedCommandIndex = -1;
+      inputEl.setAttribute('aria-expanded', 'false');
+    }
+
+    function selectCommand(index) {
+      const commands = getFilteredCommands(inputEl.value);
+      if (index >= 0 && index < commands.length) {
+        const cmd = commands[index];
+        inputEl.value = '/' + cmd.name + ' ';
+        inputEl.focus();
+        hideCommandAutocomplete();
+      }
+    }
+
+    function updateAutocomplete() {
+      const text = inputEl.value;
+      const firstWord = text.split(/\\s/)[0];
+      
+      if (firstWord.startsWith('/') && !text.includes(' ')) {
+        const filtered = getFilteredCommands(firstWord);
+        selectedCommandIndex = filtered.length > 0 ? 0 : -1;
+        showCommandAutocomplete(filtered);
+      } else {
+        hideCommandAutocomplete();
+      }
     }
 
     sendBtn.addEventListener('click', send);
     
     inputEl.addEventListener('keydown', (e) => {
+      const isAutocompleteVisible = commandAutocomplete.classList.contains('visible');
+      const commands = getFilteredCommands(inputEl.value.split(/\\s/)[0]);
+      
+      if (isAutocompleteVisible && commands.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          selectedCommandIndex = Math.min(selectedCommandIndex + 1, commands.length - 1);
+          showCommandAutocomplete(commands);
+          return;
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          selectedCommandIndex = Math.max(selectedCommandIndex - 1, 0);
+          showCommandAutocomplete(commands);
+          return;
+        } else if (e.key === 'Tab' || (e.key === 'Enter' && selectedCommandIndex >= 0)) {
+          e.preventDefault();
+          selectCommand(selectedCommandIndex);
+          return;
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          hideCommandAutocomplete();
+          return;
+        }
+      }
+      
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         send();
@@ -575,6 +671,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     inputEl.addEventListener('input', () => {
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+      updateAutocomplete();
+    });
+
+    commandAutocomplete.addEventListener('click', (e) => {
+      const item = e.target.closest('.command-item');
+      if (item) {
+        const index = parseInt(item.dataset.index, 10);
+        selectCommand(index);
+      }
+    });
+
+    commandAutocomplete.addEventListener('mouseover', (e) => {
+      const item = e.target.closest('.command-item');
+      if (item) {
+        selectedCommandIndex = parseInt(item.dataset.index, 10);
+        const commands = getFilteredCommands(inputEl.value.split(/\\s/)[0]);
+        showCommandAutocomplete(commands);
+      }
     });
 
     messagesEl.addEventListener('keydown', (e) => {
@@ -701,6 +815,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           messageTexts.clear();
           modeSelector.style.display = 'none';
           modelSelector.style.display = 'none';
+          availableCommands = [];
+          hideCommandAutocomplete();
           updateViewState();
           break;
         case 'triggerNewChat':
@@ -744,11 +860,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           } else {
             modelSelector.style.display = 'none';
           }
+          
+          if (msg.commands && Array.isArray(msg.commands)) {
+            availableCommands = msg.commands;
+          }
           break;
         case 'modeUpdate':
           if (msg.modeId) {
             modeSelector.value = msg.modeId;
             updateSelectLabel(modeSelector, 'Mode');
+          }
+          break;
+        case 'availableCommands':
+          if (msg.commands && Array.isArray(msg.commands)) {
+            availableCommands = msg.commands;
           }
           break;
       }
