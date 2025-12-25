@@ -357,6 +357,106 @@ body {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+  position: relative;
+}
+
+/* Command Autocomplete */
+#command-autocomplete {
+  position: absolute;
+  bottom: 100%;
+  left: var(--container-padding);
+  right: var(--container-padding);
+  margin-bottom: 4px;
+  background: var(--vscode-dropdown-background);
+  border: 1px solid var(--vscode-dropdown-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 100;
+  display: none;
+}
+
+#command-autocomplete.visible {
+  display: block;
+  animation: slideUp 0.1s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.command-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-bottom: 1px solid var(--vscode-dropdown-border);
+}
+
+.command-item:last-child {
+  border-bottom: none;
+}
+
+.command-item:hover,
+.command-item.selected {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.command-item.selected {
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.command-name {
+  font-family: var(--vscode-editor-font-family), monospace;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.command-name::before {
+  content: "/";
+  opacity: 0.6;
+}
+
+.command-description {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.9;
+}
+
+.command-item.selected .command-description {
+  color: var(--vscode-list-activeSelectionForeground);
+  opacity: 0.8;
+}
+
+.command-hint {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.command-item.selected .command-hint {
+  color: var(--vscode-list-activeSelectionForeground);
+  opacity: 0.6;
+}
+
+/* No commands message */
+.no-commands {
+  padding: 12px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
 }
 
 #input {

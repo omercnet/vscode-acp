@@ -25,6 +25,11 @@ interface MockSession {
     availableModels: Array<{ modelId: string; name: string }>;
     currentModelId: string;
   };
+  commands: Array<{
+    name: string;
+    description: string;
+    input?: { hint: string };
+  }>;
 }
 
 export class MockACPServer {
@@ -140,9 +145,27 @@ export class MockACPServer {
         ],
         currentModelId: "claude-3-sonnet",
       },
+      commands: [
+        {
+          name: "web",
+          description: "Search the web",
+          input: { hint: "query" },
+        },
+        { name: "test", description: "Run tests" },
+        {
+          name: "plan",
+          description: "Create a plan",
+          input: { hint: "description" },
+        },
+      ],
     };
 
     this.sessions.set(sessionId, session);
+
+    this.sendSessionUpdate(sessionId, {
+      sessionUpdate: "available_commands_update",
+      availableCommands: session.commands,
+    });
 
     return {
       jsonrpc: "2.0",
@@ -247,7 +270,7 @@ export class MockACPServer {
   ): void {
     const notification = {
       jsonrpc: "2.0",
-      method: "session_update",
+      method: "session/update",
       params: {
         sessionId,
         update,

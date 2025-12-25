@@ -169,6 +169,23 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(metadata.models?.currentModelId, "claude-3-sonnet");
     });
 
+    test("should receive available commands update", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const metadata = client.getSessionMetadata();
+      assert.ok(metadata);
+      assert.ok(metadata.commands);
+      assert.strictEqual(metadata.commands?.length, 3);
+      assert.strictEqual(metadata.commands?.[0].name, "web");
+      assert.strictEqual(metadata.commands?.[0].description, "Search the web");
+      assert.strictEqual(metadata.commands?.[0].input?.hint, "query");
+      assert.strictEqual(metadata.commands?.[1].name, "test");
+      assert.strictEqual(metadata.commands?.[2].name, "plan");
+    });
+
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
         await client.newSession("/test/dir");
