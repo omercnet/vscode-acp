@@ -398,9 +398,11 @@ export class WebviewController {
 
     switch (msg.type) {
       case "userMessage":
-        this.addMessage(msg.text!, "user");
-        this.showThinking();
-        this.updateViewState();
+        if (msg.text) {
+          this.addMessage(msg.text, "user");
+          this.showThinking();
+          this.updateViewState();
+        }
         break;
       case "streamStart":
         this.currentAssistantText = "";
@@ -410,10 +412,12 @@ export class WebviewController {
           this.hideThinking();
           this.currentAssistantMessage = this.addMessage("", "assistant");
         }
-        this.currentAssistantText += msg.text;
-        this.currentAssistantMessage.textContent = this.currentAssistantText;
-        this.elements.messagesEl.scrollTop =
-          this.elements.messagesEl.scrollHeight;
+        if (msg.text) {
+          this.currentAssistantText += msg.text;
+          this.currentAssistantMessage.textContent = this.currentAssistantText;
+          this.elements.messagesEl.scrollTop =
+            this.elements.messagesEl.scrollHeight;
+        }
         break;
       case "streamEnd":
         this.hideThinking();
@@ -433,40 +437,45 @@ export class WebviewController {
         this.elements.inputEl.focus();
         break;
       case "toolCallStart":
-        this.tools[msg.toolCallId!] = {
-          name: msg.name!,
-          input: null,
-          output: null,
-          status: "running",
-        };
-        this.showThinking();
+        if (msg.toolCallId && msg.name) {
+          this.tools[msg.toolCallId] = {
+            name: msg.name,
+            input: null,
+            output: null,
+            status: "running",
+          };
+          this.showThinking();
+        }
         break;
       case "toolCallComplete":
-        if (this.tools[msg.toolCallId!]) {
+        if (msg.toolCallId && this.tools[msg.toolCallId]) {
+          const tool = this.tools[msg.toolCallId];
           const output =
             msg.content?.[0]?.content?.text || msg.rawOutput?.output || "";
           const input =
             msg.rawInput?.command || msg.rawInput?.description || "";
-          if (msg.title) this.tools[msg.toolCallId!].name = msg.title;
-          this.tools[msg.toolCallId!].input = input;
-          this.tools[msg.toolCallId!].output = output;
-          this.tools[msg.toolCallId!].status = msg.status as Tool["status"];
+          if (msg.title) tool.name = msg.title;
+          tool.input = input;
+          tool.output = output;
+          tool.status = (msg.status as Tool["status"]) || "completed";
           this.showThinking();
         }
         break;
       case "error":
         this.hideThinking();
-        this.addMessage(msg.text!, "error");
+        if (msg.text) this.addMessage(msg.text, "error");
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
       case "agentError":
-        this.addMessage(msg.text!, "error");
+        if (msg.text) this.addMessage(msg.text, "error");
         break;
       case "connectionState":
-        this.updateStatus(msg.state!);
-        connectBtn.style.display =
-          msg.state === "connected" ? "none" : "inline-block";
+        if (msg.state) {
+          this.updateStatus(msg.state);
+          connectBtn.style.display =
+            msg.state === "connected" ? "none" : "inline-block";
+        }
         break;
       case "agents":
         agentSelector.innerHTML = "";
