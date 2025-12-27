@@ -77,12 +77,13 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
         detailsContent +=
           '<pre class="tool-output">' + escapeHtml(truncated) + "</pre>";
       }
+      const escapedStatus = escapeHtml(tool.status);
       if (detailsContent) {
         return (
           '<li><details class="tool-item"><summary><span class="tool-status ' +
           statusClass +
           '" aria-label="' +
-          tool.status +
+          escapedStatus +
           '">' +
           statusIcon +
           "</span> " +
@@ -96,7 +97,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
         '<li><span class="tool-status ' +
         statusClass +
         '" aria-label="' +
-        tool.status +
+        escapedStatus +
         '">' +
         statusIcon +
         "</span> " +

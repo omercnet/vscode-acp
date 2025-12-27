@@ -53,7 +53,7 @@ jobs:
               found=$0; sub("LF:", "", found)
               if (found > 0) { total_hit += hit; total_found += found }
             }
-            END { printf "%.1f%% (%d/%d lines)", (total_hit/total_found)*100, total_hit, total_found }
+            END { if (total_found > 0) printf "%.1f%% (%d/%d lines)", (total_hit/total_found)*100, total_hit, total_found; else print "0.0% (0/0 lines)" }
           ')
           echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
           echo "**Lines:** $COVERAGE" >> $GITHUB_STEP_SUMMARY
@@ -74,7 +74,7 @@ jobs:
                 if (found > 0) { totalHit += currentHit; totalFound += found; }
               }
             }
-            const pct = ((totalHit / totalFound) * 100).toFixed(1);
+            const pct = totalFound > 0 ? ((totalHit / totalFound) * 100).toFixed(1) : '0.0';
             const body = `## 📊 Coverage Report\n\n**Lines:** ${pct}% (${totalHit}/${totalFound})`;
 
             const { data: comments } = await github.rest.issues.listComments({
