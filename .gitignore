@@ -4,3 +4,8 @@ dist
 out
 .vscode-test
 .beads/
+coverage/
+
+@AGENTS.md
+mise.toml
+AGENTS.md
