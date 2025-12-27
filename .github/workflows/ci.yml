@@ -40,7 +40,7 @@ jobs:
           path: coverage/
 
       - name: Coverage Report
-        uses: zgosalvez/github-actions-report-lcov@a546f89c1e3291d25a533ba90e238718397039f1 # v4
+        uses: zgosalvez/github-actions-report-lcov@8ead3c903cefbc389528f5e032e793a5d0e5b626 # v5.0.2
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         with:
           coverage-files: coverage/lcov.info
