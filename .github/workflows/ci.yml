@@ -39,13 +39,21 @@ jobs:
           name: coverage-report
           path: coverage/
 
-      - name: Coverage Report
-        uses: zgosalvez/github-actions-report-lcov@8ead3c903cefbc389528f5e032e793a5d0e5b626 # v5.0.2
-        if: runner.os == 'Linux' && github.event_name == 'pull_request'
-        with:
-          coverage-files: coverage/lcov.info
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          update-comment: true
+      - name: Coverage Summary
+        if: runner.os == 'Linux'
+        run: |
+          echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat coverage/lcov.info | awk '
+            /^SF:/ { file=$0; sub("SF:", "", file); next }
+            /^LH:/ { hit=$0; sub("LH:", "", hit); next }
+            /^LF:/ { 
+              found=$0; sub("LF:", "", found)
+              if (found > 0) { total_hit += hit; total_found += found }
+            }
+            END { printf "Lines: %.1f%% (%d/%d)\n", (total_hit/total_found)*100, total_hit, total_found }
+          ' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Package extension
         run: npx vsce package --no-dependencies
