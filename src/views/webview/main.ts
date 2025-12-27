@@ -1,0 +1,588 @@
+export interface VsCodeApi {
+  postMessage(message: unknown): void;
+  getState<T>(): T | undefined;
+  setState<T>(state: T): T;
+}
+
+declare function acquireVsCodeApi(): VsCodeApi;
+
+export interface Tool {
+  name: string;
+  input: string | null;
+  output: string | null;
+  status: "running" | "completed" | "failed";
+}
+
+export interface WebviewState {
+  isConnected: boolean;
+  inputValue: string;
+}
+
+export interface ExtensionMessage {
+  type: string;
+  text?: string;
+  html?: string;
+  state?: string;
+  agents?: Array<{ id: string; name: string; available: boolean }>;
+  selected?: string;
+  agentId?: string;
+  modeId?: string;
+  modelId?: string;
+  modes?: {
+    availableModes: Array<{ id: string; name: string }>;
+    currentModeId: string;
+  } | null;
+  models?: {
+    availableModels: Array<{ modelId: string; name: string }>;
+    currentModelId: string;
+  } | null;
+  toolCallId?: string;
+  name?: string;
+  title?: string;
+  content?: Array<{ content?: { text?: string } }>;
+  rawInput?: { command?: string; description?: string };
+  rawOutput?: { output?: string };
+  status?: string;
+}
+
+export function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export function getToolsHtml(tools: Record<string, Tool>): string {
+  const toolIds = Object.keys(tools);
+  if (toolIds.length === 0) return "";
+  const toolItems = toolIds
+    .map((id) => {
+      const tool = tools[id];
+      const statusIcon =
+        tool.status === "completed"
+          ? "✓"
+          : tool.status === "failed"
+            ? "✗"
+            : "⋯";
+      const statusClass = tool.status === "running" ? "running" : "";
+      let detailsContent = "";
+      if (tool.input) {
+        detailsContent +=
+          '<div class="tool-input"><strong>$</strong> ' +
+          escapeHtml(tool.input) +
+          "</div>";
+      }
+      if (tool.output) {
+        const truncated =
+          tool.output.length > 500
+            ? tool.output.slice(0, 500) + "..."
+            : tool.output;
+        detailsContent +=
+          '<pre class="tool-output">' + escapeHtml(truncated) + "</pre>";
+      }
+      const escapedStatus = escapeHtml(tool.status);
+      if (detailsContent) {
+        return (
+          '<li><details class="tool-item"><summary><span class="tool-status ' +
+          statusClass +
+          '" aria-label="' +
+          escapedStatus +
+          '">' +
+          statusIcon +
+          "</span> " +
+          escapeHtml(tool.name) +
+          "</summary>" +
+          detailsContent +
+          "</details></li>"
+        );
+      }
+      return (
+        '<li><span class="tool-status ' +
+        statusClass +
+        '" aria-label="' +
+        escapedStatus +
+        '">' +
+        statusIcon +
+        "</span> " +
+        escapeHtml(tool.name) +
+        "</li>"
+      );
+    })
+    .join("");
+  return (
+    '<details class="tool-details" open><summary aria-label="' +
+    toolIds.length +
+    ' tools used">' +
+    toolIds.length +
+    " tool" +
+    (toolIds.length > 1 ? "s" : "") +
+    '</summary><ul class="tool-list" role="list">' +
+    toolItems +
+    "</ul></details>"
+  );
+}
+
+export function updateSelectLabel(
+  select: HTMLSelectElement,
+  prefix: string,
+): void {
+  Array.from(select.options).forEach((opt) => {
+    opt.textContent = opt.dataset.label || opt.textContent;
+  });
+  const selected = select.options[select.selectedIndex];
+  if (selected && selected.dataset.label) {
+    selected.textContent = prefix + ": " + selected.dataset.label;
+  }
+}
+
+export interface WebviewElements {
+  messagesEl: HTMLElement;
+  inputEl: HTMLTextAreaElement;
+  sendBtn: HTMLButtonElement;
+  statusDot: HTMLElement;
+  statusText: HTMLElement;
+  agentSelector: HTMLSelectElement;
+  connectBtn: HTMLButtonElement;
+  welcomeConnectBtn: HTMLButtonElement;
+  modeSelector: HTMLSelectElement;
+  modelSelector: HTMLSelectElement;
+  welcomeView: HTMLElement;
+}
+
+export function getElements(doc: Document): WebviewElements {
+  return {
+    messagesEl: doc.getElementById("messages")!,
+    inputEl: doc.getElementById("input") as HTMLTextAreaElement,
+    sendBtn: doc.getElementById("send") as HTMLButtonElement,
+    statusDot: doc.getElementById("status-dot")!,
+    statusText: doc.getElementById("status-text")!,
+    agentSelector: doc.getElementById("agent-selector") as HTMLSelectElement,
+    connectBtn: doc.getElementById("connect-btn") as HTMLButtonElement,
+    welcomeConnectBtn: doc.getElementById(
+      "welcome-connect-btn",
+    ) as HTMLButtonElement,
+    modeSelector: doc.getElementById("mode-selector") as HTMLSelectElement,
+    modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
+    welcomeView: doc.getElementById("welcome-view")!,
+  };
+}
+
+export class WebviewController {
+  private vscode: VsCodeApi;
+  private elements: WebviewElements;
+  private doc: Document;
+  private win: Window;
+
+  private currentAssistantMessage: HTMLElement | null = null;
+  private currentAssistantText = "";
+  private thinkingEl: HTMLElement | null = null;
+  private tools: Record<string, Tool> = {};
+  private isConnected = false;
+  private messageTexts = new Map<HTMLElement, string>();
+
+  constructor(
+    vscode: VsCodeApi,
+    elements: WebviewElements,
+    doc: Document,
+    win: Window,
+  ) {
+    this.vscode = vscode;
+    this.elements = elements;
+    this.doc = doc;
+    this.win = win;
+
+    this.restoreState();
+    this.setupEventListeners();
+    this.updateViewState();
+    this.vscode.postMessage({ type: "ready" });
+  }
+
+  private restoreState(): void {
+    const previousState = this.vscode.getState<WebviewState>();
+    if (previousState) {
+      this.isConnected = previousState.isConnected;
+      this.elements.inputEl.value = previousState.inputValue || "";
+    }
+  }
+
+  private saveState(): void {
+    this.vscode.setState<WebviewState>({
+      isConnected: this.isConnected,
+      inputValue: this.elements.inputEl.value,
+    });
+  }
+
+  private setupEventListeners(): void {
+    const { sendBtn, inputEl, messagesEl, connectBtn, welcomeConnectBtn } =
+      this.elements;
+    const { agentSelector, modeSelector, modelSelector } = this.elements;
+
+    sendBtn.addEventListener("click", () => this.send());
+
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        this.send();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        this.clearInput();
+      }
+    });
+
+    inputEl.addEventListener("input", () => {
+      inputEl.style.height = "auto";
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+      this.saveState();
+    });
+
+    messagesEl.addEventListener("keydown", (e) => {
+      const messages = Array.from(messagesEl.querySelectorAll(".message"));
+      const currentIndex = messages.indexOf(this.doc.activeElement as Element);
+
+      if (e.key === "ArrowDown" && currentIndex < messages.length - 1) {
+        e.preventDefault();
+        (messages[currentIndex + 1] as HTMLElement).focus();
+      } else if (e.key === "ArrowUp" && currentIndex > 0) {
+        e.preventDefault();
+        (messages[currentIndex - 1] as HTMLElement).focus();
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        (messages[0] as HTMLElement)?.focus();
+      } else if (e.key === "End") {
+        e.preventDefault();
+        (messages[messages.length - 1] as HTMLElement)?.focus();
+      }
+    });
+
+    connectBtn.addEventListener("click", () => {
+      this.vscode.postMessage({ type: "connect" });
+    });
+
+    welcomeConnectBtn.addEventListener("click", () => {
+      this.vscode.postMessage({ type: "connect" });
+    });
+
+    agentSelector.addEventListener("change", () => {
+      this.vscode.postMessage({
+        type: "selectAgent",
+        agentId: agentSelector.value,
+      });
+    });
+
+    modeSelector.addEventListener("change", () => {
+      updateSelectLabel(modeSelector, "Mode");
+      this.vscode.postMessage({
+        type: "selectMode",
+        modeId: modeSelector.value,
+      });
+    });
+
+    modelSelector.addEventListener("change", () => {
+      updateSelectLabel(modelSelector, "Model");
+      this.vscode.postMessage({
+        type: "selectModel",
+        modelId: modelSelector.value,
+      });
+    });
+
+    this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
+      this.handleMessage(e.data),
+    );
+  }
+
+  addMessage(
+    text: string,
+    type: "user" | "assistant" | "error" | "system",
+  ): HTMLElement {
+    const div = this.doc.createElement("div");
+    div.className = "message " + type;
+    div.setAttribute("role", "article");
+    div.setAttribute("tabindex", "0");
+
+    const label =
+      type === "user"
+        ? "Your message"
+        : type === "assistant"
+          ? "Agent response"
+          : type === "error"
+            ? "Error message"
+            : "System message";
+    div.setAttribute("aria-label", label);
+
+    if (type === "assistant" || type === "user") {
+      div.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        const msgText = this.messageTexts.get(div) || div.textContent || "";
+        this.vscode.postMessage({ type: "copyMessage", text: msgText });
+      });
+    }
+
+    div.textContent = text;
+    this.messageTexts.set(div, text);
+    this.elements.messagesEl.appendChild(div);
+    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
+
+    this.announceToScreenReader(label + ": " + text.substring(0, 100));
+    return div;
+  }
+
+  private announceToScreenReader(message: string): void {
+    const announcement = this.doc.createElement("div");
+    announcement.setAttribute("role", "status");
+    announcement.setAttribute("aria-live", "polite");
+    announcement.className = "sr-only";
+    announcement.textContent = message;
+    this.doc.body.appendChild(announcement);
+    setTimeout(() => announcement.remove(), 1000);
+  }
+
+  showThinking(): void {
+    if (!this.thinkingEl) {
+      this.thinkingEl = this.doc.createElement("div");
+      this.thinkingEl.className = "message assistant";
+      this.thinkingEl.setAttribute("role", "status");
+      this.thinkingEl.setAttribute("aria-label", "Agent is thinking");
+      this.elements.messagesEl.appendChild(this.thinkingEl);
+    }
+    let html = '<span class="thinking" aria-label="Processing">Thinking</span>';
+    html += getToolsHtml(this.tools);
+    this.thinkingEl.innerHTML = html;
+    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
+  }
+
+  hideThinking(): void {
+    if (this.thinkingEl) {
+      this.thinkingEl.remove();
+      this.thinkingEl = null;
+    }
+  }
+
+  updateStatus(state: string): void {
+    this.elements.statusDot.className = "status-dot " + state;
+    const labels: Record<string, string> = {
+      disconnected: "Disconnected",
+      connecting: "Connecting...",
+      connected: "Connected",
+      error: "Error",
+    };
+    this.elements.statusText.textContent = labels[state] || state;
+    this.isConnected = state === "connected";
+    this.updateViewState();
+    this.saveState();
+  }
+
+  updateViewState(): void {
+    const hasMessages = this.elements.messagesEl.children.length > 0;
+    this.elements.welcomeView.style.display =
+      !this.isConnected && !hasMessages ? "flex" : "none";
+    this.elements.messagesEl.style.display =
+      this.isConnected || hasMessages ? "flex" : "none";
+  }
+
+  private send(): void {
+    const text = this.elements.inputEl.value.trim();
+    if (!text) return;
+    this.vscode.postMessage({ type: "sendMessage", text });
+    this.elements.inputEl.value = "";
+    this.elements.inputEl.style.height = "auto";
+    this.elements.sendBtn.disabled = true;
+    this.saveState();
+  }
+
+  private clearInput(): void {
+    this.elements.inputEl.value = "";
+    this.elements.inputEl.style.height = "auto";
+    this.elements.inputEl.focus();
+    this.saveState();
+  }
+
+  handleMessage(msg: ExtensionMessage): void {
+    const { modeSelector, modelSelector, agentSelector, connectBtn } =
+      this.elements;
+
+    switch (msg.type) {
+      case "userMessage":
+        if (msg.text) {
+          this.addMessage(msg.text, "user");
+          this.showThinking();
+          this.updateViewState();
+        }
+        break;
+      case "streamStart":
+        this.currentAssistantText = "";
+        break;
+      case "streamChunk":
+        if (!this.currentAssistantMessage) {
+          this.hideThinking();
+          this.currentAssistantMessage = this.addMessage("", "assistant");
+        }
+        if (msg.text) {
+          this.currentAssistantText += msg.text;
+          this.currentAssistantMessage.textContent = this.currentAssistantText;
+          this.elements.messagesEl.scrollTop =
+            this.elements.messagesEl.scrollHeight;
+        }
+        break;
+      case "streamEnd":
+        this.hideThinking();
+        if (this.currentAssistantMessage) {
+          let html = msg.html || "";
+          html += getToolsHtml(this.tools);
+          this.currentAssistantMessage.innerHTML = html;
+          this.messageTexts.set(
+            this.currentAssistantMessage,
+            this.currentAssistantText,
+          );
+        }
+        this.currentAssistantMessage = null;
+        this.currentAssistantText = "";
+        this.tools = {};
+        this.elements.sendBtn.disabled = false;
+        this.elements.inputEl.focus();
+        break;
+      case "toolCallStart":
+        if (msg.toolCallId && msg.name) {
+          this.tools[msg.toolCallId] = {
+            name: msg.name,
+            input: null,
+            output: null,
+            status: "running",
+          };
+          this.showThinking();
+        }
+        break;
+      case "toolCallComplete":
+        if (msg.toolCallId && this.tools[msg.toolCallId]) {
+          const tool = this.tools[msg.toolCallId];
+          const output =
+            msg.content?.[0]?.content?.text || msg.rawOutput?.output || "";
+          const input =
+            msg.rawInput?.command || msg.rawInput?.description || "";
+          if (msg.title) tool.name = msg.title;
+          tool.input = input;
+          tool.output = output;
+          tool.status = (msg.status as Tool["status"]) || "completed";
+          this.showThinking();
+        }
+        break;
+      case "error":
+        this.hideThinking();
+        if (msg.text) this.addMessage(msg.text, "error");
+        this.elements.sendBtn.disabled = false;
+        this.elements.inputEl.focus();
+        break;
+      case "agentError":
+        if (msg.text) this.addMessage(msg.text, "error");
+        break;
+      case "connectionState":
+        if (msg.state) {
+          this.updateStatus(msg.state);
+          connectBtn.style.display =
+            msg.state === "connected" ? "none" : "inline-block";
+        }
+        break;
+      case "agents":
+        if (!msg.agents) break;
+        agentSelector.innerHTML = "";
+        msg.agents.forEach((a) => {
+          const opt = this.doc.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.available ? a.name : a.name + " (not installed)";
+          if (!a.available) {
+            opt.style.color = "var(--vscode-disabledForeground)";
+          }
+          if (a.id === msg.selected) opt.selected = true;
+          agentSelector.appendChild(opt);
+        });
+        break;
+      case "agentChanged":
+      case "chatCleared":
+        this.elements.messagesEl.innerHTML = "";
+        this.currentAssistantMessage = null;
+        this.messageTexts.clear();
+        modeSelector.style.display = "none";
+        modelSelector.style.display = "none";
+        this.updateViewState();
+        break;
+      case "triggerNewChat":
+        this.vscode.postMessage({ type: "newChat" });
+        break;
+      case "triggerClearChat":
+        this.vscode.postMessage({ type: "clearChat" });
+        break;
+      case "sessionMetadata": {
+        const hasModes =
+          msg.modes &&
+          msg.modes.availableModes &&
+          msg.modes.availableModes.length > 0;
+        const hasModels =
+          msg.models &&
+          msg.models.availableModels &&
+          msg.models.availableModels.length > 0;
+
+        if (hasModes && msg.modes) {
+          modeSelector.style.display = "inline-block";
+          modeSelector.innerHTML = "";
+          msg.modes.availableModes.forEach((m) => {
+            const opt = this.doc.createElement("option");
+            opt.value = m.id;
+            opt.textContent = m.name || m.id;
+            opt.dataset.label = m.name || m.id;
+            if (m.id === msg.modes?.currentModeId) opt.selected = true;
+            modeSelector.appendChild(opt);
+          });
+          updateSelectLabel(modeSelector, "Mode");
+        } else {
+          modeSelector.style.display = "none";
+        }
+
+        if (hasModels && msg.models) {
+          modelSelector.style.display = "inline-block";
+          modelSelector.innerHTML = "";
+          msg.models.availableModels.forEach((m) => {
+            const opt = this.doc.createElement("option");
+            opt.value = m.modelId;
+            opt.textContent = m.name || m.modelId;
+            opt.dataset.label = m.name || m.modelId;
+            if (m.modelId === msg.models?.currentModelId) opt.selected = true;
+            modelSelector.appendChild(opt);
+          });
+          updateSelectLabel(modelSelector, "Model");
+        } else {
+          modelSelector.style.display = "none";
+        }
+        break;
+      }
+      case "modeUpdate":
+        if (msg.modeId) {
+          modeSelector.value = msg.modeId;
+          updateSelectLabel(modeSelector, "Mode");
+        }
+        break;
+    }
+  }
+
+  getTools(): Record<string, Tool> {
+    return this.tools;
+  }
+
+  getIsConnected(): boolean {
+    return this.isConnected;
+  }
+}
+
+export function initWebview(
+  vscode: VsCodeApi,
+  doc: Document,
+  win: Window,
+): WebviewController {
+  const elements = getElements(doc);
+  return new WebviewController(vscode, elements, doc, win);
+}
+
+if (typeof acquireVsCodeApi !== "undefined") {
+  const vscode = acquireVsCodeApi();
+  initWebview(vscode, document, window);
+}
