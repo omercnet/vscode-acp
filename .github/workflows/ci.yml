@@ -42,18 +42,58 @@ jobs:
       - name: Coverage Summary
         if: runner.os == 'Linux'
         run: |
-          echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          cat coverage/lcov.info | awk '
+          COVERAGE=$(cat coverage/lcov.info | awk '
             /^SF:/ { file=$0; sub("SF:", "", file); next }
             /^LH:/ { hit=$0; sub("LH:", "", hit); next }
             /^LF:/ { 
               found=$0; sub("LF:", "", found)
               if (found > 0) { total_hit += hit; total_found += found }
             }
-            END { printf "Lines: %.1f%% (%d/%d)\n", (total_hit/total_found)*100, total_hit, total_found }
-          ' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+            END { printf "%.1f%% (%d/%d lines)", (total_hit/total_found)*100, total_hit, total_found }
+          ')
+          echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
+          echo "**Lines:** $COVERAGE" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment Coverage on PR
+        if: runner.os == 'Linux' && github.event_name == 'pull_request'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const lcov = fs.readFileSync('coverage/lcov.info', 'utf8');
+            let totalHit = 0, totalFound = 0;
+            let currentHit = 0;
+            for (const line of lcov.split('\n')) {
+              if (line.startsWith('LH:')) currentHit = parseInt(line.slice(3));
+              if (line.startsWith('LF:')) {
+                const found = parseInt(line.slice(3));
+                if (found > 0) { totalHit += currentHit; totalFound += found; }
+              }
+            }
+            const pct = ((totalHit / totalFound) * 100).toFixed(1);
+            const body = `## 📊 Coverage Report\n\n**Lines:** ${pct}% (${totalHit}/${totalFound})`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes('📊 Coverage Report'));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
       - name: Package extension
         run: npx vsce package --no-dependencies
