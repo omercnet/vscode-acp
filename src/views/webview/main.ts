@@ -484,8 +484,9 @@ export class WebviewController {
         }
         break;
       case "agents":
+        if (!msg.agents) break;
         agentSelector.innerHTML = "";
-        msg.agents!.forEach((a) => {
+        msg.agents.forEach((a) => {
           const opt = this.doc.createElement("option");
           opt.value = a.id;
           opt.textContent = a.available ? a.name : a.name + " (not installed)";
@@ -521,15 +522,15 @@ export class WebviewController {
           msg.models.availableModels &&
           msg.models.availableModels.length > 0;
 
-        if (hasModes) {
+        if (hasModes && msg.modes) {
           modeSelector.style.display = "inline-block";
           modeSelector.innerHTML = "";
-          msg.modes!.availableModes.forEach((m) => {
+          msg.modes.availableModes.forEach((m) => {
             const opt = this.doc.createElement("option");
             opt.value = m.id;
             opt.textContent = m.name || m.id;
             opt.dataset.label = m.name || m.id;
-            if (m.id === msg.modes!.currentModeId) opt.selected = true;
+            if (m.id === msg.modes?.currentModeId) opt.selected = true;
             modeSelector.appendChild(opt);
           });
           updateSelectLabel(modeSelector, "Mode");
@@ -537,15 +538,15 @@ export class WebviewController {
           modeSelector.style.display = "none";
         }
 
-        if (hasModels) {
+        if (hasModels && msg.models) {
           modelSelector.style.display = "inline-block";
           modelSelector.innerHTML = "";
-          msg.models!.availableModels.forEach((m) => {
+          msg.models.availableModels.forEach((m) => {
             const opt = this.doc.createElement("option");
             opt.value = m.modelId;
             opt.textContent = m.name || m.modelId;
             opt.dataset.label = m.name || m.modelId;
-            if (m.modelId === msg.models!.currentModelId) opt.selected = true;
+            if (m.modelId === msg.models?.currentModelId) opt.selected = true;
             modelSelector.appendChild(opt);
           });
           updateSelectLabel(modelSelector, "Model");

@@ -243,17 +243,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         console.warn("[Chat] No streaming text received from agent");
         console.warn("[Chat] stderr buffer:", this.stderrBuffer);
         console.warn("[Chat] Response:", JSON.stringify(response, null, 2));
-        if (this.stderrBuffer.length > 0) {
-          this.postMessage({
-            type: "error",
-            text: `Agent returned no response. Stderr: ${this.stderrBuffer.slice(0, 500)}`,
-          });
-        } else {
-          this.postMessage({
-            type: "error",
-            text: `Agent returned no response (stopReason: ${response.stopReason}). Check agent logs.`,
-          });
-        }
+        this.postMessage({
+          type: "error",
+          text: "Agent returned no response. Check the ACP output channel for details.",
+        });
         this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
       } else {
         const renderedHtml = marked.parse(this.streamingText) as string;
@@ -273,6 +266,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         text: `Error: ${errorMessage}`,
       });
       this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
+      this.streamingText = "";
+      this.stderrBuffer = "";
     }
   }
 

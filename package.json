@@ -134,7 +134,7 @@
     "test": "vscode-test",
     "precoverage": "npm run compile-tests && npm run compile",
     "coverage": "vscode-test --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text",
-    "coverage:html": "vscode-test --coverage --coverage-reporter=html"
+    "coverage:html": "vscode-test --coverage --coverage-reporter html"
   },
   "devDependencies": {
     "@types/jsdom": "^27.0.0",
