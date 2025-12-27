@@ -177,7 +177,11 @@ export class ACPClient {
           if (updateType === "agent_message_chunk") {
             console.log("[ACP] CHUNK:", JSON.stringify(params.update));
           }
-          this.sessionUpdateListeners.forEach((cb) => cb(params));
+          try {
+            this.sessionUpdateListeners.forEach((cb) => cb(params));
+          } catch (error) {
+            console.error("[ACP] Error in session update listener:", error);
+          }
         },
       };
 
@@ -258,10 +262,21 @@ export class ACPClient {
       throw new Error("No active session");
     }
 
-    return this.connection.prompt({
-      sessionId: this.currentSessionId,
-      prompt: [{ type: "text", text: message }],
-    });
+    try {
+      const response = await this.connection.prompt({
+        sessionId: this.currentSessionId,
+        prompt: [{ type: "text", text: message }],
+      });
+      console.log("[ACP] Prompt completed:", JSON.stringify(response, null, 2));
+      return response;
+    } catch (error) {
+      console.error("[ACP] Prompt error:", error);
+      if (error instanceof Error) {
+        console.error("[ACP] Error details:", error.message, error.stack);
+      }
+      console.error("[ACP] Raw error:", JSON.stringify(error, null, 2));
+      throw error;
+    }
   }
 
   async cancel(): Promise<void> {

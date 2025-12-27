@@ -187,6 +187,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (update.content.type === "text") {
         this.streamingText += update.content.text;
         this.postMessage({ type: "streamChunk", text: update.content.text });
+      } else {
+        console.log("[Chat] Non-text chunk type:", update.content.type);
       }
     } else if (update.sessionUpdate === "tool_call") {
       this.postMessage({
@@ -237,11 +239,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         JSON.stringify(response, null, 2),
       );
 
-      if (this.streamingText.length === 0 && this.stderrBuffer.length > 0) {
-        this.postMessage({
-          type: "error",
-          text: "Agent returned no response. Check the agent logs for errors.",
-        });
+      if (this.streamingText.length === 0) {
+        console.warn("[Chat] No streaming text received from agent");
+        console.warn("[Chat] stderr buffer:", this.stderrBuffer);
+        console.warn("[Chat] Response:", JSON.stringify(response, null, 2));
+        if (this.stderrBuffer.length > 0) {
+          this.postMessage({
+            type: "error",
+            text: `Agent returned no response. Stderr: ${this.stderrBuffer.slice(0, 500)}`,
+          });
+        } else {
+          this.postMessage({
+            type: "error",
+            text: `Agent returned no response (stopReason: ${response.stopReason}). Check agent logs.`,
+          });
+        }
         this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
       } else {
         const renderedHtml = marked.parse(this.streamingText) as string;
@@ -253,10 +265,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
+      console.error("[Chat] Error in handleUserMessage:", error);
+      const errorMessage =
+        error instanceof Error ? error.message : JSON.stringify(error);
       this.postMessage({
         type: "error",
-        text: error instanceof Error ? error.message : "Unknown error",
+        text: `Error: ${errorMessage}`,
       });
+      this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
     }
   }
 
