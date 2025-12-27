@@ -131,9 +131,13 @@
     "package": "npm run check-types && node esbuild.js --production",
     "compile-tests": "tsc -p . --outDir out",
     "pretest": "npm run compile-tests && npm run compile",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "precoverage": "npm run compile-tests && npm run compile",
+    "coverage": "vscode-test --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text",
+    "coverage:html": "vscode-test --coverage --coverage-reporter html"
   },
   "devDependencies": {
+    "@types/jsdom": "^27.0.0",
     "@types/marked": "^5.0.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "18.x",
@@ -142,6 +146,7 @@
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
+    "jsdom": "^27.3.0",
     "npm-run-all": "^4.1.5",
     "typescript": "^5.0.0"
   },
