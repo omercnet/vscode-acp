@@ -88,8 +88,19 @@ suite("Webview", () => {
     test("escapes all special characters together", () => {
       assert.strictEqual(
         escapeHtml("<script>alert('xss')</script>"),
-        "&lt;script&gt;alert('xss')&lt;/script&gt;",
+        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;",
       );
+    });
+
+    test("escapes double quotes", () => {
+      assert.strictEqual(
+        escapeHtml('a "quoted" string'),
+        "a &quot;quoted&quot; string",
+      );
+    });
+
+    test("escapes single quotes", () => {
+      assert.strictEqual(escapeHtml("it's"), "it&#39;s");
     });
 
     test("returns empty string for empty input", () => {
