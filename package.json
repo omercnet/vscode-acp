@@ -138,9 +138,7 @@
     "lint": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "prepare": "husky",
-    "screenshot": "node scripts/screenshot.mjs",
-    "screenshot:ansi": "node scripts/screenshot.mjs --ansi-only",
-    "screenshot:vscode": "node scripts/screenshot.mjs --vscode-only"
+    "screenshot": "node scripts/screenshot.mjs"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.2.0",
