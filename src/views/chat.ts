@@ -6,7 +6,13 @@ import {
   getAgentsWithStatus,
   getFirstAvailableAgent,
 } from "../acp/agents";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type {
+  SessionNotification,
+  ReadTextFileRequest,
+  ReadTextFileResponse,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
+} from "@agentclientprotocol/sdk";
 
 marked.setOptions({
   breaks: true,
@@ -70,6 +76,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
+    });
+
+    this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
+      return this.handleReadTextFile(params);
+    });
+
+    this.acpClient.setOnWriteTextFile(async (params: WriteTextFileRequest) => {
+      return this.handleWriteTextFile(params);
     });
   }
 
@@ -178,6 +192,59 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (this.stderrBuffer.length > 10000) {
       this.stderrBuffer = this.stderrBuffer.slice(-5000);
+    }
+  }
+
+  private async handleReadTextFile(
+    params: ReadTextFileRequest
+  ): Promise<ReadTextFileResponse> {
+    console.log("[Chat] Reading file:", params.path);
+    try {
+      const uri = vscode.Uri.file(params.path);
+
+      // Check if file is open in editor with unsaved changes
+      const openDoc = vscode.workspace.textDocuments.find(
+        (doc) => doc.uri.fsPath === uri.fsPath
+      );
+
+      let content: string;
+      if (openDoc) {
+        // Use content from open document (includes unsaved changes)
+        content = openDoc.getText();
+      } else {
+        // Read from disk
+        const fileContent = await vscode.workspace.fs.readFile(uri);
+        content = new TextDecoder().decode(fileContent);
+      }
+
+      // Apply line and limit if specified
+      if (params.line !== undefined || params.limit !== undefined) {
+        const lines = content.split("\n");
+        const startLine = params.line ?? 0;
+        const lineLimit = params.limit ?? lines.length;
+        const selectedLines = lines.slice(startLine, startLine + lineLimit);
+        content = selectedLines.join("\n");
+      }
+
+      return { content };
+    } catch (error) {
+      console.error("[Chat] Failed to read file:", error);
+      throw error;
+    }
+  }
+
+  private async handleWriteTextFile(
+    params: WriteTextFileRequest
+  ): Promise<WriteTextFileResponse> {
+    console.log("[Chat] Writing file:", params.path);
+    try {
+      const uri = vscode.Uri.file(params.path);
+      const content = new TextEncoder().encode(params.content);
+      await vscode.workspace.fs.writeFile(uri, content);
+      return {};
+    } catch (error) {
+      console.error("[Chat] Failed to write file:", error);
+      throw error;
     }
   }
 

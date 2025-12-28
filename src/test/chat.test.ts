@@ -14,6 +14,8 @@ interface MockACPClient {
   setOnStateChange: (callback: any) => () => void;
   setOnSessionUpdate: (callback: any) => () => void;
   setOnStderr: (callback: any) => () => void;
+  setOnReadTextFile: (callback: any) => void;
+  setOnWriteTextFile: (callback: any) => void;
   isConnected: () => boolean;
   connect: () => Promise<void>;
   newSession: (dir: string) => Promise<void>;
@@ -63,6 +65,8 @@ class TestACPClient implements MockACPClient {
   setOnStderr(): () => void {
     return () => {};
   }
+  setOnReadTextFile(): void {}
+  setOnWriteTextFile(): void {}
   isConnected(): boolean {
     return false;
   }
