@@ -831,7 +831,7 @@ export class WebviewController {
         if (msg.toolCallId && msg.name) {
           // Finalize current text message before showing tools
           if (this.currentAssistantText.trim()) {
-            this.finializeCurrentMessage();
+            this.finalizeCurrentMessage();
             this.currentAssistantMessage = null;
             this.currentAssistantText = "";
           }
@@ -978,7 +978,7 @@ export class WebviewController {
     }
   }
 
-  private finializeCurrentMessage(): void {
+  private finalizeCurrentMessage(): void {
     if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
       const html =
         this.currentAssistantText +
