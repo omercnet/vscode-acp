@@ -186,7 +186,10 @@ export function hasAnsiCodes(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
 }
 
-export function getToolsHtml(tools: Record<string, Tool>): string {
+export function getToolsHtml(
+  tools: Record<string, Tool>,
+  expandedToolId?: string | null
+): string {
   const toolIds = Object.keys(tools);
   if (toolIds.length === 0) return "";
   const toolItems = toolIds
@@ -199,6 +202,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
             ? "✗"
             : "⋯";
       const statusClass = tool.status === "running" ? "running" : "";
+      const isExpanded = id === expandedToolId;
       let detailsContent = "";
       if (tool.input) {
         detailsContent +=
@@ -224,9 +228,17 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           "</pre>";
       }
       const escapedStatus = escapeHtml(tool.status);
+      const inputPreview = tool.input
+        ? '<span class="tool-input-preview">' +
+          escapeHtml(tool.input) +
+          "</span>"
+        : "";
       if (detailsContent) {
+        const openAttr = isExpanded ? " open" : "";
         return (
-          '<li><details class="tool-item"><summary><span class="tool-status ' +
+          '<li><details class="tool-item"' +
+          openAttr +
+          '><summary><span class="tool-status ' +
           statusClass +
           '" aria-label="' +
           escapedStatus +
@@ -234,6 +246,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           statusIcon +
           "</span> " +
           escapeHtml(tool.name) +
+          inputPreview +
           "</summary>" +
           detailsContent +
           "</details></li>"
@@ -248,6 +261,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
         statusIcon +
         "</span> " +
         escapeHtml(tool.name) +
+        inputPreview +
         "</li>"
       );
     })
@@ -327,6 +341,8 @@ export class WebviewController {
   private messageTexts = new Map<HTMLElement, string>();
   private availableCommands: AvailableCommand[] = [];
   private selectedCommandIndex = -1;
+  private hasActiveTool = false;
+  private expandedToolId: string | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -551,7 +567,7 @@ export class WebviewController {
       this.elements.messagesEl.appendChild(this.thinkingEl);
     }
     let html = '<span class="thinking" aria-label="Processing">Thinking</span>';
-    html += getToolsHtml(this.tools);
+    html += getToolsHtml(this.tools, this.expandedToolId);
     this.thinkingEl.innerHTML = html;
     this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
   }
@@ -757,8 +773,25 @@ export class WebviewController {
         break;
       case "streamStart":
         this.currentAssistantText = "";
+        this.hasActiveTool = false;
         break;
       case "streamChunk":
+        if (this.hasActiveTool && msg.text) {
+          this.hideThinking();
+          if (Object.keys(this.tools).length > 0) {
+            const toolMessage = this.addMessage("", "assistant");
+            toolMessage.innerHTML = getToolsHtml(
+              this.tools,
+              this.expandedToolId
+            );
+          }
+          this.currentAssistantMessage = null;
+          this.currentAssistantText = "";
+          this.tools = {};
+          this.expandedToolId = null;
+          this.hasActiveTool = false;
+        }
+
         if (!this.currentAssistantMessage) {
           this.hideThinking();
           this.currentAssistantMessage = this.addMessage("", "assistant");
@@ -772,29 +805,44 @@ export class WebviewController {
         break;
       case "streamEnd":
         this.hideThinking();
+
         if (this.currentAssistantMessage) {
           let html = msg.html || "";
-          html += getToolsHtml(this.tools);
+          if (this.currentAssistantText.trim()) {
+            html = this.currentAssistantText + html;
+          }
+          html += getToolsHtml(this.tools, this.expandedToolId);
           this.currentAssistantMessage.innerHTML = html;
           this.messageTexts.set(
             this.currentAssistantMessage,
             this.currentAssistantText
           );
         }
+
         this.currentAssistantMessage = null;
         this.currentAssistantText = "";
         this.tools = {};
+        this.hasActiveTool = false;
+        this.expandedToolId = null;
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
       case "toolCallStart":
         if (msg.toolCallId && msg.name) {
+          // Finalize current text message before showing tools
+          if (this.currentAssistantText.trim()) {
+            this.finalizeCurrentMessage();
+            this.currentAssistantMessage = null;
+            this.currentAssistantText = "";
+          }
+
           this.tools[msg.toolCallId] = {
             name: msg.name,
             input: null,
             output: null,
             status: "running",
           };
+          this.hasActiveTool = true;
           this.showThinking();
         }
         break;
@@ -809,6 +857,7 @@ export class WebviewController {
           tool.input = input;
           tool.output = output;
           tool.status = (msg.status as Tool["status"]) || "completed";
+          this.expandedToolId = msg.toolCallId;
           this.showThinking();
         }
         break;
@@ -926,6 +975,19 @@ export class WebviewController {
       case "planComplete":
         this.hidePlan();
         break;
+    }
+  }
+
+  private finalizeCurrentMessage(): void {
+    if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
+      const html =
+        this.currentAssistantText +
+        getToolsHtml(this.tools, this.expandedToolId);
+      this.currentAssistantMessage.innerHTML = html;
+      this.messageTexts.set(
+        this.currentAssistantMessage,
+        this.currentAssistantText
+      );
     }
   }
 

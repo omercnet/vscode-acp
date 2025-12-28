@@ -335,6 +335,18 @@ body {
   font-size: 11px;
 }
 
+.tool-input-preview {
+  color: var(--vscode-descriptionForeground);
+  margin-left: 6px;
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.tool-input-preview::before {
+  content: "$ ";
+  color: var(--vscode-terminal-ansiGreen);
+}
+
 .tool-output {
   margin: 4px 0 0 18px;
   padding: 6px 8px;
