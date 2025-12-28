@@ -14,6 +14,8 @@ marked.setOptions({
 });
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
+const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
+const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 
 interface WebviewMessage {
   type:
@@ -295,6 +297,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleModeChange(modeId: string): Promise<void> {
     try {
       await this.acpClient.setMode(modeId);
+      await this.globalState.update(SELECTED_MODE_KEY, modeId);
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set mode:", error);
@@ -304,6 +307,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleModelChange(modelId: string): Promise<void> {
     try {
       await this.acpClient.setModel(modelId);
+      await this.globalState.update(SELECTED_MODEL_KEY, modelId);
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set model:", error);
@@ -361,6 +365,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       models: metadata?.models ?? null,
       commands: metadata?.commands ?? null,
     });
+
+    // Restore saved mode and model after metadata is sent (fire-and-forget)
+    this.restoreSavedModeAndModel().catch((error) =>
+      console.warn("[Chat] Failed to restore saved mode/model:", error)
+    );
+  }
+
+  private async restoreSavedModeAndModel(): Promise<void> {
+    const savedModeId = this.globalState.get<string>(SELECTED_MODE_KEY);
+    const savedModelId = this.globalState.get<string>(SELECTED_MODEL_KEY);
+
+    if (savedModeId) {
+      await this.acpClient.setMode(savedModeId);
+      console.log(`[Chat] Restored mode: ${savedModeId}`);
+    }
+
+    if (savedModelId) {
+      await this.acpClient.setModel(savedModelId);
+      console.log(`[Chat] Restored model: ${savedModelId}`);
+    }
   }
 
   private postMessage(message: Record<string, unknown>): void {
