@@ -89,14 +89,14 @@ suite("Webview", () => {
     test("escapes all special characters together", () => {
       assert.strictEqual(
         escapeHtml("<script>alert('xss')</script>"),
-        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;",
+        "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
       );
     });
 
     test("escapes double quotes", () => {
       assert.strictEqual(
         escapeHtml('a "quoted" string'),
-        "a &quot;quoted&quot; string",
+        "a &quot;quoted&quot; string"
       );
     });
 
@@ -214,7 +214,7 @@ suite("Webview", () => {
 
     setup(() => {
       dom = new JSDOM(
-        '<!DOCTYPE html><select id="test"><option value="1" data-label="First">First</option><option value="2" data-label="Second">Second</option></select>',
+        '<!DOCTYPE html><select id="test"><option value="1" data-label="First">First</option><option value="2" data-label="Second">Second</option></select>'
       );
       document = dom.window.document;
     });
@@ -297,7 +297,7 @@ suite("Webview", () => {
         mockVsCode,
         elements,
         document,
-        window as unknown as Window,
+        window as unknown as Window
       );
     });
 
@@ -308,7 +308,7 @@ suite("Webview", () => {
     test("sends ready message on initialization", () => {
       const messages = mockVsCode._getMessages();
       assert.ok(
-        messages.some((m: unknown) => (m as { type: string }).type === "ready"),
+        messages.some((m: unknown) => (m as { type: string }).type === "ready")
       );
     });
 
@@ -509,8 +509,8 @@ suite("Webview", () => {
         const messages = mockVsCode._getMessages();
         assert.ok(
           messages.some(
-            (m: unknown) => (m as { type: string }).type === "connect",
-          ),
+            (m: unknown) => (m as { type: string }).type === "connect"
+          )
         );
       });
 
@@ -520,8 +520,8 @@ suite("Webview", () => {
         const messages = mockVsCode._getMessages();
         assert.ok(
           messages.some(
-            (m: unknown) => (m as { type: string }).type === "connect",
-          ),
+            (m: unknown) => (m as { type: string }).type === "connect"
+          )
         );
       });
     });
@@ -541,8 +541,8 @@ suite("Webview", () => {
           messages.some(
             (m: unknown) =>
               (m as { type: string; text?: string }).type === "sendMessage" &&
-              (m as { type: string; text?: string }).text === "Test message",
-          ),
+              (m as { type: string; text?: string }).text === "Test message"
+          )
         );
       });
 
@@ -558,8 +558,8 @@ suite("Webview", () => {
         const messages = mockVsCode._getMessages();
         assert.ok(
           !messages.some(
-            (m: unknown) => (m as { type: string }).type === "sendMessage",
-          ),
+            (m: unknown) => (m as { type: string }).type === "sendMessage"
+          )
         );
       });
 
@@ -575,8 +575,8 @@ suite("Webview", () => {
         const messages = mockVsCode._getMessages();
         assert.ok(
           !messages.some(
-            (m: unknown) => (m as { type: string }).type === "sendMessage",
-          ),
+            (m: unknown) => (m as { type: string }).type === "sendMessage"
+          )
         );
       });
 
@@ -634,7 +634,7 @@ suite("Webview", () => {
         assert.ok(elements.commandAutocomplete.classList.contains("visible"));
         assert.strictEqual(
           elements.commandAutocomplete.querySelectorAll(".command-item").length,
-          3,
+          3
         );
       });
 
@@ -719,7 +719,7 @@ suite("Webview", () => {
         elements.inputEl.dispatchEvent(downEvent);
 
         const selectedItem = elements.commandAutocomplete.querySelector(
-          ".command-item.selected",
+          ".command-item.selected"
         );
         assert.ok(selectedItem);
       });
@@ -732,7 +732,7 @@ suite("Webview", () => {
           mockVsCode,
           elements,
           document,
-          window as unknown as Window,
+          window as unknown as Window
         );
         assert.strictEqual(elements.inputEl.value, "saved text");
       });
@@ -743,7 +743,7 @@ suite("Webview", () => {
           mockVsCode,
           elements,
           document,
-          window as unknown as Window,
+          window as unknown as Window
         );
         assert.strictEqual(restoredController.getIsConnected(), true);
       });
@@ -769,7 +769,7 @@ suite("Webview", () => {
       const controller = initWebview(
         mockVsCode,
         dom.window.document,
-        dom.window as unknown as Window,
+        dom.window as unknown as Window
       );
       assert.ok(controller instanceof WebviewController);
     });

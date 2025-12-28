@@ -35,7 +35,7 @@ type StderrCallback = (data: string) => void;
 export type SpawnFunction = (
   command: string,
   args: string[],
-  options: SpawnOptions,
+  options: SpawnOptions
 ) => ChildProcess;
 
 export interface ACPClientOptions {
@@ -112,7 +112,7 @@ export class ACPClient {
     if (!this.skipAvailabilityCheck && !isAgentAvailable(this.agentConfig.id)) {
       throw new Error(
         `Agent "${this.agentConfig.name}" is not installed. ` +
-          `Please install "${this.agentConfig.command}" and try again.`,
+          `Please install "${this.agentConfig.command}" and try again.`
       );
     }
 
@@ -125,7 +125,7 @@ export class ACPClient {
         {
           stdio: ["pipe", "pipe", "pipe"],
           env: { ...process.env },
-        },
+        }
       );
 
       this.process.stderr?.on("data", (data: Buffer) => {
@@ -148,24 +148,24 @@ export class ACPClient {
 
       const stream = ndJsonStream(
         Writable.toWeb(this.process.stdin!) as WritableStream<Uint8Array>,
-        Readable.toWeb(this.process.stdout!) as ReadableStream<Uint8Array>,
+        Readable.toWeb(this.process.stdout!) as ReadableStream<Uint8Array>
       );
 
       const client: Client = {
         requestPermission: async (
-          params: RequestPermissionRequest,
+          params: RequestPermissionRequest
         ): Promise<RequestPermissionResponse> => {
           console.log(
             "[ACP] Permission request:",
-            JSON.stringify(params, null, 2),
+            JSON.stringify(params, null, 2)
           );
           const allowOption = params.options.find(
-            (opt) => opt.kind === "allow_once" || opt.kind === "allow_always",
+            (opt) => opt.kind === "allow_once" || opt.kind === "allow_always"
           );
           if (allowOption) {
             console.log(
               "[ACP] Auto-approving with option:",
-              allowOption.optionId,
+              allowOption.optionId
             );
             return {
               outcome: { outcome: "selected", optionId: allowOption.optionId },
@@ -191,7 +191,7 @@ export class ACPClient {
             }
             console.log(
               "[ACP] Commands updated:",
-              update.availableCommands.length,
+              update.availableCommands.length
             );
           }
           try {

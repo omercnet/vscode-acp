@@ -266,7 +266,7 @@ export class MockACPServer {
 
   private sendSessionUpdate(
     sessionId: string,
-    update: Record<string, unknown>,
+    update: Record<string, unknown>
   ): void {
     const notification = {
       jsonrpc: "2.0",
