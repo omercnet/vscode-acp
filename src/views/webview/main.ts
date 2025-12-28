@@ -327,6 +327,7 @@ export class WebviewController {
   private messageTexts = new Map<HTMLElement, string>();
   private availableCommands: AvailableCommand[] = [];
   private selectedCommandIndex = -1;
+  private hasActiveTool = false;
 
   constructor(
     vscode: VsCodeApi,
@@ -757,8 +758,18 @@ export class WebviewController {
         break;
       case "streamStart":
         this.currentAssistantText = "";
+        this.hasActiveTool = false;
         break;
       case "streamChunk":
+        // If we just finished tool execution and now have new text, create a new message bubble
+        if (this.hasActiveTool && msg.text) {
+          this.finializeCurrentMessage();
+          this.currentAssistantMessage = null;
+          this.currentAssistantText = "";
+          this.tools = {};
+          this.hasActiveTool = false;
+        }
+
         if (!this.currentAssistantMessage) {
           this.hideThinking();
           this.currentAssistantMessage = this.addMessage("", "assistant");
@@ -772,8 +783,13 @@ export class WebviewController {
         break;
       case "streamEnd":
         this.hideThinking();
+
+        // Finalize current message and any remaining tools
         if (this.currentAssistantMessage) {
           let html = msg.html || "";
+          if (this.currentAssistantText.trim()) {
+            html = this.currentAssistantText + html;
+          }
           html += getToolsHtml(this.tools);
           this.currentAssistantMessage.innerHTML = html;
           this.messageTexts.set(
@@ -781,20 +797,30 @@ export class WebviewController {
             this.currentAssistantText
           );
         }
+
         this.currentAssistantMessage = null;
         this.currentAssistantText = "";
         this.tools = {};
+        this.hasActiveTool = false;
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
       case "toolCallStart":
         if (msg.toolCallId && msg.name) {
+          // Finalize current text message before showing tools
+          if (this.currentAssistantText.trim()) {
+            this.finializeCurrentMessage();
+            this.currentAssistantMessage = null;
+            this.currentAssistantText = "";
+          }
+
           this.tools[msg.toolCallId] = {
             name: msg.name,
             input: null,
             output: null,
             status: "running",
           };
+          this.hasActiveTool = true;
           this.showThinking();
         }
         break;
@@ -809,6 +835,13 @@ export class WebviewController {
           tool.input = input;
           tool.output = output;
           tool.status = (msg.status as Tool["status"]) || "completed";
+
+          // Display the completed tool immediately
+          if (!this.currentAssistantMessage) {
+            this.currentAssistantMessage = this.addMessage("", "assistant");
+          }
+          this.displayToolExecution();
+
           this.showThinking();
         }
         break;
@@ -926,6 +959,34 @@ export class WebviewController {
       case "planComplete":
         this.hidePlan();
         break;
+    }
+  }
+
+  /**
+   * Finalize the current assistant message by updating its HTML with tools.
+   * Called when transitioning to tool execution or ending the stream.
+   */
+  private finializeCurrentMessage(): void {
+    if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
+      let html = this.currentAssistantText;
+      html += getToolsHtml(this.tools);
+      this.currentAssistantMessage.innerHTML = html;
+      this.messageTexts.set(
+        this.currentAssistantMessage,
+        this.currentAssistantText
+      );
+    }
+  }
+
+  /**
+   * Display tool execution in a separate container within the current message.
+   * This allows tools to be shown without mixing into the text content.
+   */
+  private displayToolExecution(): void {
+    if (this.currentAssistantMessage) {
+      let html = this.currentAssistantMessage.innerHTML || "";
+      html += getToolsHtml(this.tools);
+      this.currentAssistantMessage.innerHTML = html;
     }
   }
 
