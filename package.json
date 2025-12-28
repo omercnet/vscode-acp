@@ -137,11 +137,16 @@
     "coverage:html": "vscode-test --coverage --coverage-reporter html",
     "lint": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
-    "prepare": "husky"
+    "prepare": "husky",
+    "screenshot": "npx tsx scripts/screenshot.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:debug": "playwright test --debug"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.2.0",
     "@commitlint/config-conventional": "^20.2.0",
+    "@playwright/test": "^1.57.0",
     "@types/jsdom": "^27.0.0",
     "@types/marked": "^5.0.2",
     "@types/mocha": "^10.0.10",

@@ -8,7 +8,7 @@
 
 Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your editor. No context switching, no copy-pasting code.
 
-![VSCode ACP Screenshot](assets/screenshot.png)
+![VSCode ACP Screenshot](screenshots/acp-sidebar.png)
 
 ## Features
 

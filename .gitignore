@@ -5,6 +5,8 @@ out
 .vscode-test
 .beads/
 coverage/
+test-results/
+playwright-report/
 
 @AGENTS.md
 mise.toml
