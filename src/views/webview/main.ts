@@ -24,6 +24,12 @@ export interface AvailableCommand {
   input?: { hint?: string };
 }
 
+export interface PlanEntry {
+  content: string;
+  priority: "high" | "medium" | "low";
+  status: "pending" | "in_progress" | "completed";
+}
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -43,6 +49,7 @@ export interface ExtensionMessage {
     currentModelId: string;
   } | null;
   commands?: AvailableCommand[] | null;
+  plan?: { entries: PlanEntry[] };
   toolCallId?: string;
   name?: string;
   title?: string;
@@ -187,6 +194,7 @@ export class WebviewController {
   private currentAssistantMessage: HTMLElement | null = null;
   private currentAssistantText = "";
   private thinkingEl: HTMLElement | null = null;
+  private planEl: HTMLElement | null = null;
   private tools: Record<string, Tool> = {};
   private isConnected = false;
   private messageTexts = new Map<HTMLElement, string>();
@@ -533,6 +541,68 @@ export class WebviewController {
     }
   }
 
+  showPlan(entries: PlanEntry[]): void {
+    if (entries.length === 0) {
+      this.hidePlan();
+      return;
+    }
+
+    if (!this.planEl) {
+      this.planEl = this.doc.createElement("div");
+      this.planEl.className = "agent-plan";
+      this.planEl.setAttribute("role", "status");
+      this.planEl.setAttribute("aria-live", "polite");
+      this.planEl.setAttribute("aria-label", "Agent execution plan");
+      this.elements.messagesEl.appendChild(this.planEl);
+    }
+
+    const completedCount = entries.filter(
+      (e) => e.status === "completed"
+    ).length;
+    const totalCount = entries.length;
+
+    this.planEl.innerHTML = `
+      <div class="plan-header">
+        <span class="plan-icon">📋</span>
+        <span class="plan-title">Agent Plan</span>
+        <span class="plan-progress">${completedCount}/${totalCount}</span>
+      </div>
+      <div class="plan-entries">
+        ${entries
+          .map(
+            (entry) => `
+          <div class="plan-entry plan-entry-${entry.status} plan-priority-${entry.priority}">
+            <span class="plan-status-icon">${this.getPlanStatusIcon(entry.status)}</span>
+            <span class="plan-content">${escapeHtml(entry.content)}</span>
+          </div>
+        `
+          )
+          .join("")}
+      </div>
+    `;
+
+    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
+  }
+
+  private getPlanStatusIcon(status: string): string {
+    switch (status) {
+      case "completed":
+        return "✓";
+      case "in_progress":
+        return "⋯";
+      case "pending":
+      default:
+        return "○";
+    }
+  }
+
+  hidePlan(): void {
+    if (this.planEl) {
+      this.planEl.remove();
+      this.planEl = null;
+    }
+  }
+
   private updateAutocomplete(): void {
     const text = this.elements.inputEl.value;
     const firstWord = text.split(/\s/)[0];
@@ -654,6 +724,7 @@ export class WebviewController {
         modelSelector.style.display = "none";
         this.availableCommands = [];
         this.hideCommandAutocomplete();
+        this.hidePlan();
         this.updateViewState();
         break;
       case "triggerNewChat":
@@ -719,6 +790,14 @@ export class WebviewController {
         if (msg.commands && Array.isArray(msg.commands)) {
           this.availableCommands = msg.commands;
         }
+        break;
+      case "plan":
+        if (msg.plan && msg.plan.entries) {
+          this.showPlan(msg.plan.entries);
+        }
+        break;
+      case "planComplete":
+        this.hidePlan();
         break;
     }
   }

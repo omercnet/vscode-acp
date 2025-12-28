@@ -520,3 +520,96 @@ kbd {
     border: 1px solid ButtonText;
   }
 }
+
+/* Agent Plan Display */
+.agent-plan {
+  margin: 8px 0;
+  padding: 12px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  border-radius: 8px;
+  border-left: 3px solid var(--vscode-activityBarBadge-background);
+}
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.plan-icon {
+  font-size: 14px;
+}
+
+.plan-title {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--vscode-foreground);
+}
+
+.plan-progress {
+  margin-left: auto;
+  font-size: 11px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.plan-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 4px 0;
+}
+
+.plan-status-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.plan-entry-pending .plan-status-icon {
+  color: var(--vscode-descriptionForeground);
+}
+
+.plan-entry-in_progress .plan-status-icon {
+  color: var(--vscode-progressBar-background);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.plan-entry-completed .plan-status-icon {
+  color: var(--vscode-testing-iconPassed);
+}
+
+.plan-entry-completed .plan-content {
+  color: var(--vscode-descriptionForeground);
+  text-decoration: line-through;
+  text-decoration-color: var(--vscode-descriptionForeground);
+}
+
+.plan-content {
+  flex: 1;
+  color: var(--vscode-foreground);
+}
+
+.plan-priority-high .plan-content {
+  font-weight: 500;
+}
+
+.plan-priority-low {
+  opacity: 0.8;
+}

@@ -215,6 +215,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "availableCommands",
         commands: update.availableCommands,
       });
+    } else if (update.sessionUpdate === "plan") {
+      this.postMessage({
+        type: "plan",
+        plan: { entries: update.entries },
+      });
     }
   }
 
