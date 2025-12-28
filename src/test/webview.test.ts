@@ -725,6 +725,112 @@ suite("Webview", () => {
       });
     });
 
+    suite("agent plan display", () => {
+      const testPlan = {
+        entries: [
+          {
+            content: "Read files",
+            priority: "high" as const,
+            status: "completed" as const,
+          },
+          {
+            content: "Analyze code",
+            priority: "medium" as const,
+            status: "in_progress" as const,
+          },
+          {
+            content: "Generate report",
+            priority: "low" as const,
+            status: "pending" as const,
+          },
+        ],
+      };
+
+      test("showPlan creates plan element", () => {
+        controller.showPlan(testPlan.entries);
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.ok(planEl);
+      });
+
+      test("showPlan displays all entries", () => {
+        controller.showPlan(testPlan.entries);
+        const entries = elements.messagesEl.querySelectorAll(".plan-entry");
+        assert.strictEqual(entries.length, 3);
+      });
+
+      test("showPlan shows progress count", () => {
+        controller.showPlan(testPlan.entries);
+        const progress = elements.messagesEl.querySelector(".plan-progress");
+        assert.ok(progress);
+        assert.strictEqual(progress?.textContent, "1/3");
+      });
+
+      test("showPlan applies status classes", () => {
+        controller.showPlan(testPlan.entries);
+        const completed = elements.messagesEl.querySelector(
+          ".plan-entry-completed"
+        );
+        const inProgress = elements.messagesEl.querySelector(
+          ".plan-entry-in_progress"
+        );
+        const pending = elements.messagesEl.querySelector(
+          ".plan-entry-pending"
+        );
+        assert.ok(completed);
+        assert.ok(inProgress);
+        assert.ok(pending);
+      });
+
+      test("showPlan applies priority classes", () => {
+        controller.showPlan(testPlan.entries);
+        const high = elements.messagesEl.querySelector(".plan-priority-high");
+        const medium = elements.messagesEl.querySelector(
+          ".plan-priority-medium"
+        );
+        const low = elements.messagesEl.querySelector(".plan-priority-low");
+        assert.ok(high);
+        assert.ok(medium);
+        assert.ok(low);
+      });
+
+      test("hidePlan removes plan element", () => {
+        controller.showPlan(testPlan.entries);
+        controller.hidePlan();
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.strictEqual(planEl, null);
+      });
+
+      test("plan message updates display", () => {
+        controller.handleMessage({
+          type: "plan",
+          plan: testPlan,
+        });
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.ok(planEl);
+      });
+
+      test("planComplete message removes display", () => {
+        controller.handleMessage({ type: "plan", plan: testPlan });
+        controller.handleMessage({ type: "planComplete" });
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.strictEqual(planEl, null);
+      });
+
+      test("chatCleared removes plan", () => {
+        controller.handleMessage({ type: "plan", plan: testPlan });
+        controller.handleMessage({ type: "chatCleared" });
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.strictEqual(planEl, null);
+      });
+
+      test("showPlan with empty entries hides plan", () => {
+        controller.showPlan(testPlan.entries);
+        controller.showPlan([]);
+        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        assert.strictEqual(planEl, null);
+      });
+    });
+
     suite("state persistence", () => {
       test("restores input value from state", () => {
         mockVsCode.setState({ isConnected: false, inputValue: "saved text" });
