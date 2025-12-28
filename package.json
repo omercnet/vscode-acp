@@ -2,7 +2,7 @@
   "name": "vscode-acp",
   "displayName": "VSCode ACP",
   "description": "AI coding agents in VS Code via Agent Client Protocol (ACP). Chat with Claude, OpenCode, and other ACP-compatible agents directly in your editor.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "omercnet",
   "license": "MIT",
   "icon": "assets/icon.png",

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/omercnet/vscode-acp/compare/v1.1.0...v1.2.0) (2025-12-28)
+
+
+### Features
+
+* add slash command autocomplete support ([#18](https://github.com/omercnet/vscode-acp/issues/18)) ([62d9c41](https://github.com/omercnet/vscode-acp/commit/62d9c414dba77a3215fbbaf02f800fdfcd1237ce))
+
 ## [1.1.0](https://github.com/omercnet/vscode-acp/compare/v1.0.0...v1.1.0) (2025-12-25)
 
 ### Features
