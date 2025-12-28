@@ -59,6 +59,7 @@ function createWebviewHTML(): string {
   <div id="messages"></div>
   
   <div id="input-container">
+    <div id="command-autocomplete" role="listbox"></div>
     <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
     <button id="send">Send</button>
   </div>
@@ -264,6 +265,7 @@ suite("Webview", () => {
       assert.ok(elements.modeSelector);
       assert.ok(elements.modelSelector);
       assert.ok(elements.welcomeView);
+      assert.ok(elements.commandAutocomplete);
     });
 
     test("returns correct element types", () => {
@@ -583,6 +585,143 @@ suite("Webview", () => {
         const event = new window.KeyboardEvent("keydown", { key: "Escape" });
         elements.inputEl.dispatchEvent(event);
         assert.strictEqual(elements.inputEl.value, "");
+      });
+    });
+
+    suite("slash command autocomplete", () => {
+      const testCommands = [
+        { name: "help", description: "Show help" },
+        { name: "history", description: "Show history" },
+        { name: "clear", description: "Clear chat" },
+      ];
+
+      test("getFilteredCommands returns empty for non-slash input", () => {
+        const result = controller.getFilteredCommands("hello");
+        assert.deepStrictEqual(result, []);
+      });
+
+      test("getFilteredCommands returns empty for plain slash", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        const result = controller.getFilteredCommands("/");
+        assert.strictEqual(result.length, 3);
+      });
+
+      test("getFilteredCommands filters by prefix", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        const result = controller.getFilteredCommands("/he");
+        assert.strictEqual(result.length, 1);
+        assert.ok(result.some((c) => c.name === "help"));
+      });
+
+      test("getFilteredCommands filters by description", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        const result = controller.getFilteredCommands("/chat");
+        assert.strictEqual(result.length, 1);
+        assert.strictEqual(result[0].name, "clear");
+      });
+
+      test("showCommandAutocomplete displays commands", () => {
+        controller.showCommandAutocomplete(testCommands);
+        assert.ok(elements.commandAutocomplete.classList.contains("visible"));
+        assert.strictEqual(
+          elements.commandAutocomplete.querySelectorAll(".command-item").length,
+          3,
+        );
+      });
+
+      test("showCommandAutocomplete hides when empty", () => {
+        controller.showCommandAutocomplete(testCommands);
+        controller.showCommandAutocomplete([]);
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+      });
+
+      test("hideCommandAutocomplete clears and hides", () => {
+        controller.showCommandAutocomplete(testCommands);
+        controller.hideCommandAutocomplete();
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+        assert.strictEqual(elements.commandAutocomplete.innerHTML, "");
+      });
+
+      test("selectCommand fills input with command", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/he";
+        controller.selectCommand(0);
+        assert.strictEqual(elements.inputEl.value, "/help ");
+      });
+
+      test("availableCommands message updates commands", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        const result = controller.getFilteredCommands("/");
+        assert.strictEqual(result.length, 3);
+      });
+
+      test("sessionMetadata with commands updates commands", () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          commands: testCommands,
+          modes: null,
+          models: null,
+        });
+        const result = controller.getFilteredCommands("/");
+        assert.strictEqual(result.length, 3);
+      });
+
+      test("chatCleared clears commands", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        controller.handleMessage({ type: "chatCleared" });
+        const result = controller.getFilteredCommands("/");
+        assert.strictEqual(result.length, 0);
+      });
+
+      test("Tab key selects command when autocomplete visible", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/he";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        const tabEvent = new window.KeyboardEvent("keydown", { key: "Tab" });
+        elements.inputEl.dispatchEvent(tabEvent);
+
+        assert.ok(elements.inputEl.value.startsWith("/he"));
+      });
+
+      test("ArrowDown navigates commands", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        const downEvent = new window.KeyboardEvent("keydown", {
+          key: "ArrowDown",
+        });
+        elements.inputEl.dispatchEvent(downEvent);
+
+        const selectedItem = elements.commandAutocomplete.querySelector(
+          ".command-item.selected",
+        );
+        assert.ok(selectedItem);
       });
     });
 

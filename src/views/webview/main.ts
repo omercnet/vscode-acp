@@ -18,6 +18,12 @@ export interface WebviewState {
   inputValue: string;
 }
 
+export interface AvailableCommand {
+  name: string;
+  description?: string;
+  input?: { hint?: string };
+}
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -36,6 +42,7 @@ export interface ExtensionMessage {
     availableModels: Array<{ modelId: string; name: string }>;
     currentModelId: string;
   } | null;
+  commands?: AvailableCommand[] | null;
   toolCallId?: string;
   name?: string;
   title?: string;
@@ -149,6 +156,7 @@ export interface WebviewElements {
   modeSelector: HTMLSelectElement;
   modelSelector: HTMLSelectElement;
   welcomeView: HTMLElement;
+  commandAutocomplete: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -166,6 +174,7 @@ export function getElements(doc: Document): WebviewElements {
     modeSelector: doc.getElementById("mode-selector") as HTMLSelectElement,
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
     welcomeView: doc.getElementById("welcome-view")!,
+    commandAutocomplete: doc.getElementById("command-autocomplete")!,
   };
 }
 
@@ -181,6 +190,8 @@ export class WebviewController {
   private tools: Record<string, Tool> = {};
   private isConnected = false;
   private messageTexts = new Map<HTMLElement, string>();
+  private availableCommands: AvailableCommand[] = [];
+  private selectedCommandIndex = -1;
 
   constructor(
     vscode: VsCodeApi,
@@ -219,9 +230,46 @@ export class WebviewController {
       this.elements;
     const { agentSelector, modeSelector, modelSelector } = this.elements;
 
+    const { commandAutocomplete } = this.elements;
+
     sendBtn.addEventListener("click", () => this.send());
 
     inputEl.addEventListener("keydown", (e) => {
+      const isAutocompleteVisible =
+        commandAutocomplete.classList.contains("visible");
+      const commands = this.getFilteredCommands(inputEl.value.split(/\s/)[0]);
+
+      if (isAutocompleteVisible && commands.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          this.selectedCommandIndex = Math.min(
+            this.selectedCommandIndex + 1,
+            commands.length - 1,
+          );
+          this.showCommandAutocomplete(commands);
+          return;
+        } else if (e.key === "ArrowUp") {
+          e.preventDefault();
+          this.selectedCommandIndex = Math.max(
+            this.selectedCommandIndex - 1,
+            0,
+          );
+          this.showCommandAutocomplete(commands);
+          return;
+        } else if (
+          e.key === "Tab" ||
+          (e.key === "Enter" && this.selectedCommandIndex >= 0)
+        ) {
+          e.preventDefault();
+          this.selectCommand(this.selectedCommandIndex);
+          return;
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          this.hideCommandAutocomplete();
+          return;
+        }
+      }
+
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         this.send();
@@ -234,7 +282,28 @@ export class WebviewController {
     inputEl.addEventListener("input", () => {
       inputEl.style.height = "auto";
       inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+      this.updateAutocomplete();
       this.saveState();
+    });
+
+    commandAutocomplete.addEventListener("click", (e) => {
+      const item = (e.target as HTMLElement).closest(".command-item");
+      if (item) {
+        const index = parseInt(item.getAttribute("data-index") || "0", 10);
+        this.selectCommand(index);
+      }
+    });
+
+    commandAutocomplete.addEventListener("mouseover", (e) => {
+      const item = (e.target as HTMLElement).closest(".command-item");
+      if (item) {
+        this.selectedCommandIndex = parseInt(
+          item.getAttribute("data-index") || "0",
+          10,
+        );
+        const commands = this.getFilteredCommands(inputEl.value.split(/\s/)[0]);
+        this.showCommandAutocomplete(commands);
+      }
     });
 
     messagesEl.addEventListener("keydown", (e) => {
@@ -395,7 +464,86 @@ export class WebviewController {
     this.elements.inputEl.value = "";
     this.elements.inputEl.style.height = "auto";
     this.elements.inputEl.focus();
+    this.hideCommandAutocomplete();
     this.saveState();
+  }
+
+  getFilteredCommands(query: string): AvailableCommand[] {
+    if (!query.startsWith("/")) return [];
+    const search = query.slice(1).toLowerCase();
+    return this.availableCommands.filter(
+      (cmd) =>
+        cmd.name.toLowerCase().startsWith(search) ||
+        cmd.description?.toLowerCase().includes(search),
+    );
+  }
+
+  showCommandAutocomplete(commands: AvailableCommand[]): void {
+    const { commandAutocomplete, inputEl } = this.elements;
+    if (commands.length === 0) {
+      this.hideCommandAutocomplete();
+      return;
+    }
+
+    commandAutocomplete.innerHTML = commands
+      .map((cmd, i) => {
+        const hint = cmd.input?.hint
+          ? '<div class="command-hint">' + escapeHtml(cmd.input.hint) + "</div>"
+          : "";
+        return (
+          '<div class="command-item' +
+          (i === this.selectedCommandIndex ? " selected" : "") +
+          '" data-index="' +
+          i +
+          '" role="option" aria-selected="' +
+          (i === this.selectedCommandIndex) +
+          '">' +
+          '<div class="command-name">' +
+          escapeHtml(cmd.name) +
+          "</div>" +
+          '<div class="command-description">' +
+          escapeHtml(cmd.description || "") +
+          "</div>" +
+          hint +
+          "</div>"
+        );
+      })
+      .join("");
+
+    commandAutocomplete.classList.add("visible");
+    inputEl.setAttribute("aria-expanded", "true");
+  }
+
+  hideCommandAutocomplete(): void {
+    const { commandAutocomplete, inputEl } = this.elements;
+    commandAutocomplete.classList.remove("visible");
+    commandAutocomplete.innerHTML = "";
+    this.selectedCommandIndex = -1;
+    inputEl.setAttribute("aria-expanded", "false");
+  }
+
+  selectCommand(index: number): void {
+    const firstWord = this.elements.inputEl.value.split(/\s/)[0];
+    const commands = this.getFilteredCommands(firstWord);
+    if (index >= 0 && index < commands.length) {
+      const cmd = commands[index];
+      this.elements.inputEl.value = "/" + cmd.name + " ";
+      this.elements.inputEl.focus();
+      this.hideCommandAutocomplete();
+    }
+  }
+
+  private updateAutocomplete(): void {
+    const text = this.elements.inputEl.value;
+    const firstWord = text.split(/\s/)[0];
+
+    if (firstWord.startsWith("/") && !text.includes(" ")) {
+      const filtered = this.getFilteredCommands(firstWord);
+      this.selectedCommandIndex = filtered.length > 0 ? 0 : -1;
+      this.showCommandAutocomplete(filtered);
+    } else {
+      this.hideCommandAutocomplete();
+    }
   }
 
   handleMessage(msg: ExtensionMessage): void {
@@ -504,6 +652,8 @@ export class WebviewController {
         this.messageTexts.clear();
         modeSelector.style.display = "none";
         modelSelector.style.display = "none";
+        this.availableCommands = [];
+        this.hideCommandAutocomplete();
         this.updateViewState();
         break;
       case "triggerNewChat":
@@ -553,12 +703,21 @@ export class WebviewController {
         } else {
           modelSelector.style.display = "none";
         }
+
+        if (msg.commands && Array.isArray(msg.commands)) {
+          this.availableCommands = msg.commands;
+        }
         break;
       }
       case "modeUpdate":
         if (msg.modeId) {
           modeSelector.value = msg.modeId;
           updateSelectLabel(modeSelector, "Mode");
+        }
+        break;
+      case "availableCommands":
+        if (msg.commands && Array.isArray(msg.commands)) {
+          this.availableCommands = msg.commands;
         }
         break;
     }

@@ -210,6 +210,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (update.sessionUpdate === "current_mode_update") {
       this.postMessage({ type: "modeUpdate", modeId: update.currentModeId });
+    } else if (update.sessionUpdate === "available_commands_update") {
+      this.postMessage({
+        type: "availableCommands",
+        commands: update.availableCommands,
+      });
     }
   }
 
@@ -349,6 +354,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       type: "sessionMetadata",
       modes: metadata?.modes ?? null,
       models: metadata?.models ?? null,
+      commands: metadata?.commands ?? null,
     });
   }
 
@@ -405,23 +411,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" tabindex="0"></div>
   
   <div id="input-container">
+    <div id="command-autocomplete" role="listbox" aria-label="Slash commands"></div>
     <textarea 
       id="input" 
       rows="1" 
-      placeholder="Ask your agent..." 
+      placeholder="Ask your agent... (type / for commands)" 
       aria-label="Message input"
       aria-describedby="input-hint"
+      aria-autocomplete="list"
+      aria-controls="command-autocomplete"
     ></textarea>
     <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
   </div>
-  <span id="input-hint" class="sr-only">Press Enter to send, Shift+Enter for new line, Escape to clear</span>
+  <span id="input-hint" class="sr-only">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
   </div>
   
-  <script src="${webviewScriptUri}"></script>
+<script src="${webviewScriptUri}"></script>
 </body>
 </html>`;
   }

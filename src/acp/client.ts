@@ -12,12 +12,14 @@ import {
   type PromptResponse,
   type SessionModeState,
   type SessionModelState,
+  type AvailableCommand,
 } from "@agentclientprotocol/sdk";
 import { type AgentConfig, getDefaultAgent, isAgentAvailable } from "./agents";
 
 export interface SessionMetadata {
   modes: SessionModeState | null;
   models: SessionModelState | null;
+  commands: AvailableCommand[] | null;
 }
 
 export type ACPConnectionState =
@@ -48,6 +50,7 @@ export class ACPClient {
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
+  private pendingCommands: AvailableCommand[] | null = null;
   private stateChangeListeners: Set<StateChangeCallback> = new Set();
   private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
   private stderrListeners: Set<StderrCallback> = new Set();
@@ -177,6 +180,20 @@ export class ACPClient {
           if (updateType === "agent_message_chunk") {
             console.log("[ACP] CHUNK:", JSON.stringify(params.update));
           }
+          if (updateType === "available_commands_update") {
+            const update = params.update as {
+              availableCommands: AvailableCommand[];
+            };
+            if (this.sessionMetadata) {
+              this.sessionMetadata.commands = update.availableCommands;
+            } else {
+              this.pendingCommands = update.availableCommands;
+            }
+            console.log(
+              "[ACP] Commands updated:",
+              update.availableCommands.length,
+            );
+          }
           try {
             this.sessionUpdateListeners.forEach((cb) => cb(params));
           } catch (error) {
@@ -218,7 +235,9 @@ export class ACPClient {
     this.sessionMetadata = {
       modes: response.modes ?? null,
       models: response.models ?? null,
+      commands: this.pendingCommands,
     };
+    this.pendingCommands = null;
 
     return response;
   }
@@ -297,6 +316,7 @@ export class ACPClient {
     this.connection = null;
     this.currentSessionId = null;
     this.sessionMetadata = null;
+    this.pendingCommands = null;
     this.setState("disconnected");
   }
 
