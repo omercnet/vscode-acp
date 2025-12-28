@@ -211,10 +211,11 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           tool.output.length > 500
             ? tool.output.slice(0, 500) + "..."
             : tool.output;
-        const outputHtml = hasAnsiCodes(truncated)
+        const hasAnsi = hasAnsiCodes(truncated);
+        const outputHtml = hasAnsi
           ? ansiToHtml(truncated)
           : escapeHtml(truncated);
-        const terminalClass = hasAnsiCodes(tool.output) ? " terminal" : "";
+        const terminalClass = hasAnsi ? " terminal" : "";
         detailsContent +=
           '<pre class="tool-output' +
           terminalClass +
