@@ -1,15 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 import { _electron as electron } from "@playwright/test";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
-import { mkdir, writeFile, readdir } from "fs/promises";
-import { platform } from "os";
+import { join } from "path";
+import { mkdir, writeFile } from "fs/promises";
+import { findVSCodeExecutable, cmdOrCtrl, PROJECT_ROOT } from "../e2e/utils";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = join(__dirname, "..");
 const SCREENSHOTS_DIR = join(PROJECT_ROOT, "screenshots");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data");
-const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");
 
 const TIMING = {
   VSCODE_INIT: 5000,
@@ -24,37 +20,6 @@ const SCREENSHOT_CLIP = {
   SIDEBAR_WIDTH: 305,
   STATUS_BAR_HEIGHT: 25,
 };
-
-async function findVSCodeExecutable() {
-  const entries = await readdir(VSCODE_TEST_DIR);
-  const vscodeDir = entries.find((e) => e.startsWith("vscode-"));
-
-  if (!vscodeDir) {
-    throw new Error(
-      "VS Code not found in .vscode-test/. Run 'npm test' first to download it."
-    );
-  }
-
-  const currentPlatform = platform();
-
-  if (currentPlatform === "darwin") {
-    return join(
-      VSCODE_TEST_DIR,
-      vscodeDir,
-      "Visual Studio Code.app/Contents/MacOS/Electron"
-    );
-  } else if (currentPlatform === "linux") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "code");
-  } else if (currentPlatform === "win32") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "Code.exe");
-  }
-
-  throw new Error(`Unsupported platform: ${currentPlatform}`);
-}
-
-function cmdOrCtrl() {
-  return platform() === "darwin" ? "Meta" : "Control";
-}
 
 async function takeScreenshot() {
   await mkdir(SCREENSHOTS_DIR, { recursive: true });
@@ -101,6 +66,8 @@ async function takeScreenshot() {
   await window.setViewportSize({ width: 1280, height: 800 });
   await window.waitForTimeout(TIMING.VSCODE_INIT);
 
+  let screenshotPath: string | null = null;
+
   try {
     console.log("Opening ACP view via command...");
 
@@ -115,27 +82,30 @@ async function takeScreenshot() {
     const viewport = window.viewportSize();
     console.log("Viewport:", viewport);
 
+    screenshotPath = join(SCREENSHOTS_DIR, "acp-sidebar.png");
     console.log("Taking cropped ACP sidebar screenshot...");
     await window.screenshot({
-      path: join(SCREENSHOTS_DIR, "acp-sidebar.png"),
+      path: screenshotPath,
       clip: {
         x: SCREENSHOT_CLIP.ACTIVITY_BAR_WIDTH,
         y: SCREENSHOT_CLIP.TITLE_BAR_HEIGHT,
         width: SCREENSHOT_CLIP.SIDEBAR_WIDTH,
         height:
-          viewport.height -
+          viewport!.height -
           SCREENSHOT_CLIP.TITLE_BAR_HEIGHT -
           SCREENSHOT_CLIP.STATUS_BAR_HEIGHT,
       },
     });
   } catch (e) {
-    console.log("Could not interact with ACP sidebar:", e.message);
+    console.log("Could not interact with ACP sidebar:", (e as Error).message);
   }
 
   console.log("Closing VS Code...");
   await electronApp.close();
 
-  console.log(`Screenshot saved to ${SCREENSHOTS_DIR}/acp-sidebar.png`);
+  if (screenshotPath) {
+    console.log(`Screenshot saved to ${screenshotPath}`);
+  }
 }
 
 takeScreenshot().catch((err) => {

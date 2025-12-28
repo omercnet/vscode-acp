@@ -138,7 +138,7 @@
     "lint": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "prepare": "husky",
-    "screenshot": "node scripts/screenshot.mjs",
+    "screenshot": "npx tsx scripts/screenshot.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug"

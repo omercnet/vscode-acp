@@ -3,49 +3,20 @@ import {
   _electron as electron,
   ElectronApplication,
   Page,
+  FrameLocator,
 } from "@playwright/test";
 import { join } from "path";
-import { mkdir, writeFile, readdir } from "fs/promises";
-import { platform } from "os";
+import { mkdir, writeFile } from "fs/promises";
+import { findVSCodeExecutable, cmdOrCtrl, PROJECT_ROOT } from "./utils";
 
-const PROJECT_ROOT = join(__dirname, "..");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data-e2e");
-const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");
 
 const TIMING = {
   VSCODE_INIT: 3000,
+  COMMAND_PALETTE_OPEN: 500,
+  COMMAND_TYPE: 300,
+  VIEW_LOAD: 3000,
 };
-
-async function findVSCodeExecutable(): Promise<string> {
-  const entries = await readdir(VSCODE_TEST_DIR);
-  const vscodeDir = entries.find((e) => e.startsWith("vscode-"));
-
-  if (!vscodeDir) {
-    throw new Error(
-      "VS Code not found in .vscode-test/. Run 'npm test' first to download it."
-    );
-  }
-
-  const currentPlatform = platform();
-
-  if (currentPlatform === "darwin") {
-    return join(
-      VSCODE_TEST_DIR,
-      vscodeDir,
-      "Visual Studio Code.app/Contents/MacOS/Electron"
-    );
-  } else if (currentPlatform === "linux") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "code");
-  } else if (currentPlatform === "win32") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "Code.exe");
-  }
-
-  throw new Error(`Unsupported platform: ${currentPlatform}`);
-}
-
-export function cmdOrCtrl(): string {
-  return platform() === "darwin" ? "Meta" : "Control";
-}
 
 export type TestFixtures = {
   vscode: ElectronApplication;
@@ -101,4 +72,22 @@ export const test = base.extend<TestFixtures>({
   },
 });
 
+export async function openACPView(window: Page): Promise<void> {
+  const modifier = cmdOrCtrl();
+  await window.keyboard.press(`${modifier}+Shift+P`);
+  await window.waitForTimeout(TIMING.COMMAND_PALETTE_OPEN);
+  await window.keyboard.type("View: Focus on Chat View");
+  await window.waitForTimeout(TIMING.COMMAND_TYPE);
+  await window.keyboard.press("Enter");
+  await window.waitForTimeout(TIMING.VIEW_LOAD);
+}
+
+export function getWebviewFrame(window: Page): FrameLocator {
+  return window
+    .frameLocator("iframe.webview")
+    .first()
+    .frameLocator("#active-frame");
+}
+
 export { expect } from "@playwright/test";
+export { cmdOrCtrl } from "./utils";
