@@ -186,7 +186,10 @@ export function hasAnsiCodes(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
 }
 
-export function getToolsHtml(tools: Record<string, Tool>): string {
+export function getToolsHtml(
+  tools: Record<string, Tool>,
+  expandedToolId?: string | null
+): string {
   const toolIds = Object.keys(tools);
   if (toolIds.length === 0) return "";
   const toolItems = toolIds
@@ -199,6 +202,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
             ? "✗"
             : "⋯";
       const statusClass = tool.status === "running" ? "running" : "";
+      const isExpanded = id === expandedToolId;
       let detailsContent = "";
       if (tool.input) {
         detailsContent +=
@@ -224,9 +228,17 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           "</pre>";
       }
       const escapedStatus = escapeHtml(tool.status);
+      const inputPreview = tool.input
+        ? '<span class="tool-input-preview">' +
+          escapeHtml(tool.input) +
+          "</span>"
+        : "";
       if (detailsContent) {
+        const openAttr = isExpanded ? " open" : "";
         return (
-          '<li><details class="tool-item"><summary><span class="tool-status ' +
+          '<li><details class="tool-item"' +
+          openAttr +
+          '><summary><span class="tool-status ' +
           statusClass +
           '" aria-label="' +
           escapedStatus +
@@ -234,6 +246,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           statusIcon +
           "</span> " +
           escapeHtml(tool.name) +
+          inputPreview +
           "</summary>" +
           detailsContent +
           "</details></li>"
@@ -248,6 +261,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
         statusIcon +
         "</span> " +
         escapeHtml(tool.name) +
+        inputPreview +
         "</li>"
       );
     })
@@ -328,6 +342,7 @@ export class WebviewController {
   private availableCommands: AvailableCommand[] = [];
   private selectedCommandIndex = -1;
   private hasActiveTool = false;
+  private expandedToolId: string | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -552,7 +567,7 @@ export class WebviewController {
       this.elements.messagesEl.appendChild(this.thinkingEl);
     }
     let html = '<span class="thinking" aria-label="Processing">Thinking</span>';
-    html += getToolsHtml(this.tools);
+    html += getToolsHtml(this.tools, this.expandedToolId);
     this.thinkingEl.innerHTML = html;
     this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
   }
@@ -761,12 +776,19 @@ export class WebviewController {
         this.hasActiveTool = false;
         break;
       case "streamChunk":
-        // If we just finished tool execution and now have new text, create a new message bubble
         if (this.hasActiveTool && msg.text) {
-          this.finializeCurrentMessage();
+          this.hideThinking();
+          if (Object.keys(this.tools).length > 0) {
+            const toolMessage = this.addMessage("", "assistant");
+            toolMessage.innerHTML = getToolsHtml(
+              this.tools,
+              this.expandedToolId
+            );
+          }
           this.currentAssistantMessage = null;
           this.currentAssistantText = "";
           this.tools = {};
+          this.expandedToolId = null;
           this.hasActiveTool = false;
         }
 
@@ -784,13 +806,12 @@ export class WebviewController {
       case "streamEnd":
         this.hideThinking();
 
-        // Finalize current message and any remaining tools
         if (this.currentAssistantMessage) {
           let html = msg.html || "";
           if (this.currentAssistantText.trim()) {
             html = this.currentAssistantText + html;
           }
-          html += getToolsHtml(this.tools);
+          html += getToolsHtml(this.tools, this.expandedToolId);
           this.currentAssistantMessage.innerHTML = html;
           this.messageTexts.set(
             this.currentAssistantMessage,
@@ -802,6 +823,7 @@ export class WebviewController {
         this.currentAssistantText = "";
         this.tools = {};
         this.hasActiveTool = false;
+        this.expandedToolId = null;
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
@@ -835,13 +857,7 @@ export class WebviewController {
           tool.input = input;
           tool.output = output;
           tool.status = (msg.status as Tool["status"]) || "completed";
-
-          // Display the completed tool immediately
-          if (!this.currentAssistantMessage) {
-            this.currentAssistantMessage = this.addMessage("", "assistant");
-          }
-          this.displayToolExecution();
-
+          this.expandedToolId = msg.toolCallId;
           this.showThinking();
         }
         break;
@@ -962,31 +978,16 @@ export class WebviewController {
     }
   }
 
-  /**
-   * Finalize the current assistant message by updating its HTML with tools.
-   * Called when transitioning to tool execution or ending the stream.
-   */
   private finializeCurrentMessage(): void {
     if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
-      let html = this.currentAssistantText;
-      html += getToolsHtml(this.tools);
+      const html =
+        this.currentAssistantText +
+        getToolsHtml(this.tools, this.expandedToolId);
       this.currentAssistantMessage.innerHTML = html;
       this.messageTexts.set(
         this.currentAssistantMessage,
         this.currentAssistantText
       );
-    }
-  }
-
-  /**
-   * Display tool execution in a separate container within the current message.
-   * This allows tools to be shown without mixing into the text content.
-   */
-  private displayToolExecution(): void {
-    if (this.currentAssistantMessage) {
-      let html = this.currentAssistantMessage.innerHTML || "";
-      html += getToolsHtml(this.tools);
-      this.currentAssistantMessage.innerHTML = html;
     }
   }
 
