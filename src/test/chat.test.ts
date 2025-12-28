@@ -19,11 +19,7 @@ interface MockACPClient {
   newSession: (dir: string) => Promise<void>;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
-  getSessionMetadata: () => {
-    modes: any | null;
-    models: any | null;
-    commands: any[] | null;
-  };
+  getSessionMetadata: () => any;
   dispose: () => void;
 }
 
@@ -83,7 +79,7 @@ class TestACPClient implements MockACPClient {
     this.lastSetModelId = modelId;
   }
 
-  getSessionMetadata() {
+  getSessionMetadata(): any {
     return {
       modes: null,
       models: null,
@@ -125,59 +121,138 @@ suite("ChatViewProvider", () => {
     acpClient.resetCallCounts();
   });
 
-  suite("Mode/Model Persistence", () => {
-    test("should restore saved mode on initialization", async () => {
+  suite("Mode/Model Persistence with Validation", () => {
+    test("should validate and restore saved mode against available modes", async () => {
       await memento.update("vscode-acp.selectedMode", "test-mode");
 
+      class ACPClientWithModes extends TestACPClient {
+        getSessionMetadata() {
+          return {
+            modes: {
+              availableModes: [
+                { id: "test-mode", name: "Test Mode" },
+                { id: "other-mode", name: "Other Mode" },
+              ],
+              currentModeId: "other-mode",
+            },
+            models: null,
+            commands: null,
+          };
+        }
+      }
+
+      const client = new ACPClientWithModes();
       const provider = new ChatViewProvider(
         mockExtensionUri,
-        acpClient as any,
+        client as any,
         memento as any
       );
 
       const restoreMethod = (provider as any).restoreSavedModeAndModel;
       await restoreMethod.call(provider);
 
-      assert.strictEqual(acpClient.lastSetModeId, "test-mode");
-      assert.strictEqual(acpClient.getSetModeCallCount(), 1);
+      assert.strictEqual(client.lastSetModeId, "test-mode");
+      assert.strictEqual(client.getSetModeCallCount(), 1);
     });
 
-    test("should restore saved model on initialization", async () => {
-      await memento.update("vscode-acp.selectedModel", "test-model");
+    test("should validate and restore saved model against available models", async () => {
+      await memento.update("vscode-acp.selectedModel", "gpt-4");
 
+      class ACPClientWithModels extends TestACPClient {
+        getSessionMetadata() {
+          return {
+            modes: null,
+            models: {
+              availableModels: [
+                { modelId: "gpt-4", name: "GPT-4" },
+                { modelId: "gpt-3.5", name: "GPT-3.5" },
+              ],
+              currentModelId: "gpt-3.5",
+            },
+            commands: null,
+          };
+        }
+      }
+
+      const client = new ACPClientWithModels();
       const provider = new ChatViewProvider(
         mockExtensionUri,
-        acpClient as any,
+        client as any,
         memento as any
       );
 
       const restoreMethod = (provider as any).restoreSavedModeAndModel;
       await restoreMethod.call(provider);
 
-      assert.strictEqual(acpClient.lastSetModelId, "test-model");
-      assert.strictEqual(acpClient.getSetModelCallCount(), 1);
+      assert.strictEqual(client.lastSetModelId, "gpt-4");
+      assert.strictEqual(client.getSetModelCallCount(), 1);
     });
 
-    test("should restore both mode and model if both are saved", async () => {
-      await memento.update("vscode-acp.selectedMode", "test-mode");
-      await memento.update("vscode-acp.selectedModel", "test-model");
+    test("should skip invalid mode IDs not in available modes", async () => {
+      await memento.update("vscode-acp.selectedMode", "removed-mode");
 
+      class ACPClientWithModes extends TestACPClient {
+        getSessionMetadata() {
+          return {
+            modes: {
+              availableModes: [
+                { id: "valid-mode-1", name: "Valid Mode 1" },
+                { id: "valid-mode-2", name: "Valid Mode 2" },
+              ],
+              currentModeId: "valid-mode-1",
+            },
+            models: null,
+            commands: null,
+          };
+        }
+      }
+
+      const client = new ACPClientWithModes();
       const provider = new ChatViewProvider(
         mockExtensionUri,
-        acpClient as any,
+        client as any,
         memento as any
       );
 
       const restoreMethod = (provider as any).restoreSavedModeAndModel;
       await restoreMethod.call(provider);
 
-      assert.strictEqual(acpClient.lastSetModeId, "test-mode");
-      assert.strictEqual(acpClient.lastSetModelId, "test-model");
-      assert.strictEqual(acpClient.getSetModeCallCount(), 1);
-      assert.strictEqual(acpClient.getSetModelCallCount(), 1);
+      assert.strictEqual(client.getSetModeCallCount(), 0);
     });
 
-    test("should not call setMode if mode is not saved", async () => {
+    test("should skip invalid model IDs not in available models", async () => {
+      await memento.update("vscode-acp.selectedModel", "removed-model");
+
+      class ACPClientWithModels extends TestACPClient {
+        getSessionMetadata() {
+          return {
+            modes: null,
+            models: {
+              availableModels: [
+                { modelId: "valid-model-1", name: "Valid Model 1" },
+                { modelId: "valid-model-2", name: "Valid Model 2" },
+              ],
+              currentModelId: "valid-model-1",
+            },
+            commands: null,
+          };
+        }
+      }
+
+      const client = new ACPClientWithModels();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as any,
+        memento as any
+      );
+
+      const restoreMethod = (provider as any).restoreSavedModeAndModel;
+      await restoreMethod.call(provider);
+
+      assert.strictEqual(client.getSetModelCallCount(), 0);
+    });
+
+    test("should not restore if nothing is saved", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as any,
@@ -188,19 +263,39 @@ suite("ChatViewProvider", () => {
       await restoreMethod.call(provider);
 
       assert.strictEqual(acpClient.getSetModeCallCount(), 0);
+      assert.strictEqual(acpClient.getSetModelCallCount(), 0);
     });
 
-    test("should not call setModel if model is not saved", async () => {
+    test("should throw but be caught by caller if restoration fails", async () => {
+      await memento.update("vscode-acp.selectedMode", "test-mode");
+
+      class FailingACPClient extends TestACPClient {
+        getSessionMetadata() {
+          return {
+            modes: {
+              availableModes: [{ id: "test-mode", name: "Test Mode" }],
+              currentModeId: "test-mode",
+            },
+            models: null,
+            commands: null,
+          };
+        }
+
+        async setMode(): Promise<void> {
+          throw new Error("Failed to set mode");
+        }
+      }
+
+      const client = new FailingACPClient();
       const provider = new ChatViewProvider(
         mockExtensionUri,
-        acpClient as any,
+        client as any,
         memento as any
       );
 
       const restoreMethod = (provider as any).restoreSavedModeAndModel;
-      await restoreMethod.call(provider);
 
-      assert.strictEqual(acpClient.getSetModelCallCount(), 0);
+      await assert.rejects(() => restoreMethod.call(provider));
     });
   });
 
@@ -288,10 +383,8 @@ suite("ChatViewProvider", () => {
 
       const handleModeChange = (provider as any).handleModeChange;
 
-      // Should not throw
       await handleModeChange.call(provider, "new-mode");
 
-      // Should not save to memento if ACP call fails
       assert.strictEqual(memento.get("vscode-acp.selectedMode"), undefined);
     });
 
@@ -312,10 +405,8 @@ suite("ChatViewProvider", () => {
 
       const handleModelChange = (provider as any).handleModelChange;
 
-      // Should not throw
       await handleModelChange.call(provider, "new-model");
 
-      // Should not save to memento if ACP call fails
       assert.strictEqual(memento.get("vscode-acp.selectedModel"), undefined);
     });
 

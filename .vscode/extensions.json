@@ -1,7 +1,6 @@
 {
   "recommendations": [
     "connor4312.esbuild-problem-matchers",
-    "ms-vscode.extension-test-runner",
-    "omercnet.vscode-acp"
+    "ms-vscode.extension-test-runner"
   ]
 }
