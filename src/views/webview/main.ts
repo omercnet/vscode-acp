@@ -551,6 +551,7 @@ export class WebviewController {
       this.planEl = this.doc.createElement("div");
       this.planEl.className = "agent-plan";
       this.planEl.setAttribute("role", "status");
+      this.planEl.setAttribute("aria-live", "polite");
       this.planEl.setAttribute("aria-label", "Agent execution plan");
       this.elements.messagesEl.appendChild(this.planEl);
     }
