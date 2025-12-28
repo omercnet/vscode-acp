@@ -14,6 +14,8 @@ marked.setOptions({
 });
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
+const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
+const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 
 interface WebviewMessage {
   type:
@@ -39,6 +41,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private hasSession = false;
   private globalState: vscode.Memento;
   private streamingText = "";
+  private hasRestoredModeModel = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -295,6 +298,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleModeChange(modeId: string): Promise<void> {
     try {
       await this.acpClient.setMode(modeId);
+      await this.globalState.update(SELECTED_MODE_KEY, modeId);
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set mode:", error);
@@ -304,6 +308,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleModelChange(modelId: string): Promise<void> {
     try {
       await this.acpClient.setModel(modelId);
+      await this.globalState.update(SELECTED_MODEL_KEY, modelId);
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set model:", error);
@@ -332,6 +337,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleNewChat(): Promise<void> {
     this.hasSession = false;
+    this.hasRestoredModeModel = false;
     this.streamingText = "";
     this.postMessage({ type: "chatCleared" });
     this.postMessage({ type: "sessionMetadata", modes: null, models: null });
@@ -361,6 +367,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       models: metadata?.models ?? null,
       commands: metadata?.commands ?? null,
     });
+
+    if (!this.hasRestoredModeModel && this.hasSession) {
+      this.hasRestoredModeModel = true;
+      this.restoreSavedModeAndModel().catch((error) =>
+        console.warn("[Chat] Failed to restore saved mode/model:", error)
+      );
+    }
+  }
+
+  private async restoreSavedModeAndModel(): Promise<void> {
+    const metadata = this.acpClient.getSessionMetadata();
+    const availableModes = Array.isArray(metadata?.modes?.availableModes)
+      ? metadata.modes.availableModes
+      : [];
+    const availableModels = Array.isArray(metadata?.models?.availableModels)
+      ? metadata.models.availableModels
+      : [];
+
+    const savedModeId = this.globalState.get<string>(SELECTED_MODE_KEY);
+    const savedModelId = this.globalState.get<string>(SELECTED_MODEL_KEY);
+
+    let modeRestored = false;
+    let modelRestored = false;
+
+    if (
+      savedModeId &&
+      availableModes.some((mode: any) => mode && mode.id === savedModeId)
+    ) {
+      await this.acpClient.setMode(savedModeId);
+      console.log(`[Chat] Restored mode: ${savedModeId}`);
+      modeRestored = true;
+    }
+
+    if (
+      savedModelId &&
+      availableModels.some(
+        (model: any) => model && model.modelId === savedModelId
+      )
+    ) {
+      await this.acpClient.setModel(savedModelId);
+      console.log(`[Chat] Restored model: ${savedModelId}`);
+      modelRestored = true;
+    }
+
+    if (modeRestored || modelRestored) {
+      this.postMessage({ type: "sessionMetadata", ...metadata });
+    }
   }
 
   private postMessage(message: Record<string, unknown>): void {
