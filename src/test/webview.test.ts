@@ -7,6 +7,8 @@ import {
   getElements,
   WebviewController,
   initWebview,
+  ansiToHtml,
+  hasAnsiCodes,
   type VsCodeApi,
   type Tool,
   type WebviewElements,
@@ -878,6 +880,193 @@ suite("Webview", () => {
         dom.window as unknown as Window
       );
       assert.ok(controller instanceof WebviewController);
+    });
+  });
+
+  suite("hasAnsiCodes", () => {
+    test("returns true for text with ANSI escape codes", () => {
+      assert.strictEqual(hasAnsiCodes("\x1b[31mred\x1b[0m"), true);
+    });
+
+    test("returns true for text with bold ANSI code", () => {
+      assert.strictEqual(hasAnsiCodes("\x1b[1mbold\x1b[0m"), true);
+    });
+
+    test("returns false for plain text", () => {
+      assert.strictEqual(hasAnsiCodes("plain text"), false);
+    });
+
+    test("returns false for empty string", () => {
+      assert.strictEqual(hasAnsiCodes(""), false);
+    });
+
+    test("returns true for multiple ANSI codes", () => {
+      assert.strictEqual(
+        hasAnsiCodes("\x1b[1;31;42mbold red on green\x1b[0m"),
+        true
+      );
+    });
+  });
+
+  suite("ansiToHtml", () => {
+    test("returns plain text unchanged", () => {
+      assert.strictEqual(ansiToHtml("hello world"), "hello world");
+    });
+
+    test("escapes HTML in plain text", () => {
+      assert.strictEqual(ansiToHtml("<script>"), "&lt;script&gt;");
+    });
+
+    test("converts red foreground color", () => {
+      const result = ansiToHtml("\x1b[31mred text\x1b[0m");
+      assert.ok(result.includes('class="ansi-red"'));
+      assert.ok(result.includes("red text"));
+    });
+
+    test("converts green foreground color", () => {
+      const result = ansiToHtml("\x1b[32mgreen\x1b[0m");
+      assert.ok(result.includes('class="ansi-green"'));
+    });
+
+    test("converts bold style", () => {
+      const result = ansiToHtml("\x1b[1mbold\x1b[0m");
+      assert.ok(result.includes('class="ansi-bold"'));
+      assert.ok(result.includes("bold"));
+    });
+
+    test("converts dim style", () => {
+      const result = ansiToHtml("\x1b[2mdim\x1b[0m");
+      assert.ok(result.includes('class="ansi-dim"'));
+    });
+
+    test("converts italic style", () => {
+      const result = ansiToHtml("\x1b[3mitalic\x1b[0m");
+      assert.ok(result.includes('class="ansi-italic"'));
+    });
+
+    test("converts underline style", () => {
+      const result = ansiToHtml("\x1b[4munderline\x1b[0m");
+      assert.ok(result.includes('class="ansi-underline"'));
+    });
+
+    test("converts bright red color", () => {
+      const result = ansiToHtml("\x1b[91mbright red\x1b[0m");
+      assert.ok(result.includes('class="ansi-bright-red"'));
+    });
+
+    test("converts background color", () => {
+      const result = ansiToHtml("\x1b[44mblue background\x1b[0m");
+      assert.ok(result.includes('class="ansi-bg-blue"'));
+    });
+
+    test("handles combined styles", () => {
+      const result = ansiToHtml("\x1b[1;31mbold red\x1b[0m");
+      assert.ok(result.includes("ansi-bold"));
+      assert.ok(result.includes("ansi-red"));
+    });
+
+    test("resets styles on code 0", () => {
+      const result = ansiToHtml("\x1b[31mred\x1b[0m normal");
+      assert.ok(result.includes('class="ansi-red"'));
+      assert.ok(result.includes("normal"));
+      assert.ok(!result.includes('class="ansi-red">normal'));
+    });
+
+    test("handles text before first escape code", () => {
+      const result = ansiToHtml("prefix \x1b[32mgreen\x1b[0m");
+      assert.ok(result.includes("prefix "));
+      assert.ok(result.includes('class="ansi-green"'));
+    });
+
+    test("handles text after last escape code", () => {
+      const result = ansiToHtml("\x1b[31mred\x1b[0m suffix");
+      assert.ok(result.includes("suffix"));
+    });
+
+    test("replaces foreground color when new one is set", () => {
+      const result = ansiToHtml("\x1b[31mred\x1b[32mgreen\x1b[0m");
+      assert.ok(result.includes('class="ansi-red"'));
+      assert.ok(result.includes('class="ansi-green"'));
+    });
+
+    test("replaces background color when new one is set", () => {
+      const result = ansiToHtml("\x1b[41mred bg\x1b[42mgreen bg\x1b[0m");
+      assert.ok(result.includes('class="ansi-bg-red"'));
+      assert.ok(result.includes('class="ansi-bg-green"'));
+    });
+
+    test("handles empty input", () => {
+      assert.strictEqual(ansiToHtml(""), "");
+    });
+
+    test("handles escape code at end of string", () => {
+      const result = ansiToHtml("text\x1b[0m");
+      assert.strictEqual(result, "text");
+    });
+
+    test("escapes HTML within colored text", () => {
+      const result = ansiToHtml("\x1b[31m<b>test</b>\x1b[0m");
+      assert.ok(result.includes("&lt;b&gt;test&lt;/b&gt;"));
+    });
+  });
+
+  suite("getToolsHtml with ANSI", () => {
+    test("renders tool output with ANSI colors", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "terminal",
+          input: "npm test",
+          output: "\x1b[32m✓ All tests passed\x1b[0m",
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes('class="tool-output terminal"'));
+      assert.ok(html.includes('class="ansi-green"'));
+      assert.ok(html.includes("✓ All tests passed"));
+    });
+
+    test("renders plain output without terminal class", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "read_file",
+          input: "file.txt",
+          output: "plain text output",
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes('class="tool-output"'));
+      assert.ok(!html.includes('class="tool-output terminal"'));
+      assert.ok(html.includes("plain text output"));
+    });
+
+    test("escapes HTML in plain output", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "cat",
+          input: null,
+          output: "<script>alert('xss')</script>",
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("&lt;script&gt;"));
+      assert.ok(!html.includes("<script>"));
+    });
+
+    test("handles ANSI output with HTML characters", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "grep",
+          input: null,
+          output: "\x1b[31m<error>\x1b[0m",
+          status: "failed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("&lt;error&gt;"));
+      assert.ok(html.includes('class="ansi-red"'));
     });
   });
 });
