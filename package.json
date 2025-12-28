@@ -137,11 +137,15 @@
     "coverage:html": "vscode-test --coverage --coverage-reporter html",
     "lint": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
-    "prepare": "husky"
+    "prepare": "husky",
+    "screenshot": "node scripts/screenshot.mjs",
+    "screenshot:ansi": "node scripts/screenshot.mjs --ansi-only",
+    "screenshot:vscode": "node scripts/screenshot.mjs --vscode-only"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.2.0",
     "@commitlint/config-conventional": "^20.2.0",
+    "@playwright/test": "^1.57.0",
     "@types/jsdom": "^27.0.0",
     "@types/marked": "^5.0.2",
     "@types/mocha": "^10.0.10",
