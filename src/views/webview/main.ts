@@ -68,6 +68,124 @@ export function escapeHtml(str: string): string {
     .replace(/'/g, "&#39;");
 }
 
+const ANSI_FOREGROUND: Record<number, string> = {
+  30: "ansi-black",
+  31: "ansi-red",
+  32: "ansi-green",
+  33: "ansi-yellow",
+  34: "ansi-blue",
+  35: "ansi-magenta",
+  36: "ansi-cyan",
+  37: "ansi-white",
+  90: "ansi-bright-black",
+  91: "ansi-bright-red",
+  92: "ansi-bright-green",
+  93: "ansi-bright-yellow",
+  94: "ansi-bright-blue",
+  95: "ansi-bright-magenta",
+  96: "ansi-bright-cyan",
+  97: "ansi-bright-white",
+};
+
+const ANSI_BACKGROUND: Record<number, string> = {
+  40: "ansi-bg-black",
+  41: "ansi-bg-red",
+  42: "ansi-bg-green",
+  43: "ansi-bg-yellow",
+  44: "ansi-bg-blue",
+  45: "ansi-bg-magenta",
+  46: "ansi-bg-cyan",
+  47: "ansi-bg-white",
+  100: "ansi-bg-bright-black",
+  101: "ansi-bg-bright-red",
+  102: "ansi-bg-bright-green",
+  103: "ansi-bg-bright-yellow",
+  104: "ansi-bg-bright-blue",
+  105: "ansi-bg-bright-magenta",
+  106: "ansi-bg-bright-cyan",
+  107: "ansi-bg-bright-white",
+};
+
+const ANSI_STYLES: Record<number, string> = {
+  1: "ansi-bold",
+  2: "ansi-dim",
+  3: "ansi-italic",
+  4: "ansi-underline",
+};
+
+const ANSI_ESCAPE_REGEX = /\x1b\[([0-9;]*)m/g;
+
+function isForegroundClass(cls: string): boolean {
+  return (
+    cls.startsWith("ansi-") &&
+    !cls.startsWith("ansi-bg-") &&
+    !cls.startsWith("ansi-bold") &&
+    !cls.startsWith("ansi-dim") &&
+    !cls.startsWith("ansi-italic") &&
+    !cls.startsWith("ansi-underline")
+  );
+}
+
+function isBackgroundClass(cls: string): boolean {
+  return cls.startsWith("ansi-bg-");
+}
+
+export function ansiToHtml(text: string): string {
+  let result = "";
+  let lastIndex = 0;
+  let currentClasses: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = ANSI_ESCAPE_REGEX.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      const textContent = escapeHtml(text.slice(lastIndex, match.index));
+      if (currentClasses.length > 0) {
+        result += `<span class="${currentClasses.join(" ")}">${textContent}</span>`;
+      } else {
+        result += textContent;
+      }
+    }
+
+    const codes = match[1].split(";").map((c) => parseInt(c, 10) || 0);
+
+    for (const code of codes) {
+      if (code === 0) {
+        currentClasses = [];
+      } else if (ANSI_STYLES[code]) {
+        const styleClass = ANSI_STYLES[code];
+        if (!currentClasses.includes(styleClass)) {
+          currentClasses.push(styleClass);
+        }
+      } else if (ANSI_FOREGROUND[code]) {
+        currentClasses = currentClasses.filter((c) => !isForegroundClass(c));
+        currentClasses.push(ANSI_FOREGROUND[code]);
+      } else if (ANSI_BACKGROUND[code]) {
+        currentClasses = currentClasses.filter((c) => !isBackgroundClass(c));
+        currentClasses.push(ANSI_BACKGROUND[code]);
+      }
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  ANSI_ESCAPE_REGEX.lastIndex = 0;
+
+  if (lastIndex < text.length) {
+    const textContent = escapeHtml(text.slice(lastIndex));
+    if (currentClasses.length > 0) {
+      result += `<span class="${currentClasses.join(" ")}">${textContent}</span>`;
+    } else {
+      result += textContent;
+    }
+  }
+
+  return result;
+}
+
+export function hasAnsiCodes(text: string): boolean {
+  return /\x1b\[[0-9;]*m/.test(text);
+}
+
 export function getToolsHtml(tools: Record<string, Tool>): string {
   const toolIds = Object.keys(tools);
   if (toolIds.length === 0) return "";
@@ -93,8 +211,16 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
           tool.output.length > 500
             ? tool.output.slice(0, 500) + "..."
             : tool.output;
+        const outputHtml = hasAnsiCodes(truncated)
+          ? ansiToHtml(truncated)
+          : escapeHtml(truncated);
+        const terminalClass = hasAnsiCodes(tool.output) ? " terminal" : "";
         detailsContent +=
-          '<pre class="tool-output">' + escapeHtml(truncated) + "</pre>";
+          '<pre class="tool-output' +
+          terminalClass +
+          '">' +
+          outputHtml +
+          "</pre>";
       }
       const escapedStatus = escapeHtml(tool.status);
       if (detailsContent) {
