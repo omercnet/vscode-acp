@@ -11,6 +11,20 @@ const SCREENSHOTS_DIR = join(PROJECT_ROOT, "screenshots");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data");
 const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");
 
+const TIMING = {
+  VSCODE_INIT: 5000,
+  COMMAND_PALETTE_OPEN: 500,
+  COMMAND_TYPE: 300,
+  COMMAND_EXECUTE: 2000,
+};
+
+const SCREENSHOT_CLIP = {
+  ACTIVITY_BAR_WIDTH: 48,
+  TITLE_BAR_HEIGHT: 35,
+  SIDEBAR_WIDTH: 305,
+  STATUS_BAR_HEIGHT: 25,
+};
+
 async function findVSCodeExecutable() {
   const entries = await readdir(VSCODE_TEST_DIR);
   const vscodeDir = entries.find((e) => e.startsWith("vscode-"));
@@ -80,24 +94,23 @@ async function takeScreenshot() {
   });
 
   electronApp.on("close", () => console.log("App closed"));
-
   console.log("Waiting for VS Code to load...");
 
   const window = await electronApp.firstWindow();
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
-  await window.waitForTimeout(5000);
+  await window.waitForTimeout(TIMING.VSCODE_INIT);
 
   try {
     console.log("Opening ACP view via command...");
 
     const modifier = cmdOrCtrl();
     await window.keyboard.press(`${modifier}+Shift+P`);
-    await window.waitForTimeout(500);
+    await window.waitForTimeout(TIMING.COMMAND_PALETTE_OPEN);
     await window.keyboard.type("View: Focus on Chat View");
-    await window.waitForTimeout(300);
+    await window.waitForTimeout(TIMING.COMMAND_TYPE);
     await window.keyboard.press("Enter");
-    await window.waitForTimeout(2000);
+    await window.waitForTimeout(TIMING.COMMAND_EXECUTE);
 
     const viewport = window.viewportSize();
     console.log("Viewport:", viewport);
@@ -106,10 +119,13 @@ async function takeScreenshot() {
     await window.screenshot({
       path: join(SCREENSHOTS_DIR, "acp-sidebar.png"),
       clip: {
-        x: 48,
-        y: 35,
-        width: 305,
-        height: viewport.height - 60,
+        x: SCREENSHOT_CLIP.ACTIVITY_BAR_WIDTH,
+        y: SCREENSHOT_CLIP.TITLE_BAR_HEIGHT,
+        width: SCREENSHOT_CLIP.SIDEBAR_WIDTH,
+        height:
+          viewport.height -
+          SCREENSHOT_CLIP.TITLE_BAR_HEIGHT -
+          SCREENSHOT_CLIP.STATUS_BAR_HEIGHT,
       },
     });
   } catch (e) {

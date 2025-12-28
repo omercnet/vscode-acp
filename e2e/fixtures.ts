@@ -12,6 +12,10 @@ const PROJECT_ROOT = join(__dirname, "..");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data-e2e");
 const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");
 
+const TIMING = {
+  VSCODE_INIT: 3000,
+};
+
 async function findVSCodeExecutable(): Promise<string> {
   const entries = await readdir(VSCODE_TEST_DIR);
   const vscodeDir = entries.find((e) => e.startsWith("vscode-"));
@@ -92,7 +96,7 @@ export const test = base.extend<TestFixtures>({
     const window = await vscode.firstWindow();
     await window.waitForLoadState("domcontentloaded");
     await window.setViewportSize({ width: 1280, height: 800 });
-    await window.waitForTimeout(3000);
+    await window.waitForTimeout(TIMING.VSCODE_INIT);
     await use(window);
   },
 });
