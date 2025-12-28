@@ -73,7 +73,7 @@ export class MockACPServer {
         this.handleNewSession(request.id, request.params);
         break;
       case "session/prompt":
-        this.handlePrompt(request.id, request.params);
+        void this.handlePrompt(request.id, request.params);
         break;
       case "session/set_mode":
       case "session/set_model":
@@ -161,11 +161,13 @@ export class MockACPServer {
         default:
           await this.demoDefault(session.id);
       }
-    } catch {
+    } catch (error) {
       if (session.pendingPrompt?.signal.aborted) {
         this.sendResponse(id, { stopReason: "cancelled" });
         return;
       }
+      this.sendError(id, -32603, `Demo error: ${error}`);
+      return;
     }
 
     session.pendingPrompt = null;
