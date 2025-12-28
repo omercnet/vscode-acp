@@ -58,6 +58,8 @@ function createWebviewHTML(): string {
     <button class="welcome-btn" id="welcome-connect-btn">Connect to Agent</button>
   </div>
   
+  <div id="plan-container"></div>
+  
   <div id="messages"></div>
   
   <div id="input-container">
@@ -750,32 +752,32 @@ suite("Webview", () => {
 
       test("showPlan creates plan element", () => {
         controller.showPlan(testPlan.entries);
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.ok(planEl);
       });
 
       test("showPlan displays all entries", () => {
         controller.showPlan(testPlan.entries);
-        const entries = elements.messagesEl.querySelectorAll(".plan-entry");
+        const entries = elements.planContainer.querySelectorAll(".plan-entry");
         assert.strictEqual(entries.length, 3);
       });
 
       test("showPlan shows progress count", () => {
         controller.showPlan(testPlan.entries);
-        const progress = elements.messagesEl.querySelector(".plan-progress");
+        const progress = elements.planContainer.querySelector(".plan-progress");
         assert.ok(progress);
         assert.strictEqual(progress?.textContent, "1/3");
       });
 
       test("showPlan applies status classes", () => {
         controller.showPlan(testPlan.entries);
-        const completed = elements.messagesEl.querySelector(
+        const completed = elements.planContainer.querySelector(
           ".plan-entry-completed"
         );
-        const inProgress = elements.messagesEl.querySelector(
+        const inProgress = elements.planContainer.querySelector(
           ".plan-entry-in_progress"
         );
-        const pending = elements.messagesEl.querySelector(
+        const pending = elements.planContainer.querySelector(
           ".plan-entry-pending"
         );
         assert.ok(completed);
@@ -785,11 +787,13 @@ suite("Webview", () => {
 
       test("showPlan applies priority classes", () => {
         controller.showPlan(testPlan.entries);
-        const high = elements.messagesEl.querySelector(".plan-priority-high");
-        const medium = elements.messagesEl.querySelector(
+        const high = elements.planContainer.querySelector(
+          ".plan-priority-high"
+        );
+        const medium = elements.planContainer.querySelector(
           ".plan-priority-medium"
         );
-        const low = elements.messagesEl.querySelector(".plan-priority-low");
+        const low = elements.planContainer.querySelector(".plan-priority-low");
         assert.ok(high);
         assert.ok(medium);
         assert.ok(low);
@@ -798,7 +802,7 @@ suite("Webview", () => {
       test("hidePlan removes plan element", () => {
         controller.showPlan(testPlan.entries);
         controller.hidePlan();
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.strictEqual(planEl, null);
       });
 
@@ -807,28 +811,28 @@ suite("Webview", () => {
           type: "plan",
           plan: testPlan,
         });
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.ok(planEl);
       });
 
       test("planComplete message removes display", () => {
         controller.handleMessage({ type: "plan", plan: testPlan });
         controller.handleMessage({ type: "planComplete" });
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.strictEqual(planEl, null);
       });
 
       test("chatCleared removes plan", () => {
         controller.handleMessage({ type: "plan", plan: testPlan });
         controller.handleMessage({ type: "chatCleared" });
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.strictEqual(planEl, null);
       });
 
       test("showPlan with empty entries hides plan", () => {
         controller.showPlan(testPlan.entries);
         controller.showPlan([]);
-        const planEl = elements.messagesEl.querySelector(".agent-plan");
+        const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.strictEqual(planEl, null);
       });
     });

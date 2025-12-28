@@ -305,6 +305,7 @@ export interface WebviewElements {
   modelSelector: HTMLSelectElement;
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
+  planContainer: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -323,6 +324,7 @@ export function getElements(doc: Document): WebviewElements {
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
+    planContainer: doc.getElementById("plan-container")!,
   };
 }
 
@@ -335,7 +337,6 @@ export class WebviewController {
   private currentAssistantMessage: HTMLElement | null = null;
   private currentAssistantText = "";
   private thinkingEl: HTMLElement | null = null;
-  private planEl: HTMLElement | null = null;
   private tools: Record<string, Tool> = {};
   private isConnected = false;
   private messageTexts = new Map<HTMLElement, string>();
@@ -690,41 +691,35 @@ export class WebviewController {
       return;
     }
 
-    if (!this.planEl) {
-      this.planEl = this.doc.createElement("div");
-      this.planEl.className = "agent-plan";
-      this.planEl.setAttribute("role", "status");
-      this.planEl.setAttribute("aria-live", "polite");
-      this.planEl.setAttribute("aria-label", "Agent execution plan");
-      this.elements.messagesEl.appendChild(this.planEl);
-    }
-
     const completedCount = entries.filter(
       (e) => e.status === "completed"
     ).length;
     const totalCount = entries.length;
 
-    this.planEl.innerHTML = `
-      <div class="plan-header">
-        <span class="plan-icon">📋</span>
-        <span class="plan-title">Agent Plan</span>
-        <span class="plan-progress">${completedCount}/${totalCount}</span>
-      </div>
-      <div class="plan-entries">
-        ${entries
-          .map(
-            (entry) => `
-          <div class="plan-entry plan-entry-${entry.status} plan-priority-${entry.priority}">
-            <span class="plan-status-icon">${this.getPlanStatusIcon(entry.status)}</span>
-            <span class="plan-content">${escapeHtml(entry.content)}</span>
+    this.elements.planContainer.innerHTML = `
+      <div class="agent-plan">
+        <details class="plan-details" open>
+          <summary class="plan-header">
+            <span class="plan-icon">📋</span>
+            <span class="plan-title">Agent Plan</span>
+            <span class="plan-progress">${completedCount}/${totalCount}</span>
+          </summary>
+          <div class="plan-entries">
+            ${entries
+              .map(
+                (entry) => `
+              <div class="plan-entry plan-entry-${entry.status} plan-priority-${entry.priority}">
+                <span class="plan-status-icon">${this.getPlanStatusIcon(entry.status)}</span>
+                <span class="plan-content">${escapeHtml(entry.content)}</span>
+              </div>
+            `
+              )
+              .join("")}
           </div>
-        `
-          )
-          .join("")}
+        </details>
       </div>
     `;
-
-    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
+    this.elements.planContainer.style.display = "block";
   }
 
   private getPlanStatusIcon(status: string): string {
@@ -740,10 +735,8 @@ export class WebviewController {
   }
 
   hidePlan(): void {
-    if (this.planEl) {
-      this.planEl.remove();
-      this.planEl = null;
-    }
+    this.elements.planContainer.innerHTML = "";
+    this.elements.planContainer.style.display = "none";
   }
 
   private updateAutocomplete(): void {

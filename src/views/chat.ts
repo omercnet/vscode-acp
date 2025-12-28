@@ -466,6 +466,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </p>
   </div>
   
+  <div id="plan-container" role="status" aria-live="polite" aria-label="Agent execution plan"></div>
+  
   <div id="messages" role="log" aria-label="Chat messages" aria-live="polite" tabindex="0"></div>
   
   <div id="input-container">
