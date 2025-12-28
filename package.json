@@ -134,25 +134,46 @@
     "test": "vscode-test",
     "precoverage": "npm run compile-tests && npm run compile",
     "coverage": "vscode-test --coverage --coverage-output coverage --coverage-reporter lcov --coverage-reporter text",
-    "coverage:html": "vscode-test --coverage --coverage-reporter html"
+    "coverage:html": "vscode-test --coverage --coverage-reporter html",
+    "lint": "eslint src --fix",
+    "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
+    "prepare": "husky"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.2.0",
+    "@commitlint/config-conventional": "^20.2.0",
     "@types/jsdom": "^27.0.0",
     "@types/marked": "^5.0.2",
     "@types/mocha": "^10.0.10",
     "@types/node": "18.x",
     "@types/vscode": "^1.74.0",
+    "@typescript-eslint/eslint-plugin": "^8.50.1",
+    "@typescript-eslint/parser": "^8.50.1",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.0.0",
     "esbuild": "^0.25.0",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
     "jsdom": "^27.3.0",
+    "lint-staged": "^16.2.7",
     "npm-run-all": "^4.1.5",
+    "prettier": "^3.7.4",
     "typescript": "^5.0.0"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.12.0",
     "marked": "^17.0.1",
     "vscode-jsonrpc": "^8.2.0"
+  },
+  "lint-staged": {
+    "*.{ts,js,mjs}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,css,html}": [
+      "prettier --write"
+    ]
   }
 }

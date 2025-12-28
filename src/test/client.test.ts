@@ -81,7 +81,7 @@ suite("ACPClient with Mock Server", () => {
     mockSpawn = (
       _command: string,
       _args: string[],
-      _options: unknown,
+      _options: unknown
     ): ChildProcess => {
       return createMockProcess() as unknown as ChildProcess;
     };
@@ -133,7 +133,7 @@ suite("ACPClient with Mock Server", () => {
       const states2: string[] = [];
 
       const unsubscribe1 = client.setOnStateChange((state) =>
-        states1.push(state),
+        states1.push(state)
       );
       client.setOnStateChange((state) => states2.push(state));
 

@@ -43,7 +43,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly acpClient: ACPClient,
-    globalState: vscode.Memento,
+    globalState: vscode.Memento
   ) {
     this.globalState = globalState;
 
@@ -73,7 +73,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken,
+    _token: vscode.CancellationToken
   ): void {
     this.view = webviewView;
 
@@ -156,7 +156,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.stderrBuffer += text;
 
     const errorMatch = this.stderrBuffer.match(
-      /(\w+Error):\s*(\w+)?\s*\n?\s*data:\s*\{([^}]+)\}/,
+      /(\w+Error):\s*(\w+)?\s*\n?\s*data:\s*\{([^}]+)\}/
     );
     if (errorMatch) {
       const errorType = errorMatch[1];
@@ -241,7 +241,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const response = await this.acpClient.sendMessage(text);
       console.log(
         "[Chat] Prompt response received:",
-        JSON.stringify(response, null, 2),
+        JSON.stringify(response, null, 2)
       );
 
       if (this.streamingText.length === 0) {
@@ -364,16 +364,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private getHtmlContent(webview: vscode.Webview): string {
     const styleResetUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "reset.css"),
+      vscode.Uri.joinPath(this.extensionUri, "media", "reset.css")
     );
     const styleVSCodeUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "vscode.css"),
+      vscode.Uri.joinPath(this.extensionUri, "media", "vscode.css")
     );
     const styleMainUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "main.css"),
+      vscode.Uri.joinPath(this.extensionUri, "media", "main.css")
     );
     const webviewScriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "dist", "webview.js"),
+      vscode.Uri.joinPath(this.extensionUri, "dist", "webview.js")
     );
 
     return `<!DOCTYPE html>
