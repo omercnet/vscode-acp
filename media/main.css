@@ -743,3 +743,126 @@ kbd {
 .plan-priority-low {
   opacity: 0.8;
 }
+
+/* Permission Modal */
+.permission-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+
+.permission-content {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  max-width: 400px;
+  width: 100%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  animation: modalSlideIn 0.15s ease-out;
+}
+
+@keyframes modalSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.permission-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.permission-icon {
+  font-size: 20px;
+}
+
+.permission-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.permission-details {
+  padding: 16px;
+  font-size: 13px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.permission-tool-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--vscode-foreground);
+}
+
+.permission-tool-kind {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 8px;
+}
+
+.permission-tool-input {
+  background: var(--vscode-textCodeBlock-background);
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--vscode-editor-font-family), monospace;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.permission-options {
+  display: flex;
+  gap: 8px;
+  padding: 16px;
+  border-top: 1px solid var(--vscode-panel-border);
+  flex-wrap: wrap;
+}
+
+.permission-btn {
+  flex: 1;
+  min-width: 80px;
+  padding: 8px 16px;
+  font-size: 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s ease;
+}
+
+.permission-btn-allow {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.permission-btn-allow:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.permission-btn-reject {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.permission-btn-reject:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
