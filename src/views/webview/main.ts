@@ -133,7 +133,7 @@ export function getToolsHtml(tools: Record<string, Tool>): string {
 
 export function updateSelectLabel(
   select: HTMLSelectElement,
-  prefix: string,
+  prefix: string
 ): void {
   Array.from(select.options).forEach((opt) => {
     opt.textContent = opt.dataset.label || opt.textContent;
@@ -169,7 +169,7 @@ export function getElements(doc: Document): WebviewElements {
     agentSelector: doc.getElementById("agent-selector") as HTMLSelectElement,
     connectBtn: doc.getElementById("connect-btn") as HTMLButtonElement,
     welcomeConnectBtn: doc.getElementById(
-      "welcome-connect-btn",
+      "welcome-connect-btn"
     ) as HTMLButtonElement,
     modeSelector: doc.getElementById("mode-selector") as HTMLSelectElement,
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
@@ -197,7 +197,7 @@ export class WebviewController {
     vscode: VsCodeApi,
     elements: WebviewElements,
     doc: Document,
-    win: Window,
+    win: Window
   ) {
     this.vscode = vscode;
     this.elements = elements;
@@ -244,7 +244,7 @@ export class WebviewController {
           e.preventDefault();
           this.selectedCommandIndex = Math.min(
             this.selectedCommandIndex + 1,
-            commands.length - 1,
+            commands.length - 1
           );
           this.showCommandAutocomplete(commands);
           return;
@@ -252,7 +252,7 @@ export class WebviewController {
           e.preventDefault();
           this.selectedCommandIndex = Math.max(
             this.selectedCommandIndex - 1,
-            0,
+            0
           );
           this.showCommandAutocomplete(commands);
           return;
@@ -299,7 +299,7 @@ export class WebviewController {
       if (item) {
         this.selectedCommandIndex = parseInt(
           item.getAttribute("data-index") || "0",
-          10,
+          10
         );
         const commands = this.getFilteredCommands(inputEl.value.split(/\s/)[0]);
         this.showCommandAutocomplete(commands);
@@ -357,13 +357,13 @@ export class WebviewController {
     });
 
     this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
-      this.handleMessage(e.data),
+      this.handleMessage(e.data)
     );
   }
 
   addMessage(
     text: string,
-    type: "user" | "assistant" | "error" | "system",
+    type: "user" | "assistant" | "error" | "system"
   ): HTMLElement {
     const div = this.doc.createElement("div");
     div.className = "message " + type;
@@ -474,7 +474,7 @@ export class WebviewController {
     return this.availableCommands.filter(
       (cmd) =>
         cmd.name.toLowerCase().startsWith(search) ||
-        cmd.description?.toLowerCase().includes(search),
+        cmd.description?.toLowerCase().includes(search)
     );
   }
 
@@ -581,7 +581,7 @@ export class WebviewController {
           this.currentAssistantMessage.innerHTML = html;
           this.messageTexts.set(
             this.currentAssistantMessage,
-            this.currentAssistantText,
+            this.currentAssistantText
           );
         }
         this.currentAssistantMessage = null;
@@ -735,7 +735,7 @@ export class WebviewController {
 export function initWebview(
   vscode: VsCodeApi,
   doc: Document,
-  win: Window,
+  win: Window
 ): WebviewController {
   const elements = getElements(doc);
   return new WebviewController(vscode, elements, doc, win);

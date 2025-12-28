@@ -12,21 +12,21 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.openDevTools", () => {
       vscode.commands.executeCommand(
-        "workbench.action.webview.openDeveloperTools",
+        "workbench.action.webview.openDeveloperTools"
       );
-    }),
+    })
   );
 
   acpClient = new ACPClient();
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
-    context.globalState,
+    context.globalState
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
     vscode.StatusBarAlignment.Left,
-    100,
+    100
   );
   statusBarItem.command = "vscode-acp.startChat";
   statusBarItem.tooltip = "VSCode ACP - Click to open chat";
@@ -46,8 +46,8 @@ export function activate(context: vscode.ExtensionContext) {
         webviewOptions: {
           retainContextWhenHidden: true,
         },
-      },
-    ),
+      }
+    )
   );
 
   context.subscriptions.push(
@@ -62,19 +62,19 @@ export function activate(context: vscode.ExtensionContext) {
           vscode.window.showErrorMessage(`Failed to connect: ${error}`);
         }
       }
-    }),
+    })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.newChat", () => {
       chatProvider?.newChat();
-    }),
+    })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.clearChat", () => {
       chatProvider?.clearChat();
-    }),
+    })
   );
 
   context.subscriptions.push({
@@ -85,7 +85,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 function updateStatusBar(
-  state: "disconnected" | "connecting" | "connected" | "error",
+  state: "disconnected" | "connecting" | "connected" | "error"
 ): void {
   if (!statusBarItem) return;
 
@@ -108,11 +108,11 @@ function updateStatusBar(
 
   if (state === "error") {
     statusBarItem.backgroundColor = new vscode.ThemeColor(
-      "statusBarItem.errorBackground",
+      "statusBarItem.errorBackground"
     );
   } else if (state === "connecting") {
     statusBarItem.backgroundColor = new vscode.ThemeColor(
-      "statusBarItem.warningBackground",
+      "statusBarItem.warningBackground"
     );
   } else {
     statusBarItem.backgroundColor = undefined;
