@@ -5,14 +5,43 @@ import {
   Page,
 } from "@playwright/test";
 import { join } from "path";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, writeFile, readdir } from "fs/promises";
+import { platform } from "os";
 
 const PROJECT_ROOT = join(__dirname, "..");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data-e2e");
-const VSCODE_PATH = join(
-  PROJECT_ROOT,
-  ".vscode-test/vscode-darwin-arm64-1.107.1/Visual Studio Code.app/Contents/MacOS/Electron"
-);
+const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");
+
+async function findVSCodeExecutable(): Promise<string> {
+  const entries = await readdir(VSCODE_TEST_DIR);
+  const vscodeDir = entries.find((e) => e.startsWith("vscode-"));
+
+  if (!vscodeDir) {
+    throw new Error(
+      "VS Code not found in .vscode-test/. Run 'npm test' first to download it."
+    );
+  }
+
+  const currentPlatform = platform();
+
+  if (currentPlatform === "darwin") {
+    return join(
+      VSCODE_TEST_DIR,
+      vscodeDir,
+      "Visual Studio Code.app/Contents/MacOS/Electron"
+    );
+  } else if (currentPlatform === "linux") {
+    return join(VSCODE_TEST_DIR, vscodeDir, "code");
+  } else if (currentPlatform === "win32") {
+    return join(VSCODE_TEST_DIR, vscodeDir, "Code.exe");
+  }
+
+  throw new Error(`Unsupported platform: ${currentPlatform}`);
+}
+
+export function cmdOrCtrl(): string {
+  return platform() === "darwin" ? "Meta" : "Control";
+}
 
 export type TestFixtures = {
   vscode: ElectronApplication;
@@ -31,8 +60,10 @@ export const test = base.extend<TestFixtures>({
       })
     );
 
+    const vscodePath = await findVSCodeExecutable();
+
     const electronApp = await electron.launch({
-      executablePath: VSCODE_PATH,
+      executablePath: vscodePath,
       args: [
         "--extensionDevelopmentPath=" + PROJECT_ROOT,
         "--user-data-dir=" + USER_DATA_DIR,
