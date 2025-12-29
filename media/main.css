@@ -752,7 +752,7 @@ kbd {
   right: 0;
   bottom: 0;
   background: color-mix(in srgb, var(--vscode-editor-background) 40%, #000000);
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   z-index: 1000;
