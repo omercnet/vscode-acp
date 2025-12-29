@@ -198,6 +198,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "toolCallStart",
         name: update.title,
         toolCallId: update.toolCallId,
+        kind: update.kind,
       });
     } else if (update.sessionUpdate === "tool_call_update") {
       if (update.status === "completed" || update.status === "failed") {
@@ -205,6 +206,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           type: "toolCallComplete",
           toolCallId: update.toolCallId,
           title: update.title,
+          kind: update.kind,
           content: update.content,
           rawInput: update.rawInput,
           rawOutput: update.rawOutput,
