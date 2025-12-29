@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { spawn } from "child_process";
 import { marked } from "marked";
 import { ACPClient } from "../acp/client";
 import {
@@ -6,7 +7,23 @@ import {
   getAgentsWithStatus,
   getFirstAvailableAgent,
 } from "../acp/agents";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type {
+  SessionNotification,
+  ReadTextFileRequest,
+  ReadTextFileResponse,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
+  CreateTerminalRequest,
+  CreateTerminalResponse,
+  TerminalOutputRequest,
+  TerminalOutputResponse,
+  WaitForTerminalExitRequest,
+  WaitForTerminalExitResponse,
+  KillTerminalCommandRequest,
+  KillTerminalCommandResponse,
+  ReleaseTerminalRequest,
+  ReleaseTerminalResponse,
+} from "@agentclientprotocol/sdk";
 
 marked.setOptions({
   breaks: true,
@@ -34,6 +51,19 @@ interface WebviewMessage {
   modelId?: string;
 }
 
+interface ManagedTerminal {
+  id: string;
+  terminal?: vscode.Terminal;
+  proc: ReturnType<typeof spawn> | null;
+  output: string;
+  outputByteLimit: number | null;
+  truncated: boolean;
+  exitCode: number | null;
+  signal: string | null;
+  exitPromise: Promise<void>;
+  exitResolve: () => void;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "vscode-acp.chatView";
 
@@ -42,6 +72,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private globalState: vscode.Memento;
   private streamingText = "";
   private hasRestoredModeModel = false;
+  private terminals: Map<string, ManagedTerminal> = new Map();
+  private terminalCounter = 0;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -71,6 +103,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
     });
+
+    this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
+      return this.handleReadTextFile(params);
+    });
+
+    this.acpClient.setOnWriteTextFile(async (params: WriteTextFileRequest) => {
+      return this.handleWriteTextFile(params);
+    });
+
+    this.acpClient.setOnCreateTerminal(
+      async (params: CreateTerminalRequest) => {
+        return this.handleCreateTerminal(params);
+      }
+    );
+
+    this.acpClient.setOnTerminalOutput(
+      async (params: TerminalOutputRequest) => {
+        return this.handleTerminalOutput(params);
+      }
+    );
+
+    this.acpClient.setOnWaitForTerminalExit(
+      async (params: WaitForTerminalExitRequest) => {
+        return this.handleWaitForTerminalExit(params);
+      }
+    );
+
+    this.acpClient.setOnKillTerminalCommand(
+      async (params: KillTerminalCommandRequest) => {
+        return this.handleKillTerminalCommand(params);
+      }
+    );
+
+    this.acpClient.setOnReleaseTerminal(
+      async (params: ReleaseTerminalRequest) => {
+        return this.handleReleaseTerminal(params);
+      }
+    );
   }
 
   resolveWebviewView(
@@ -179,6 +249,252 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.stderrBuffer.length > 10000) {
       this.stderrBuffer = this.stderrBuffer.slice(-5000);
     }
+  }
+
+  private async handleReadTextFile(
+    params: ReadTextFileRequest
+  ): Promise<ReadTextFileResponse> {
+    console.log("[Chat] Reading file:", params.path);
+    try {
+      const uri = vscode.Uri.file(params.path);
+      const openDoc = vscode.workspace.textDocuments.find(
+        (doc) => doc.uri.fsPath === uri.fsPath
+      );
+
+      let content: string;
+      if (openDoc) {
+        content = openDoc.getText();
+      } else {
+        const fileContent = await vscode.workspace.fs.readFile(uri);
+        content = new TextDecoder().decode(fileContent);
+      }
+
+      if (params.line !== undefined || params.limit !== undefined) {
+        const lines = content.split("\n");
+        const startLine = params.line ?? 0;
+        const lineLimit = params.limit ?? lines.length;
+        const selectedLines = lines.slice(startLine, startLine + lineLimit);
+        content = selectedLines.join("\n");
+      }
+
+      return { content };
+    } catch (error) {
+      console.error("[Chat] Failed to read file:", error);
+      throw error;
+    }
+  }
+
+  private async handleWriteTextFile(
+    params: WriteTextFileRequest
+  ): Promise<WriteTextFileResponse> {
+    console.log("[Chat] Writing file:", params.path);
+    try {
+      const uri = vscode.Uri.file(params.path);
+      const content = new TextEncoder().encode(params.content);
+      await vscode.workspace.fs.writeFile(uri, content);
+      return {};
+    } catch (error) {
+      console.error("[Chat] Failed to write file:", error);
+      throw error;
+    }
+  }
+
+  private async handleCreateTerminal(
+    params: CreateTerminalRequest
+  ): Promise<CreateTerminalResponse> {
+    console.log("[Chat] Creating terminal for:", params.command);
+    const terminalId = `term-${++this.terminalCounter}-${Date.now()}`;
+
+    let exitResolve: () => void = () => {};
+    const exitPromise = new Promise<void>((resolve) => {
+      exitResolve = resolve;
+    });
+
+    const managedTerminal: ManagedTerminal = {
+      id: terminalId,
+      proc: null,
+      output: "",
+      outputByteLimit: params.outputByteLimit ?? null,
+      truncated: false,
+      exitCode: null,
+      signal: null,
+      exitPromise,
+      exitResolve,
+    };
+
+    const writeEmitter = new vscode.EventEmitter<string>();
+    const closeEmitter = new vscode.EventEmitter<number | void>();
+
+    const pty: vscode.Pseudoterminal = {
+      onDidWrite: writeEmitter.event,
+      onDidClose: closeEmitter.event,
+      open: () => {
+        const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const cwd =
+          params.cwd && params.cwd.trim() !== ""
+            ? params.cwd
+            : workspaceCwd ||
+              process.env.HOME ||
+              process.env.USERPROFILE ||
+              process.cwd();
+
+        const proc = spawn(params.command, params.args || [], {
+          cwd,
+          env: {
+            ...process.env,
+            ...(params.env?.reduce(
+              (acc, e) => ({ ...acc, [e.name]: e.value }),
+              {}
+            ) || {}),
+          },
+          shell: true,
+        });
+
+        managedTerminal.proc = proc;
+
+        proc.stdout?.on("data", (data: Buffer) => {
+          const text = data.toString();
+          writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+          this.appendTerminalOutput(managedTerminal, text);
+        });
+
+        proc.stderr?.on("data", (data: Buffer) => {
+          const text = data.toString();
+          writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+          this.appendTerminalOutput(managedTerminal, text);
+        });
+
+        proc.on("close", (code: number | null, signal: string | null) => {
+          managedTerminal.exitCode = code;
+          managedTerminal.signal = signal;
+          managedTerminal.exitResolve();
+          closeEmitter.fire(code ?? 0);
+        });
+
+        proc.on("error", (err: Error) => {
+          writeEmitter.fire(`\r\nError: ${err.message}\r\n`);
+          managedTerminal.exitCode = 1;
+          managedTerminal.exitResolve();
+          closeEmitter.fire(1);
+        });
+      },
+      close: () => {
+        if (managedTerminal.proc && !managedTerminal.proc.killed) {
+          try {
+            managedTerminal.proc.kill();
+          } catch {}
+        }
+      },
+    };
+
+    const terminal = vscode.window.createTerminal({
+      name: `ACP: ${params.command}`,
+      pty,
+    });
+
+    managedTerminal.terminal = terminal;
+    this.terminals.set(terminalId, managedTerminal);
+
+    terminal.show(true);
+
+    return { terminalId };
+  }
+
+  private appendTerminalOutput(terminal: ManagedTerminal, text: string): void {
+    terminal.output += text;
+    if (terminal.outputByteLimit !== null) {
+      const byteLength = Buffer.byteLength(terminal.output, "utf8");
+      if (byteLength > terminal.outputByteLimit) {
+        const encoded = Buffer.from(terminal.output, "utf8");
+        const sliced = encoded.slice(-terminal.outputByteLimit);
+        terminal.output = sliced.toString("utf8");
+        terminal.truncated = true;
+      }
+    }
+  }
+
+  private async handleTerminalOutput(
+    params: TerminalOutputRequest
+  ): Promise<TerminalOutputResponse> {
+    const terminal = this.terminals.get(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+
+    const exitStatus =
+      terminal.exitCode !== null
+        ? {
+            exitCode: terminal.exitCode,
+            ...(terminal.signal !== null && { signal: terminal.signal }),
+          }
+        : null;
+
+    return {
+      output: terminal.output,
+      truncated: terminal.truncated,
+      exitStatus,
+    };
+  }
+
+  private async handleWaitForTerminalExit(
+    params: WaitForTerminalExitRequest
+  ): Promise<WaitForTerminalExitResponse> {
+    const terminal = this.terminals.get(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+
+    await terminal.exitPromise;
+
+    return {
+      exitCode: terminal.exitCode,
+      ...(terminal.signal !== null && { signal: terminal.signal }),
+    };
+  }
+
+  private killTerminalProcess(terminal: ManagedTerminal): void {
+    if (terminal.proc && !terminal.proc.killed) {
+      try {
+        terminal.proc.kill();
+      } catch {}
+    }
+  }
+
+  private async handleKillTerminalCommand(
+    params: KillTerminalCommandRequest
+  ): Promise<KillTerminalCommandResponse> {
+    const terminal = this.terminals.get(params.terminalId);
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+
+    this.killTerminalProcess(terminal);
+    terminal.terminal?.dispose();
+    return {};
+  }
+
+  private async handleReleaseTerminal(
+    params: ReleaseTerminalRequest
+  ): Promise<ReleaseTerminalResponse> {
+    const terminal = this.terminals.get(params.terminalId);
+    if (!terminal) {
+      return {};
+    }
+
+    this.killTerminalProcess(terminal);
+    terminal.terminal?.dispose();
+    this.terminals.delete(params.terminalId);
+    return {};
+  }
+
+  public dispose(): void {
+    for (const terminal of this.terminals.values()) {
+      this.killTerminalProcess(terminal);
+      try {
+        terminal.terminal?.dispose();
+      } catch {}
+    }
+    this.terminals.clear();
   }
 
   private handleSessionUpdate(notification: SessionNotification): void {
