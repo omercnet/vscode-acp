@@ -743,3 +743,80 @@ kbd {
 .plan-priority-low {
   opacity: 0.8;
 }
+
+/* Diff View */
+.diff-view {
+  margin: 4px 0 0 18px;
+  border-radius: var(--border-radius-small);
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-family: var(--vscode-editor-font-family), monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  max-height: 300px;
+}
+
+.diff-header {
+  padding: 6px 10px;
+  background: var(
+    --vscode-diffEditor-insertedTextBackground,
+    rgba(156, 220, 254, 0.1)
+  );
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--vscode-foreground);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.diff-body {
+  background: var(--vscode-textCodeBlock-background);
+}
+
+.diff-line {
+  display: flex;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-prefix {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  user-select: none;
+  color: var(--vscode-descriptionForeground);
+}
+
+.diff-content {
+  flex: 1;
+  padding-left: 4px;
+}
+
+.diff-add {
+  background: var(
+    --vscode-diffEditor-insertedLineBackground,
+    rgba(155, 185, 85, 0.2)
+  );
+}
+
+.diff-add .diff-prefix {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #3fb950);
+}
+
+.diff-remove {
+  background: var(
+    --vscode-diffEditor-removedLineBackground,
+    rgba(255, 0, 0, 0.2)
+  );
+}
+
+.diff-remove .diff-prefix {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #f85149);
+}
+
+.diff-context {
+  background: transparent;
+}

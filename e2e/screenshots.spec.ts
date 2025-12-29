@@ -109,6 +109,55 @@ const ANSI_OUTPUT_SETUP = `
   messagesEl?.appendChild(assistantMsg);
 `;
 
+const DIFF_DISPLAY_SETUP = `
+  const statusDot = document.querySelector(".status-dot");
+  const statusText = document.querySelector(".status-text");
+  const connectBtn = document.getElementById("connect-btn");
+  const welcomeView = document.getElementById("welcome-view");
+  const messagesEl = document.getElementById("messages");
+
+  if (statusDot) statusDot.className = "status-dot connected";
+  if (statusText) statusText.textContent = "Connected";
+  if (connectBtn) connectBtn.style.display = "none";
+  if (welcomeView) welcomeView.style.display = "none";
+  if (messagesEl) messagesEl.style.display = "flex";
+
+  const userMsg = document.createElement("div");
+  userMsg.className = "message user";
+  userMsg.innerHTML = "<p>Update the config file</p>";
+  messagesEl?.appendChild(userMsg);
+
+  const assistantMsg = document.createElement("div");
+  assistantMsg.className = "message assistant";
+  assistantMsg.innerHTML = \`
+    <p>I'll update the configuration file for you.</p>
+    <details class="tool" open>
+      <summary>
+        <span class="tool-status">✓</span>
+        <span class="tool-name">Edit config.json</span>
+      </summary>
+      <div class="tool-content">
+        <div class="diff-view">
+          <div class="diff-header">config.json</div>
+          <div class="diff-body">
+            <div class="diff-line diff-context"><span class="diff-prefix"> </span><span class="diff-content">{</span></div>
+            <div class="diff-line diff-context"><span class="diff-prefix"> </span><span class="diff-content">  "name": "my-app",</span></div>
+            <div class="diff-line diff-remove"><span class="diff-prefix">-</span><span class="diff-content">  "version": "1.0.0",</span></div>
+            <div class="diff-line diff-add"><span class="diff-prefix">+</span><span class="diff-content">  "version": "1.1.0",</span></div>
+            <div class="diff-line diff-context"><span class="diff-prefix"> </span><span class="diff-content">  "description": "A sample app"</span></div>
+            <div class="diff-line diff-remove"><span class="diff-prefix">-</span><span class="diff-content">  "debug": true</span></div>
+            <div class="diff-line diff-add"><span class="diff-prefix">+</span><span class="diff-content">  "debug": false,</span></div>
+            <div class="diff-line diff-add"><span class="diff-prefix">+</span><span class="diff-content">  "production": true</span></div>
+            <div class="diff-line diff-context"><span class="diff-prefix"> </span><span class="diff-content">}</span></div>
+          </div>
+        </div>
+      </div>
+    </details>
+    <p>Updated the version and switched to production mode.</p>
+  \`;
+  messagesEl?.appendChild(assistantMsg);
+`;
+
 const PLAN_DISPLAY_SETUP = `
   const statusDot = document.querySelector(".status-dot");
   const statusText = document.querySelector(".status-text");
@@ -230,6 +279,39 @@ test.describe("Feature Screenshots", () => {
       console.log("Falling back to full window screenshot");
       await window.screenshot({
         path: join(SCREENSHOTS_DIR, "plan-display.png"),
+      });
+    }
+  });
+
+  test("Diff display in tool calls", async ({ window }) => {
+    await openACPView(window);
+
+    await window.waitForTimeout(2000);
+    const frame = await getWebviewContentFrame(window);
+
+    await injectMockState(frame, DIFF_DISPLAY_SETUP);
+    await window.waitForTimeout(1000);
+
+    const sidebarLocator = window.locator(
+      ".split-view-view.visible .pane-body"
+    );
+    const sidebar = await sidebarLocator.first().boundingBox();
+
+    if (sidebar) {
+      console.log("Sidebar bounds:", sidebar);
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "diff-display.png"),
+        clip: {
+          x: sidebar.x,
+          y: sidebar.y,
+          width: Math.min(sidebar.width, 450),
+          height: sidebar.height,
+        },
+      });
+    } else {
+      console.log("Falling back to full window screenshot");
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "diff-display.png"),
       });
     }
   });

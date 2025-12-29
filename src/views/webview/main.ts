@@ -30,6 +30,25 @@ export interface PlanEntry {
   status: "pending" | "in_progress" | "completed";
 }
 
+export interface DiffContent {
+  type: "diff";
+  path: string;
+  oldText?: string | null;
+  newText: string;
+}
+
+export interface ContentBlock {
+  type: "content";
+  content?: { text?: string };
+}
+
+export interface TerminalContent {
+  type: "terminal";
+  terminalId: string;
+}
+
+export type ToolCallContent = DiffContent | ContentBlock | TerminalContent;
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -53,7 +72,7 @@ export interface ExtensionMessage {
   toolCallId?: string;
   name?: string;
   title?: string;
-  content?: Array<{ content?: { text?: string } }>;
+  content?: ToolCallContent[];
   rawInput?: { command?: string; description?: string };
   rawOutput?: { output?: string };
   status?: string;
@@ -186,6 +205,82 @@ export function hasAnsiCodes(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
 }
 
+export function isDiffData(output: string): DiffContent | null {
+  try {
+    const parsed = JSON.parse(output);
+    if (
+      parsed?.type === "diff" &&
+      typeof parsed.path === "string" &&
+      typeof parsed.newText === "string"
+    ) {
+      return parsed as DiffContent;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function computeDiffLines(
+  oldText: string | null | undefined,
+  newText: string
+): Array<{ type: "add" | "remove" | "context"; content: string }> {
+  const oldLines = oldText?.split("\n") || [];
+  const newLines = newText.split("\n");
+  const result: Array<{ type: "add" | "remove" | "context"; content: string }> =
+    [];
+
+  if (oldLines.length === 0 || !oldText) {
+    for (const line of newLines) {
+      result.push({ type: "add", content: line });
+    }
+    return result;
+  }
+
+  let oldIdx = 0;
+  let newIdx = 0;
+
+  while (oldIdx < oldLines.length || newIdx < newLines.length) {
+    if (oldIdx >= oldLines.length) {
+      result.push({ type: "add", content: newLines[newIdx] });
+      newIdx++;
+    } else if (newIdx >= newLines.length) {
+      result.push({ type: "remove", content: oldLines[oldIdx] });
+      oldIdx++;
+    } else if (oldLines[oldIdx] === newLines[newIdx]) {
+      result.push({ type: "context", content: oldLines[oldIdx] });
+      oldIdx++;
+      newIdx++;
+    } else {
+      result.push({ type: "remove", content: oldLines[oldIdx] });
+      oldIdx++;
+      // At this point both oldIdx < oldLines.length and newIdx < newLines.length
+      // were true at the start of this else branch, so newIdx < newLines.length is guaranteed
+      result.push({ type: "add", content: newLines[newIdx] });
+      newIdx++;
+    }
+  }
+
+  return result;
+}
+
+export function renderDiff(diffData: DiffContent): string {
+  const lines = computeDiffLines(diffData.oldText, diffData.newText);
+  const linesHtml = lines
+    .map((line) => {
+      const prefix =
+        line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
+      const className = `diff-line diff-${line.type}`;
+      return `<div class="${className}"><span class="diff-prefix">${prefix}</span><span class="diff-content">${escapeHtml(line.content)}</span></div>`;
+    })
+    .join("");
+
+  return `<div class="diff-view">
+    <div class="diff-header">${escapeHtml(diffData.path)}</div>
+    <div class="diff-body">${linesHtml}</div>
+  </div>`;
+}
+
 export function getToolsHtml(
   tools: Record<string, Tool>,
   expandedToolId?: string | null
@@ -211,21 +306,26 @@ export function getToolsHtml(
           "</div>";
       }
       if (tool.output) {
-        const truncated =
-          tool.output.length > 500
-            ? tool.output.slice(0, 500) + "..."
-            : tool.output;
-        const hasAnsi = hasAnsiCodes(truncated);
-        const outputHtml = hasAnsi
-          ? ansiToHtml(truncated)
-          : escapeHtml(truncated);
-        const terminalClass = hasAnsi ? " terminal" : "";
-        detailsContent +=
-          '<pre class="tool-output' +
-          terminalClass +
-          '">' +
-          outputHtml +
-          "</pre>";
+        const diffData = isDiffData(tool.output);
+        if (diffData) {
+          detailsContent += renderDiff(diffData);
+        } else {
+          const truncated =
+            tool.output.length > 500
+              ? tool.output.slice(0, 500) + "..."
+              : tool.output;
+          const hasAnsi = hasAnsiCodes(truncated);
+          const outputHtml = hasAnsi
+            ? ansiToHtml(truncated)
+            : escapeHtml(truncated);
+          const terminalClass = hasAnsi ? " terminal" : "";
+          detailsContent +=
+            '<pre class="tool-output' +
+            terminalClass +
+            '">' +
+            outputHtml +
+            "</pre>";
+        }
       }
       const escapedStatus = escapeHtml(tool.status);
       const inputPreview = tool.input
@@ -849,8 +949,18 @@ export class WebviewController {
       case "toolCallComplete":
         if (msg.toolCallId && this.tools[msg.toolCallId]) {
           const tool = this.tools[msg.toolCallId];
-          const output =
-            msg.content?.[0]?.content?.text || msg.rawOutput?.output || "";
+          const firstContent = msg.content?.[0];
+          let output = msg.rawOutput?.output || "";
+          if (firstContent?.type === "content") {
+            output = firstContent.content?.text || output;
+          } else if (firstContent?.type === "diff") {
+            output = JSON.stringify({
+              type: "diff",
+              path: firstContent.path,
+              oldText: firstContent.oldText,
+              newText: firstContent.newText,
+            });
+          }
           const input =
             msg.rawInput?.command || msg.rawInput?.description || "";
           if (msg.title) tool.name = msg.title;
