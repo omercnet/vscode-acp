@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.4.0](https://github.com/omercnet/vscode-acp/compare/v1.3.0...v1.4.0) (2025-12-29)
+
+
+### Features
+
+* display tool kind icons ([#67](https://github.com/omercnet/vscode-acp/issues/67)) ([b0e8411](https://github.com/omercnet/vscode-acp/commit/b0e8411d3acc00e456aa37ba4b6b2a6e2e43e1ac))
+* split agent response messages when tools are executed ([#38](https://github.com/omercnet/vscode-acp/issues/38)) ([f7d15f5](https://github.com/omercnet/vscode-acp/commit/f7d15f59bb35547572ccf6abe2f0382a7ca1e6c5))
+
+
+### Bug Fixes
+
+* persist model and mode selection across VSCode reloads ([#35](https://github.com/omercnet/vscode-acp/issues/35)) ([16f4cd3](https://github.com/omercnet/vscode-acp/commit/16f4cd3c830e517059112d2d4b397838a45ec81b))
+
 ## [1.3.0](https://github.com/omercnet/vscode-acp/compare/v1.2.0...v1.3.0) (2025-12-28)
 
 
