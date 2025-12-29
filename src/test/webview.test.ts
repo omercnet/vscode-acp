@@ -1096,6 +1096,18 @@ suite("Webview", () => {
       assert.strictEqual(getToolKindIcon("fetch"), "🌐");
     });
 
+    test("returns move icon for move kind", () => {
+      assert.strictEqual(getToolKindIcon("move"), "📦");
+    });
+
+    test("returns think icon for think kind", () => {
+      assert.strictEqual(getToolKindIcon("think"), "🧠");
+    });
+
+    test("returns switch_mode icon for switch_mode kind", () => {
+      assert.strictEqual(getToolKindIcon("switch_mode"), "🔄");
+    });
+
     test("returns other icon for other kind", () => {
       assert.strictEqual(getToolKindIcon("other"), "⚙️");
     });
