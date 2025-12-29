@@ -1057,6 +1057,9 @@ export class WebviewController {
       this.thoughtEl = this.doc.createElement("details");
       this.thoughtEl.className = "agent-thought";
       this.thoughtEl.setAttribute("open", "");
+      this.thoughtEl.setAttribute("role", "status");
+      this.thoughtEl.setAttribute("aria-live", "polite");
+      this.thoughtEl.setAttribute("aria-label", "Assistant is thinking");
       this.thoughtEl.innerHTML = `
         <summary class="thought-header">
           <span class="thought-icon">💭</span>
