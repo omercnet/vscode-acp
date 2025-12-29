@@ -867,6 +867,20 @@ suite("Webview", () => {
         assert.strictEqual(thoughtEl?.getAttribute("open"), "");
       });
 
+      test("appendThought includes ARIA accessibility attributes", () => {
+        controller.appendThought("Thinking...");
+        const thoughtEl = elements.messagesEl.querySelector(
+          "details.agent-thought"
+        );
+        assert.ok(thoughtEl);
+        assert.strictEqual(thoughtEl?.getAttribute("role"), "status");
+        assert.strictEqual(thoughtEl?.getAttribute("aria-live"), "polite");
+        assert.strictEqual(
+          thoughtEl?.getAttribute("aria-label"),
+          "Assistant is thinking"
+        );
+      });
+
       test("hideThought removes thought element", () => {
         controller.appendThought("Some thought");
         controller.hideThought();
