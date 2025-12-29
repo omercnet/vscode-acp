@@ -367,6 +367,9 @@ export class WebviewController {
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
   private currentPermissionRequestId: string | null = null;
+  private permissionKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+  private permissionBackdropHandler: ((event: MouseEvent) => void) | null =
+    null;
 
   constructor(
     vscode: VsCodeApi,
@@ -819,12 +822,56 @@ export class WebviewController {
       });
 
     this.elements.permissionModal.style.display = "flex";
-    this.elements.permissionModal.focus();
+
+    const firstButton = this.elements.permissionOptions.querySelector(
+      "button"
+    ) as HTMLButtonElement | null;
+    if (firstButton) {
+      firstButton.focus();
+    }
+
+    this.permissionKeyHandler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.cancelPermission();
+      }
+    };
+    this.elements.permissionModal.addEventListener(
+      "keydown",
+      this.permissionKeyHandler
+    );
+
+    this.permissionBackdropHandler = (event: MouseEvent) => {
+      if (event.target === this.elements.permissionModal) {
+        this.cancelPermission();
+      }
+    };
+    this.elements.permissionModal.addEventListener(
+      "click",
+      this.permissionBackdropHandler
+    );
   }
 
   hidePermissionModal(): void {
     this.elements.permissionModal.style.display = "none";
+    this.elements.permissionDetails.innerHTML = "";
+    this.elements.permissionOptions.innerHTML = "";
     this.currentPermissionRequestId = null;
+
+    if (this.permissionKeyHandler) {
+      this.elements.permissionModal.removeEventListener(
+        "keydown",
+        this.permissionKeyHandler
+      );
+      this.permissionKeyHandler = null;
+    }
+    if (this.permissionBackdropHandler) {
+      this.elements.permissionModal.removeEventListener(
+        "click",
+        this.permissionBackdropHandler
+      );
+      this.permissionBackdropHandler = null;
+    }
   }
 
   private respondToPermission(optionId: string): void {

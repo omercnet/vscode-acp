@@ -751,7 +751,7 @@ kbd {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: color-mix(in srgb, var(--vscode-editor-background) 40%, #000000);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -765,7 +765,7 @@ kbd {
   border-radius: 8px;
   max-width: 400px;
   width: 100%;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 8px 32px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
   animation: modalSlideIn 0.15s ease-out;
 }
 
