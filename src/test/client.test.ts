@@ -3,6 +3,15 @@ import { ChildProcess } from "child_process";
 import { ACPClient, type SpawnFunction } from "../acp/client";
 import { getAgent } from "../acp/agents";
 import { createMockProcess } from "./mocks/acp-server";
+import type {
+  ReadTextFileRequest,
+  WriteTextFileRequest,
+  CreateTerminalRequest,
+  TerminalOutputRequest,
+  WaitForTerminalExitRequest,
+  KillTerminalCommandRequest,
+  ReleaseTerminalRequest,
+} from "@agentclientprotocol/sdk";
 
 suite("ACPClient", () => {
   let client: ACPClient;
@@ -293,6 +302,77 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getState(), "disconnected");
       assert.strictEqual(client.isConnected(), false);
       assert.strictEqual(client.getSessionMetadata(), null);
+    });
+  });
+
+  suite("file system handlers", () => {
+    test("should register readTextFile handler", () => {
+      let handlerCalled = false;
+      client.setOnReadTextFile(async (_params: ReadTextFileRequest) => {
+        handlerCalled = true;
+        return { content: "test content" };
+      });
+      assert.strictEqual(handlerCalled, false);
+    });
+
+    test("should register writeTextFile handler", () => {
+      let handlerCalled = false;
+      client.setOnWriteTextFile(async (_params: WriteTextFileRequest) => {
+        handlerCalled = true;
+        return {};
+      });
+      assert.strictEqual(handlerCalled, false);
+    });
+  });
+
+  suite("terminal handlers", () => {
+    test("should register createTerminal handler", () => {
+      let handlerCalled = false;
+      client.setOnCreateTerminal(async (_params: CreateTerminalRequest) => {
+        handlerCalled = true;
+        return { terminalId: "test-id" };
+      });
+      assert.strictEqual(handlerCalled, false);
+    });
+
+    test("should register terminalOutput handler", () => {
+      let handlerCalled = false;
+      client.setOnTerminalOutput(async (_params: TerminalOutputRequest) => {
+        handlerCalled = true;
+        return { output: "", truncated: false };
+      });
+      assert.strictEqual(handlerCalled, false);
+    });
+
+    test("should register waitForTerminalExit handler", () => {
+      let handlerCalled = false;
+      client.setOnWaitForTerminalExit(
+        async (_params: WaitForTerminalExitRequest) => {
+          handlerCalled = true;
+          return { exitCode: 0 };
+        }
+      );
+      assert.strictEqual(handlerCalled, false);
+    });
+
+    test("should register killTerminalCommand handler", () => {
+      let handlerCalled = false;
+      client.setOnKillTerminalCommand(
+        async (_params: KillTerminalCommandRequest) => {
+          handlerCalled = true;
+          return {};
+        }
+      );
+      assert.strictEqual(handlerCalled, false);
+    });
+
+    test("should register releaseTerminal handler", () => {
+      let handlerCalled = false;
+      client.setOnReleaseTerminal(async (_params: ReleaseTerminalRequest) => {
+        handlerCalled = true;
+        return {};
+      });
+      assert.strictEqual(handlerCalled, false);
     });
   });
 });

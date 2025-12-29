@@ -7,6 +7,20 @@ import {
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type ReadTextFileRequest,
+  type ReadTextFileResponse,
+  type WriteTextFileRequest,
+  type WriteTextFileResponse,
+  type CreateTerminalRequest,
+  type CreateTerminalResponse,
+  type TerminalOutputRequest,
+  type TerminalOutputResponse,
+  type WaitForTerminalExitRequest,
+  type WaitForTerminalExitResponse,
+  type KillTerminalCommandRequest,
+  type KillTerminalCommandResponse,
+  type ReleaseTerminalRequest,
+  type ReleaseTerminalResponse,
   type InitializeResponse,
   type NewSessionResponse,
   type PromptResponse,
@@ -31,6 +45,27 @@ export type ACPConnectionState =
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: SessionNotification) => void;
 type StderrCallback = (data: string) => void;
+type ReadTextFileCallback = (
+  params: ReadTextFileRequest
+) => Promise<ReadTextFileResponse>;
+type WriteTextFileCallback = (
+  params: WriteTextFileRequest
+) => Promise<WriteTextFileResponse>;
+type CreateTerminalCallback = (
+  params: CreateTerminalRequest
+) => Promise<CreateTerminalResponse>;
+type TerminalOutputCallback = (
+  params: TerminalOutputRequest
+) => Promise<TerminalOutputResponse>;
+type WaitForTerminalExitCallback = (
+  params: WaitForTerminalExitRequest
+) => Promise<WaitForTerminalExitResponse>;
+type KillTerminalCommandCallback = (
+  params: KillTerminalCommandRequest
+) => Promise<KillTerminalCommandResponse>;
+type ReleaseTerminalCallback = (
+  params: ReleaseTerminalRequest
+) => Promise<ReleaseTerminalResponse>;
 
 export type SpawnFunction = (
   command: string,
@@ -54,6 +89,13 @@ export class ACPClient {
   private stateChangeListeners: Set<StateChangeCallback> = new Set();
   private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
   private stderrListeners: Set<StderrCallback> = new Set();
+  private readTextFileHandler: ReadTextFileCallback | null = null;
+  private writeTextFileHandler: WriteTextFileCallback | null = null;
+  private createTerminalHandler: CreateTerminalCallback | null = null;
+  private terminalOutputHandler: TerminalOutputCallback | null = null;
+  private waitForTerminalExitHandler: WaitForTerminalExitCallback | null = null;
+  private killTerminalCommandHandler: KillTerminalCommandCallback | null = null;
+  private releaseTerminalHandler: ReleaseTerminalCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
@@ -94,6 +136,34 @@ export class ACPClient {
   setOnStderr(callback: StderrCallback): () => void {
     this.stderrListeners.add(callback);
     return () => this.stderrListeners.delete(callback);
+  }
+
+  setOnReadTextFile(callback: ReadTextFileCallback): void {
+    this.readTextFileHandler = callback;
+  }
+
+  setOnWriteTextFile(callback: WriteTextFileCallback): void {
+    this.writeTextFileHandler = callback;
+  }
+
+  setOnCreateTerminal(callback: CreateTerminalCallback): void {
+    this.createTerminalHandler = callback;
+  }
+
+  setOnTerminalOutput(callback: TerminalOutputCallback): void {
+    this.terminalOutputHandler = callback;
+  }
+
+  setOnWaitForTerminalExit(callback: WaitForTerminalExitCallback): void {
+    this.waitForTerminalExitHandler = callback;
+  }
+
+  setOnKillTerminalCommand(callback: KillTerminalCommandCallback): void {
+    this.killTerminalCommandHandler = callback;
+  }
+
+  setOnReleaseTerminal(callback: ReleaseTerminalCallback): void {
+    this.releaseTerminalHandler = callback;
   }
 
   isConnected(): boolean {
@@ -200,13 +270,82 @@ export class ACPClient {
             console.error("[ACP] Error in session update listener:", error);
           }
         },
+        readTextFile: async (
+          params: ReadTextFileRequest
+        ): Promise<ReadTextFileResponse> => {
+          console.log("[ACP] Read text file request:", params.path);
+          if (this.readTextFileHandler) {
+            return this.readTextFileHandler(params);
+          }
+          throw new Error("No readTextFile handler registered");
+        },
+        writeTextFile: async (
+          params: WriteTextFileRequest
+        ): Promise<WriteTextFileResponse> => {
+          console.log("[ACP] Write text file request:", params.path);
+          if (this.writeTextFileHandler) {
+            return this.writeTextFileHandler(params);
+          }
+          throw new Error("No writeTextFile handler registered");
+        },
+        createTerminal: async (
+          params: CreateTerminalRequest
+        ): Promise<CreateTerminalResponse> => {
+          console.log("[ACP] Create terminal request:", params.command);
+          if (this.createTerminalHandler) {
+            return this.createTerminalHandler(params);
+          }
+          throw new Error("No createTerminal handler registered");
+        },
+        terminalOutput: async (
+          params: TerminalOutputRequest
+        ): Promise<TerminalOutputResponse> => {
+          console.log("[ACP] Terminal output request:", params.terminalId);
+          if (this.terminalOutputHandler) {
+            return this.terminalOutputHandler(params);
+          }
+          throw new Error("No terminalOutput handler registered");
+        },
+        waitForTerminalExit: async (
+          params: WaitForTerminalExitRequest
+        ): Promise<WaitForTerminalExitResponse> => {
+          console.log("[ACP] Wait for terminal exit:", params.terminalId);
+          if (this.waitForTerminalExitHandler) {
+            return this.waitForTerminalExitHandler(params);
+          }
+          throw new Error("No waitForTerminalExit handler registered");
+        },
+        killTerminal: async (
+          params: KillTerminalCommandRequest
+        ): Promise<KillTerminalCommandResponse> => {
+          console.log("[ACP] Kill terminal:", params.terminalId);
+          if (this.killTerminalCommandHandler) {
+            return this.killTerminalCommandHandler(params);
+          }
+          throw new Error("No killTerminal handler registered");
+        },
+        releaseTerminal: async (
+          params: ReleaseTerminalRequest
+        ): Promise<ReleaseTerminalResponse> => {
+          console.log("[ACP] Release terminal:", params.terminalId);
+          if (this.releaseTerminalHandler) {
+            return this.releaseTerminalHandler(params);
+          }
+          throw new Error("No releaseTerminal handler registered");
+        },
       };
 
       this.connection = new ClientSideConnection(() => client, stream);
 
       const initResponse = await this.connection.initialize({
         protocolVersion: 1,
-        clientCapabilities: {},
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true,
+          },
+          terminal: true,
+        },
         clientInfo: {
           name: "vscode-acp",
           version: "0.0.1",
