@@ -651,22 +651,52 @@ kbd {
   }
 }
 
+/* Plan Container - Fixed at top */
+#plan-container {
+  display: none;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+}
+
 /* Agent Plan Display */
 .agent-plan {
-  margin: 8px 0;
-  padding: 12px;
+  padding: 8px var(--container-padding);
   background: var(--vscode-editor-inactiveSelectionBackground);
-  border-radius: 8px;
   border-left: 3px solid var(--vscode-activityBarBadge-background);
+}
+
+.plan-details {
+  margin: 0;
+}
+
+.plan-details summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.plan-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.plan-details summary::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 9px;
+  transition: transform 0.15s ease;
+}
+
+.plan-details[open] summary::before {
+  transform: rotate(90deg);
 }
 
 .plan-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--vscode-panel-border);
+  padding: 4px 0;
 }
 
 .plan-icon {
@@ -675,7 +705,7 @@ kbd {
 
 .plan-title {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--vscode-foreground);
@@ -683,7 +713,7 @@ kbd {
 
 .plan-progress {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 10px;
   background: var(--vscode-badge-background);
   color: var(--vscode-badge-foreground);
   padding: 2px 8px;
@@ -693,23 +723,27 @@ kbd {
 .plan-entries {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  padding: 8px 0 4px 0;
+  margin-left: 15px;
+  border-top: 1px solid var(--vscode-panel-border);
+  margin-top: 6px;
 }
 
 .plan-entry {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
   line-height: 1.4;
-  padding: 4px 0;
+  padding: 2px 0;
 }
 
 .plan-status-icon {
   flex-shrink: 0;
-  width: 16px;
+  width: 14px;
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .plan-entry-pending .plan-status-icon {
