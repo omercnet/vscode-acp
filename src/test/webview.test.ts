@@ -754,6 +754,7 @@ suite("Webview", () => {
         controller.showPlan(testPlan.entries);
         const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.ok(planEl);
+        assert.strictEqual(elements.planContainer.style.display, "block");
       });
 
       test("showPlan displays all entries", () => {
@@ -804,6 +805,7 @@ suite("Webview", () => {
         controller.hidePlan();
         const planEl = elements.planContainer.querySelector(".agent-plan");
         assert.strictEqual(planEl, null);
+        assert.strictEqual(elements.planContainer.style.display, "none");
       });
 
       test("plan message updates display", () => {
