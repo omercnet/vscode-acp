@@ -9,6 +9,7 @@ import {
   initWebview,
   ansiToHtml,
   hasAnsiCodes,
+  getToolKindIcon,
   type VsCodeApi,
   type Tool,
   type WebviewElements,
@@ -1067,6 +1068,110 @@ suite("Webview", () => {
       const html = getToolsHtml(tools);
       assert.ok(html.includes("&lt;error&gt;"));
       assert.ok(html.includes('class="ansi-red"'));
+    });
+  });
+
+  suite("getToolKindIcon", () => {
+    test("returns read icon for read kind", () => {
+      assert.strictEqual(getToolKindIcon("read"), "📖");
+    });
+
+    test("returns edit icon for edit kind", () => {
+      assert.strictEqual(getToolKindIcon("edit"), "✏️");
+    });
+
+    test("returns delete icon for delete kind", () => {
+      assert.strictEqual(getToolKindIcon("delete"), "🗑️");
+    });
+
+    test("returns execute icon for execute kind", () => {
+      assert.strictEqual(getToolKindIcon("execute"), "▶️");
+    });
+
+    test("returns search icon for search kind", () => {
+      assert.strictEqual(getToolKindIcon("search"), "🔍");
+    });
+
+    test("returns fetch icon for fetch kind", () => {
+      assert.strictEqual(getToolKindIcon("fetch"), "🌐");
+    });
+
+    test("returns move icon for move kind", () => {
+      assert.strictEqual(getToolKindIcon("move"), "📦");
+    });
+
+    test("returns think icon for think kind", () => {
+      assert.strictEqual(getToolKindIcon("think"), "🧠");
+    });
+
+    test("returns switch_mode icon for switch_mode kind", () => {
+      assert.strictEqual(getToolKindIcon("switch_mode"), "🔄");
+    });
+
+    test("returns other icon for other kind", () => {
+      assert.strictEqual(getToolKindIcon("other"), "⚙️");
+    });
+
+    test("returns empty string for undefined kind", () => {
+      assert.strictEqual(getToolKindIcon(undefined), "");
+    });
+  });
+
+  suite("getToolsHtml with tool kinds", () => {
+    test("renders tool kind icon when kind is provided", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "read_file",
+          input: "file.txt",
+          output: "content",
+          status: "completed",
+          kind: "read",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("📖"));
+      assert.ok(html.includes('class="tool-kind-icon"'));
+    });
+
+    test("renders execute kind icon for command tools", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "bash",
+          input: "npm test",
+          output: "success",
+          status: "completed",
+          kind: "execute",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes("▶️"));
+    });
+
+    test("does not render kind icon when kind is undefined", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "unknown_tool",
+          input: null,
+          output: null,
+          status: "running",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(!html.includes('class="tool-kind-icon"'));
+    });
+
+    test("includes kind in title attribute for accessibility", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "write_file",
+          input: "file.txt",
+          output: "done",
+          status: "completed",
+          kind: "edit",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes('title="edit"'));
     });
   });
 });

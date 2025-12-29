@@ -49,6 +49,63 @@ async function injectMockState(frame: Frame, setupFn: string): Promise<void> {
   console.log("Injection result:", result);
 }
 
+const TOOL_ICONS_SETUP = `
+  const statusDot = document.querySelector(".status-dot");
+  const statusText = document.querySelector(".status-text");
+  const connectBtn = document.getElementById("connect-btn");
+  const welcomeView = document.getElementById("welcome-view");
+  const messagesEl = document.getElementById("messages");
+
+  if (statusDot) statusDot.className = "status-dot connected";
+  if (statusText) statusText.textContent = "Connected";
+  if (connectBtn) connectBtn.style.display = "none";
+  if (welcomeView) welcomeView.style.display = "none";
+  if (messagesEl) messagesEl.style.display = "flex";
+
+  const userMsg = document.createElement("div");
+  userMsg.className = "message user";
+  userMsg.innerHTML = "<p>Read config.json, then run the build</p>";
+  messagesEl?.appendChild(userMsg);
+
+  const assistantMsg = document.createElement("div");
+  assistantMsg.className = "message assistant";
+  assistantMsg.innerHTML = \`
+    <p>I'll read the config and run the build for you.</p>
+    <div class="tools-container">
+      <details class="tool">
+        <summary>
+          <span class="tool-status">✓</span>
+          <span class="tool-kind-icon" title="read">📖</span>
+          <span class="tool-name">read_file</span>
+        </summary>
+      </details>
+      <details class="tool">
+        <summary>
+          <span class="tool-status">✓</span>
+          <span class="tool-kind-icon" title="execute">▶️</span>
+          <span class="tool-name">bash</span>
+        </summary>
+      </details>
+      <details class="tool">
+        <summary>
+          <span class="tool-status">✓</span>
+          <span class="tool-kind-icon" title="edit">✏️</span>
+          <span class="tool-name">write_file</span>
+        </summary>
+      </details>
+      <details class="tool">
+        <summary>
+          <span class="tool-status">✓</span>
+          <span class="tool-kind-icon" title="search">🔍</span>
+          <span class="tool-name">grep</span>
+        </summary>
+      </details>
+    </div>
+    <p>Build completed successfully!</p>
+  \`;
+  messagesEl?.appendChild(assistantMsg);
+`;
+
 const ANSI_OUTPUT_SETUP = `
   const statusDot = document.querySelector(".status-dot");
   const statusText = document.querySelector(".status-text");
@@ -230,6 +287,39 @@ test.describe("Feature Screenshots", () => {
       console.log("Falling back to full window screenshot");
       await window.screenshot({
         path: join(SCREENSHOTS_DIR, "plan-display.png"),
+      });
+    }
+  });
+
+  test("Tool kind icons", async ({ window }) => {
+    await openACPView(window);
+
+    await window.waitForTimeout(2000);
+    const frame = await getWebviewContentFrame(window);
+
+    await injectMockState(frame, TOOL_ICONS_SETUP);
+    await window.waitForTimeout(1000);
+
+    const sidebarLocator = window.locator(
+      ".split-view-view.visible .pane-body"
+    );
+    const sidebar = await sidebarLocator.first().boundingBox();
+
+    if (sidebar) {
+      console.log("Sidebar bounds:", sidebar);
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "tool-icons.png"),
+        clip: {
+          x: sidebar.x,
+          y: sidebar.y,
+          width: Math.min(sidebar.width, 400),
+          height: sidebar.height,
+        },
+      });
+    } else {
+      console.log("Falling back to full window screenshot");
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "tool-icons.png"),
       });
     }
   });

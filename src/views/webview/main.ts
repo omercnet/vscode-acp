@@ -6,11 +6,24 @@ export interface VsCodeApi {
 
 declare function acquireVsCodeApi(): VsCodeApi;
 
+export type ToolKind =
+  | "read"
+  | "edit"
+  | "delete"
+  | "move"
+  | "search"
+  | "execute"
+  | "think"
+  | "fetch"
+  | "switch_mode"
+  | "other";
+
 export interface Tool {
   name: string;
   input: string | null;
   output: string | null;
   status: "running" | "completed" | "failed";
+  kind?: ToolKind;
 }
 
 export interface WebviewState {
@@ -53,6 +66,7 @@ export interface ExtensionMessage {
   toolCallId?: string;
   name?: string;
   title?: string;
+  kind?: ToolKind;
   content?: Array<{ content?: { text?: string } }>;
   rawInput?: { command?: string; description?: string };
   rawOutput?: { output?: string };
@@ -66,6 +80,23 @@ export function escapeHtml(str: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+const TOOL_KIND_ICONS: Record<ToolKind, string> = {
+  read: "📖",
+  edit: "✏️",
+  delete: "🗑️",
+  move: "📦",
+  search: "🔍",
+  execute: "▶️",
+  think: "🧠",
+  fetch: "🌐",
+  switch_mode: "🔄",
+  other: "⚙️",
+};
+
+export function getToolKindIcon(kind?: ToolKind): string {
+  return kind ? TOOL_KIND_ICONS[kind] || TOOL_KIND_ICONS.other : "";
 }
 
 const ANSI_FOREGROUND: Record<number, string> = {
@@ -203,6 +234,14 @@ export function getToolsHtml(
             : "⋯";
       const statusClass = tool.status === "running" ? "running" : "";
       const isExpanded = id === expandedToolId;
+      const kindIcon = getToolKindIcon(tool.kind);
+      const kindSpan = kindIcon
+        ? '<span class="tool-kind-icon" title="' +
+          escapeHtml(tool.kind || "other") +
+          '">' +
+          kindIcon +
+          "</span> "
+        : "";
       let detailsContent = "";
       if (tool.input) {
         detailsContent +=
@@ -245,6 +284,7 @@ export function getToolsHtml(
           '">' +
           statusIcon +
           "</span> " +
+          kindSpan +
           escapeHtml(tool.name) +
           inputPreview +
           "</summary>" +
@@ -260,6 +300,7 @@ export function getToolsHtml(
         '">' +
         statusIcon +
         "</span> " +
+        kindSpan +
         escapeHtml(tool.name) +
         inputPreview +
         "</li>"
@@ -841,6 +882,7 @@ export class WebviewController {
             input: null,
             output: null,
             status: "running",
+            kind: msg.kind,
           };
           this.hasActiveTool = true;
           this.showThinking();
@@ -854,6 +896,7 @@ export class WebviewController {
           const input =
             msg.rawInput?.command || msg.rawInput?.description || "";
           if (msg.title) tool.name = msg.title;
+          if (msg.kind) tool.kind = msg.kind;
           tool.input = input;
           tool.output = output;
           tool.status = (msg.status as Tool["status"]) || "completed";
