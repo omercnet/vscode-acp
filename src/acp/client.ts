@@ -7,6 +7,10 @@ import {
   type SessionNotification,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type ReadTextFileRequest,
+  type ReadTextFileResponse,
+  type WriteTextFileRequest,
+  type WriteTextFileResponse,
   type InitializeResponse,
   type NewSessionResponse,
   type PromptResponse,
@@ -31,6 +35,12 @@ export type ACPConnectionState =
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: SessionNotification) => void;
 type StderrCallback = (data: string) => void;
+type ReadTextFileCallback = (
+  params: ReadTextFileRequest
+) => Promise<ReadTextFileResponse>;
+type WriteTextFileCallback = (
+  params: WriteTextFileRequest
+) => Promise<WriteTextFileResponse>;
 
 export type SpawnFunction = (
   command: string,
@@ -54,6 +64,8 @@ export class ACPClient {
   private stateChangeListeners: Set<StateChangeCallback> = new Set();
   private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
   private stderrListeners: Set<StderrCallback> = new Set();
+  private readTextFileHandler: ReadTextFileCallback | null = null;
+  private writeTextFileHandler: WriteTextFileCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
@@ -94,6 +106,14 @@ export class ACPClient {
   setOnStderr(callback: StderrCallback): () => void {
     this.stderrListeners.add(callback);
     return () => this.stderrListeners.delete(callback);
+  }
+
+  setOnReadTextFile(callback: ReadTextFileCallback): void {
+    this.readTextFileHandler = callback;
+  }
+
+  setOnWriteTextFile(callback: WriteTextFileCallback): void {
+    this.writeTextFileHandler = callback;
   }
 
   isConnected(): boolean {
@@ -200,13 +220,36 @@ export class ACPClient {
             console.error("[ACP] Error in session update listener:", error);
           }
         },
+        readTextFile: async (
+          params: ReadTextFileRequest
+        ): Promise<ReadTextFileResponse> => {
+          console.log("[ACP] Read text file request:", params.path);
+          if (this.readTextFileHandler) {
+            return this.readTextFileHandler(params);
+          }
+          throw new Error("No readTextFile handler registered");
+        },
+        writeTextFile: async (
+          params: WriteTextFileRequest
+        ): Promise<WriteTextFileResponse> => {
+          console.log("[ACP] Write text file request:", params.path);
+          if (this.writeTextFileHandler) {
+            return this.writeTextFileHandler(params);
+          }
+          throw new Error("No writeTextFile handler registered");
+        },
       };
 
       this.connection = new ClientSideConnection(() => client, stream);
 
       const initResponse = await this.connection.initialize({
         protocolVersion: 1,
-        clientCapabilities: {},
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true,
+          },
+        },
         clientInfo: {
           name: "vscode-acp",
           version: "0.0.1",
