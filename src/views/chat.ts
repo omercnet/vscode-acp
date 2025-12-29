@@ -217,19 +217,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         content = new TextDecoder().decode(fileContent);
       }
 
-      // Apply line and limit if specified
       if (params.line !== undefined || params.limit !== undefined) {
+        const hasTrailingNewline = content.endsWith("\n");
         const lines = content.split("\n");
-        const startLine = params.line ?? 0;
-        const lineLimit = params.limit ?? lines.length;
+        const startLine = Math.max(0, params.line ?? 0);
+        const maxAvailableLines = Math.max(0, lines.length - startLine);
+        const requestedLimit = params.limit ?? maxAvailableLines;
+        const lineLimit = Math.max(
+          0,
+          Math.min(requestedLimit, maxAvailableLines)
+        );
         const selectedLines = lines.slice(startLine, startLine + lineLimit);
         content = selectedLines.join("\n");
+        if (hasTrailingNewline && startLine + lineLimit >= lines.length) {
+          content += "\n";
+        }
       }
 
       return { content };
     } catch (error) {
-      console.error("[Chat] Failed to read file:", error);
-      throw error;
+      const message = `Failed to read file at path: ${params.path}`;
+      console.error(`[Chat] ${message}`, error);
+      throw new Error(message);
     }
   }
 
@@ -243,8 +252,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await vscode.workspace.fs.writeFile(uri, content);
       return {};
     } catch (error) {
-      console.error("[Chat] Failed to write file:", error);
-      throw error;
+      const message = `Failed to write file at path: ${params.path}`;
+      console.error(`[Chat] ${message}`, error);
+      throw new Error(message);
     }
   }
 
