@@ -9,9 +9,13 @@ import {
   initWebview,
   ansiToHtml,
   hasAnsiCodes,
+  isDiffData,
+  computeDiffLines,
+  renderDiff,
   type VsCodeApi,
   type Tool,
   type WebviewElements,
+  type DiffData,
 } from "../views/webview/main";
 
 function createMockVsCodeApi(): VsCodeApi & {
@@ -1067,6 +1071,181 @@ suite("Webview", () => {
       const html = getToolsHtml(tools);
       assert.ok(html.includes("&lt;error&gt;"));
       assert.ok(html.includes('class="ansi-red"'));
+    });
+  });
+
+  suite("isDiffData", () => {
+    test("returns DiffData for valid diff JSON", () => {
+      const json = JSON.stringify({
+        type: "diff",
+        path: "src/file.ts",
+        oldText: "old content",
+        newText: "new content",
+      });
+      const result = isDiffData(json);
+      assert.ok(result);
+      assert.strictEqual(result?.type, "diff");
+      assert.strictEqual(result?.path, "src/file.ts");
+    });
+
+    test("returns null for invalid JSON", () => {
+      const result = isDiffData("not json");
+      assert.strictEqual(result, null);
+    });
+
+    test("returns null for JSON without type=diff", () => {
+      const json = JSON.stringify({ type: "content", text: "hello" });
+      const result = isDiffData(json);
+      assert.strictEqual(result, null);
+    });
+
+    test("returns null for JSON without path", () => {
+      const json = JSON.stringify({ type: "diff", newText: "content" });
+      const result = isDiffData(json);
+      assert.strictEqual(result, null);
+    });
+
+    test("handles diff with null oldText", () => {
+      const json = JSON.stringify({
+        type: "diff",
+        path: "new-file.ts",
+        oldText: null,
+        newText: "new content",
+      });
+      const result = isDiffData(json);
+      assert.ok(result);
+      assert.strictEqual(result?.oldText, null);
+    });
+  });
+
+  suite("computeDiffLines", () => {
+    test("marks all lines as add when oldText is null", () => {
+      const result = computeDiffLines(null, "line1\nline2");
+      assert.strictEqual(result.length, 2);
+      assert.ok(result.every((l) => l.type === "add"));
+    });
+
+    test("marks all lines as add when oldText is empty", () => {
+      const result = computeDiffLines("", "line1\nline2");
+      assert.strictEqual(result.length, 2);
+      assert.ok(result.every((l) => l.type === "add"));
+    });
+
+    test("marks identical lines as context", () => {
+      const result = computeDiffLines("same\nline", "same\nline");
+      assert.strictEqual(result.length, 2);
+      assert.ok(result.every((l) => l.type === "context"));
+    });
+
+    test("marks changed lines as remove and add", () => {
+      const result = computeDiffLines("old", "new");
+      const removeLines = result.filter((l) => l.type === "remove");
+      const addLines = result.filter((l) => l.type === "add");
+      assert.strictEqual(removeLines.length, 1);
+      assert.strictEqual(addLines.length, 1);
+      assert.strictEqual(removeLines[0].content, "old");
+      assert.strictEqual(addLines[0].content, "new");
+    });
+
+    test("handles removed lines", () => {
+      const result = computeDiffLines("line1\nline2", "line1");
+      const removeLines = result.filter((l) => l.type === "remove");
+      assert.strictEqual(removeLines.length, 1);
+      assert.strictEqual(removeLines[0].content, "line2");
+    });
+
+    test("handles added lines", () => {
+      const result = computeDiffLines("line1", "line1\nline2");
+      const addLines = result.filter((l) => l.type === "add");
+      assert.strictEqual(addLines.length, 1);
+      assert.strictEqual(addLines[0].content, "line2");
+    });
+  });
+
+  suite("renderDiff", () => {
+    test("renders diff header with path", () => {
+      const diffData: DiffData = {
+        type: "diff",
+        path: "src/test.ts",
+        oldText: "old",
+        newText: "new",
+      };
+      const html = renderDiff(diffData);
+      assert.ok(html.includes("src/test.ts"));
+      assert.ok(html.includes('class="diff-header"'));
+    });
+
+    test("renders add lines with + prefix", () => {
+      const diffData: DiffData = {
+        type: "diff",
+        path: "file.ts",
+        oldText: null,
+        newText: "new line",
+      };
+      const html = renderDiff(diffData);
+      assert.ok(html.includes('class="diff-line diff-add"'));
+      assert.ok(html.includes(">+<"));
+    });
+
+    test("renders remove lines with - prefix", () => {
+      const diffData: DiffData = {
+        type: "diff",
+        path: "file.ts",
+        oldText: "old line",
+        newText: "",
+      };
+      const html = renderDiff(diffData);
+      assert.ok(html.includes('class="diff-line diff-remove"'));
+      assert.ok(html.includes(">-<"));
+    });
+
+    test("escapes HTML in diff content", () => {
+      const diffData: DiffData = {
+        type: "diff",
+        path: "file.ts",
+        oldText: null,
+        newText: "<script>alert('xss')</script>",
+      };
+      const html = renderDiff(diffData);
+      assert.ok(html.includes("&lt;script&gt;"));
+      assert.ok(!html.includes("<script>alert"));
+    });
+  });
+
+  suite("getToolsHtml with diff", () => {
+    test("renders diff output as diff view", () => {
+      const diffJson = JSON.stringify({
+        type: "diff",
+        path: "src/file.ts",
+        oldText: "old",
+        newText: "new",
+      });
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "edit",
+          input: "src/file.ts",
+          output: diffJson,
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes('class="diff-view"'));
+      assert.ok(html.includes('class="diff-header"'));
+      assert.ok(!html.includes('class="tool-output"'));
+    });
+
+    test("renders non-diff output normally", () => {
+      const tools: Record<string, Tool> = {
+        "tool-1": {
+          name: "read",
+          input: "file.txt",
+          output: "plain text content",
+          status: "completed",
+        },
+      };
+      const html = getToolsHtml(tools);
+      assert.ok(html.includes('class="tool-output"'));
+      assert.ok(!html.includes('class="diff-view"'));
     });
   });
 });
