@@ -833,6 +833,83 @@ suite("Webview", () => {
       });
     });
 
+    suite("agent thought display", () => {
+      test("thoughtChunk message creates thought element", () => {
+        controller.handleMessage({
+          type: "thoughtChunk",
+          text: "Let me think...",
+        });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.ok(thoughtEl);
+      });
+
+      test("thoughtChunk accumulates text", () => {
+        controller.handleMessage({
+          type: "thoughtChunk",
+          text: "First part. ",
+        });
+        controller.handleMessage({
+          type: "thoughtChunk",
+          text: "Second part.",
+        });
+        const contentEl = elements.messagesEl.querySelector(".thought-content");
+        assert.ok(contentEl);
+        assert.ok(contentEl?.textContent?.includes("First part."));
+        assert.ok(contentEl?.textContent?.includes("Second part."));
+      });
+
+      test("appendThought creates details element", () => {
+        controller.appendThought("Thinking about this...");
+        const thoughtEl = elements.messagesEl.querySelector(
+          "details.agent-thought"
+        );
+        assert.ok(thoughtEl);
+        assert.strictEqual(thoughtEl?.getAttribute("open"), "");
+      });
+
+      test("appendThought includes ARIA accessibility attributes", () => {
+        controller.appendThought("Thinking...");
+        const thoughtEl = elements.messagesEl.querySelector(
+          "details.agent-thought"
+        );
+        assert.ok(thoughtEl);
+        assert.strictEqual(thoughtEl?.getAttribute("role"), "status");
+        assert.strictEqual(thoughtEl?.getAttribute("aria-live"), "polite");
+        assert.strictEqual(
+          thoughtEl?.getAttribute("aria-label"),
+          "Assistant is thinking"
+        );
+      });
+
+      test("hideThought removes thought element", () => {
+        controller.appendThought("Some thought");
+        controller.hideThought();
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.strictEqual(thoughtEl, null);
+      });
+
+      test("streamStart clears thought", () => {
+        controller.appendThought("Old thought");
+        controller.handleMessage({ type: "streamStart" });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.strictEqual(thoughtEl, null);
+      });
+
+      test("streamEnd clears thought", () => {
+        controller.appendThought("Thinking...");
+        controller.handleMessage({ type: "streamEnd" });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.strictEqual(thoughtEl, null);
+      });
+
+      test("chatCleared removes thought", () => {
+        controller.appendThought("Some thought");
+        controller.handleMessage({ type: "chatCleared" });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.strictEqual(thoughtEl, null);
+      });
+    });
+
     suite("state persistence", () => {
       test("restores input value from state", () => {
         mockVsCode.setState({ isConnected: false, inputValue: "saved text" });

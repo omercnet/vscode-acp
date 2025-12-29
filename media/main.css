@@ -743,3 +743,62 @@ kbd {
 .plan-priority-low {
   opacity: 0.8;
 }
+
+/* Agent Thought Display */
+.agent-thought {
+  margin: 8px 0;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-textBlockQuote-background);
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.agent-thought summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  background: var(--vscode-editor-inactiveSelectionBackground);
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-thought summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-thought summary::after {
+  content: "▼";
+  font-size: 8px;
+  margin-left: auto;
+  opacity: 0.6;
+  transition: transform 0.15s ease;
+}
+
+.agent-thought:not([open]) summary::after {
+  transform: rotate(-90deg);
+}
+
+.thought-icon {
+  font-size: 14px;
+}
+
+.thought-title {
+  font-weight: 500;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.thought-content {
+  padding: 10px 12px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+}

@@ -49,6 +49,40 @@ async function injectMockState(frame: Frame, setupFn: string): Promise<void> {
   console.log("Injection result:", result);
 }
 
+const THOUGHT_DISPLAY_SETUP = `
+  const statusDot = document.querySelector(".status-dot");
+  const statusText = document.querySelector(".status-text");
+  const connectBtn = document.getElementById("connect-btn");
+  const welcomeView = document.getElementById("welcome-view");
+  const messagesEl = document.getElementById("messages");
+
+  if (statusDot) statusDot.className = "status-dot connected";
+  if (statusText) statusText.textContent = "Connected";
+  if (connectBtn) connectBtn.style.display = "none";
+  if (welcomeView) welcomeView.style.display = "none";
+  if (messagesEl) messagesEl.style.display = "flex";
+
+  const userMsg = document.createElement("div");
+  userMsg.className = "message user";
+  userMsg.innerHTML = "<p>How should I structure my React app?</p>";
+  messagesEl?.appendChild(userMsg);
+
+  const thoughtEl = document.createElement("details");
+  thoughtEl.className = "agent-thought";
+  thoughtEl.setAttribute("open", "");
+  thoughtEl.setAttribute("role", "status");
+  thoughtEl.setAttribute("aria-live", "polite");
+  thoughtEl.setAttribute("aria-label", "Assistant is thinking");
+  thoughtEl.innerHTML = \`
+    <summary class="thought-header">
+      <span class="thought-icon">💭</span>
+      <span class="thought-title">Thinking...</span>
+    </summary>
+    <div class="thought-content">Let me think about the best React app structure. I should consider the project size, whether it needs routing, state management complexity, and the team's experience level. For a typical medium-sized app, I'd recommend a feature-based folder structure with separation of concerns...</div>
+  \`;
+  messagesEl?.appendChild(thoughtEl);
+`;
+
 const ANSI_OUTPUT_SETUP = `
   const statusDot = document.querySelector(".status-dot");
   const statusText = document.querySelector(".status-text");
@@ -230,6 +264,39 @@ test.describe("Feature Screenshots", () => {
       console.log("Falling back to full window screenshot");
       await window.screenshot({
         path: join(SCREENSHOTS_DIR, "plan-display.png"),
+      });
+    }
+  });
+
+  test("Agent thought display", async ({ window }) => {
+    await openACPView(window);
+
+    await window.waitForTimeout(2000);
+    const frame = await getWebviewContentFrame(window);
+
+    await injectMockState(frame, THOUGHT_DISPLAY_SETUP);
+    await window.waitForTimeout(1000);
+
+    const sidebarLocator = window.locator(
+      ".split-view-view.visible .pane-body"
+    );
+    const sidebar = await sidebarLocator.first().boundingBox();
+
+    if (sidebar) {
+      console.log("Sidebar bounds:", sidebar);
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "thought-display.png"),
+        clip: {
+          x: sidebar.x,
+          y: sidebar.y,
+          width: Math.min(sidebar.width, 400),
+          height: sidebar.height,
+        },
+      });
+    } else {
+      console.log("Falling back to full window screenshot");
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "thought-display.png"),
       });
     }
   });

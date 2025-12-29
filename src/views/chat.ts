@@ -223,6 +223,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "plan",
         plan: { entries: update.entries },
       });
+    } else if (update.sessionUpdate === "agent_thought_chunk") {
+      if (update.content?.type === "text") {
+        this.postMessage({
+          type: "thoughtChunk",
+          text: update.content.text,
+        });
+      }
     }
   }
 
