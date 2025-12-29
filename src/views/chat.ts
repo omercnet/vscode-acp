@@ -54,6 +54,7 @@ interface WebviewMessage {
 interface ManagedTerminal {
   id: string;
   terminal: vscode.Terminal;
+  proc: ReturnType<typeof spawn> | null;
   output: string;
   outputByteLimit: number | null;
   exitCode: number | null;
@@ -311,6 +312,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const managedTerminal: ManagedTerminal = {
       id: terminalId,
       terminal: null as unknown as vscode.Terminal,
+      proc: null,
       output: "",
       outputByteLimit: params.outputByteLimit ?? null,
       exitCode: null,
@@ -326,8 +328,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       onDidWrite: writeEmitter.event,
       onDidClose: closeEmitter.event,
       open: () => {
+        const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        const cwd =
+          params.cwd && params.cwd.trim() !== ""
+            ? params.cwd
+            : workspaceCwd ||
+              process.env.HOME ||
+              process.env.USERPROFILE ||
+              process.cwd();
+
         const proc = spawn(params.command, params.args || [], {
-          cwd: params.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+          cwd,
           env: {
             ...process.env,
             ...(params.env?.reduce(
@@ -337,6 +348,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           },
           shell: true,
         });
+
+        managedTerminal.proc = proc;
 
         proc.stdout?.on("data", (data: Buffer) => {
           const text = data.toString();
@@ -364,7 +377,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           closeEmitter.fire(1);
         });
       },
-      close: () => {},
+      close: () => {
+        if (managedTerminal.proc && !managedTerminal.proc.killed) {
+          try {
+            managedTerminal.proc.kill();
+          } catch {}
+        }
+      },
     };
 
     const terminal = vscode.window.createTerminal({
@@ -382,11 +401,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private appendTerminalOutput(terminal: ManagedTerminal, text: string): void {
     terminal.output += text;
-    if (
-      terminal.outputByteLimit !== null &&
-      terminal.output.length > terminal.outputByteLimit
-    ) {
-      terminal.output = terminal.output.slice(-terminal.outputByteLimit);
+    if (terminal.outputByteLimit !== null) {
+      const byteLength = Buffer.byteLength(terminal.output, "utf8");
+      if (byteLength > terminal.outputByteLimit) {
+        const encoded = Buffer.from(terminal.output, "utf8");
+        const sliced = encoded.slice(-terminal.outputByteLimit);
+        terminal.output = sliced.toString("utf8");
+      }
     }
   }
 
@@ -433,6 +454,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
   }
 
+  private killTerminalProcess(terminal: ManagedTerminal): void {
+    if (terminal.proc && !terminal.proc.killed) {
+      try {
+        terminal.proc.kill();
+      } catch {}
+    }
+  }
+
   private async handleKillTerminalCommand(
     params: KillTerminalCommandRequest
   ): Promise<KillTerminalCommandResponse> {
@@ -441,6 +470,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       throw new Error(`Terminal not found: ${params.terminalId}`);
     }
 
+    this.killTerminalProcess(terminal);
     terminal.terminal.dispose();
     return {};
   }
@@ -453,9 +483,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return {};
     }
 
+    this.killTerminalProcess(terminal);
     terminal.terminal.dispose();
     this.terminals.delete(params.terminalId);
     return {};
+  }
+
+  public dispose(): void {
+    for (const terminal of this.terminals.values()) {
+      this.killTerminalProcess(terminal);
+      try {
+        terminal.terminal.dispose();
+      } catch {}
+    }
+    this.terminals.clear();
   }
 
   private handleSessionUpdate(notification: SessionNotification): void {
