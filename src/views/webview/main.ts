@@ -30,6 +30,20 @@ export interface PlanEntry {
   status: "pending" | "in_progress" | "completed";
 }
 
+export interface PermissionOption {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+}
+
+export interface ToolCallInfo {
+  toolCallId?: string;
+  title?: string;
+  kind?: string;
+  content?: Array<{ type: string; content?: { type: string; text?: string } }>;
+  rawInput?: Record<string, unknown>;
+}
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -57,6 +71,9 @@ export interface ExtensionMessage {
   rawInput?: { command?: string; description?: string };
   rawOutput?: { output?: string };
   status?: string;
+  requestId?: string;
+  toolCall?: ToolCallInfo;
+  options?: PermissionOption[];
 }
 
 export function escapeHtml(str: string): string {
@@ -305,6 +322,9 @@ export interface WebviewElements {
   modelSelector: HTMLSelectElement;
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
+  permissionModal: HTMLElement;
+  permissionDetails: HTMLElement;
+  permissionOptions: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -323,6 +343,9 @@ export function getElements(doc: Document): WebviewElements {
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
+    permissionModal: doc.getElementById("permission-modal")!,
+    permissionDetails: doc.getElementById("permission-details")!,
+    permissionOptions: doc.getElementById("permission-options")!,
   };
 }
 
@@ -343,6 +366,10 @@ export class WebviewController {
   private selectedCommandIndex = -1;
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
+  private currentPermissionRequestId: string | null = null;
+  private permissionKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+  private permissionBackdropHandler: ((event: MouseEvent) => void) | null =
+    null;
 
   constructor(
     vscode: VsCodeApi,
@@ -746,6 +773,130 @@ export class WebviewController {
     }
   }
 
+  showPermissionModal(
+    requestId: string,
+    toolCall: ToolCallInfo | undefined,
+    options: PermissionOption[]
+  ): void {
+    this.currentPermissionRequestId = requestId;
+
+    let detailsHtml = "";
+    if (toolCall?.title) {
+      detailsHtml += `<div class="permission-tool-title">${escapeHtml(toolCall.title)}</div>`;
+    }
+    if (toolCall?.kind) {
+      detailsHtml += `<div class="permission-tool-kind">Type: ${escapeHtml(toolCall.kind)}</div>`;
+    }
+    if (toolCall?.rawInput) {
+      const inputPreview = JSON.stringify(toolCall.rawInput, null, 2);
+      const truncated =
+        inputPreview.length > 300
+          ? inputPreview.slice(0, 300) + "..."
+          : inputPreview;
+      detailsHtml += `<pre class="permission-tool-input">${escapeHtml(truncated)}</pre>`;
+    }
+
+    this.elements.permissionDetails.innerHTML = detailsHtml;
+
+    const optionsHtml = options
+      .map((opt) => {
+        const btnClass =
+          opt.kind === "allow_once" || opt.kind === "allow_always"
+            ? "permission-btn-allow"
+            : "permission-btn-reject";
+        return `<button class="permission-btn ${btnClass}" data-option-id="${escapeHtml(opt.optionId)}">${escapeHtml(opt.name)}</button>`;
+      })
+      .join("");
+
+    this.elements.permissionOptions.innerHTML = optionsHtml;
+
+    this.elements.permissionOptions
+      .querySelectorAll("button")
+      .forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const optionId = btn.getAttribute("data-option-id");
+          if (optionId) {
+            this.respondToPermission(optionId);
+          }
+        });
+      });
+
+    this.elements.permissionModal.style.display = "flex";
+
+    const firstButton = this.elements.permissionOptions.querySelector(
+      "button"
+    ) as HTMLButtonElement | null;
+    if (firstButton) {
+      firstButton.focus();
+    }
+
+    this.permissionKeyHandler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.cancelPermission();
+      }
+    };
+    this.elements.permissionModal.addEventListener(
+      "keydown",
+      this.permissionKeyHandler
+    );
+
+    this.permissionBackdropHandler = (event: MouseEvent) => {
+      if (event.target === this.elements.permissionModal) {
+        this.cancelPermission();
+      }
+    };
+    this.elements.permissionModal.addEventListener(
+      "click",
+      this.permissionBackdropHandler
+    );
+  }
+
+  hidePermissionModal(): void {
+    this.elements.permissionModal.style.display = "none";
+    this.elements.permissionDetails.innerHTML = "";
+    this.elements.permissionOptions.innerHTML = "";
+    this.currentPermissionRequestId = null;
+
+    if (this.permissionKeyHandler) {
+      this.elements.permissionModal.removeEventListener(
+        "keydown",
+        this.permissionKeyHandler
+      );
+      this.permissionKeyHandler = null;
+    }
+    if (this.permissionBackdropHandler) {
+      this.elements.permissionModal.removeEventListener(
+        "click",
+        this.permissionBackdropHandler
+      );
+      this.permissionBackdropHandler = null;
+    }
+  }
+
+  private respondToPermission(optionId: string): void {
+    if (this.currentPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        permissionRequestId: this.currentPermissionRequestId,
+        optionId,
+        cancelled: false,
+      });
+      this.hidePermissionModal();
+    }
+  }
+
+  private cancelPermission(): void {
+    if (this.currentPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        permissionRequestId: this.currentPermissionRequestId,
+        cancelled: true,
+      });
+      this.hidePermissionModal();
+    }
+  }
+
   private updateAutocomplete(): void {
     const text = this.elements.inputEl.value;
     const firstWord = text.split(/\s/)[0];
@@ -974,6 +1125,11 @@ export class WebviewController {
         break;
       case "planComplete":
         this.hidePlan();
+        break;
+      case "permissionRequest":
+        if (msg.requestId && msg.options) {
+          this.showPermissionModal(msg.requestId, msg.toolCall, msg.options);
+        }
         break;
     }
   }

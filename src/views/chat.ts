@@ -6,7 +6,11 @@ import {
   getAgentsWithStatus,
   getFirstAvailableAgent,
 } from "../acp/agents";
-import type { SessionNotification } from "@agentclientprotocol/sdk";
+import type {
+  SessionNotification,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from "@agentclientprotocol/sdk";
 
 marked.setOptions({
   breaks: true,
@@ -27,11 +31,15 @@ interface WebviewMessage {
     | "connect"
     | "newChat"
     | "clearChat"
-    | "copyMessage";
+    | "copyMessage"
+    | "permissionResponse";
   text?: string;
   agentId?: string;
   modeId?: string;
   modelId?: string;
+  permissionRequestId?: string;
+  optionId?: string;
+  cancelled?: boolean;
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -42,6 +50,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private globalState: vscode.Memento;
   private streamingText = "";
   private hasRestoredModeModel = false;
+  private pendingPermissionRequests = new Map<
+    string,
+    {
+      resolve: (response: { optionId?: string; cancelled: boolean }) => void;
+    }
+  >();
+  private permissionRequestCounter = 0;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -70,6 +85,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
+    });
+
+    this.acpClient.setOnPermissionRequest(async (params) => {
+      return this.handlePermissionRequest(params);
     });
   }
 
@@ -122,6 +141,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (message.text) {
             await vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage("Message copied to clipboard");
+          }
+          break;
+        case "permissionResponse":
+          if (message.permissionRequestId) {
+            this.handlePermissionResponse(
+              message.permissionRequestId,
+              message.optionId,
+              message.cancelled
+            );
           }
           break;
         case "ready":
@@ -359,6 +387,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: "chatCleared" });
   }
 
+  private async handlePermissionRequest(
+    params: RequestPermissionRequest
+  ): Promise<RequestPermissionResponse> {
+    const requestId = `perm_${++this.permissionRequestCounter}`;
+
+    return new Promise((resolve) => {
+      this.pendingPermissionRequests.set(requestId, {
+        resolve: (response) => {
+          this.pendingPermissionRequests.delete(requestId);
+          if (response.cancelled || !response.optionId) {
+            resolve({ outcome: { outcome: "cancelled" } });
+          } else {
+            resolve({
+              outcome: { outcome: "selected", optionId: response.optionId },
+            });
+          }
+        },
+      });
+
+      this.postMessage({
+        type: "permissionRequest",
+        requestId,
+        toolCall: params.toolCall,
+        options: params.options,
+      });
+    });
+  }
+
+  private handlePermissionResponse(
+    requestId: string,
+    optionId?: string,
+    cancelled?: boolean
+  ): void {
+    const pending = this.pendingPermissionRequests.get(requestId);
+    if (pending) {
+      pending.resolve({ optionId, cancelled: cancelled ?? false });
+    }
+  }
+
   private sendSessionMetadata(): void {
     const metadata = this.acpClient.getSessionMetadata();
     this.postMessage({
@@ -486,6 +553,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
+  </div>
+  
+  <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" style="display: none;">
+    <div class="permission-content">
+      <div class="permission-header">
+        <span class="permission-icon">🔐</span>
+        <h3 id="permission-title">Permission Required</h3>
+      </div>
+      <div id="permission-details" class="permission-details"></div>
+      <div id="permission-options" class="permission-options"></div>
+    </div>
   </div>
   
 <script src="${webviewScriptUri}"></script>

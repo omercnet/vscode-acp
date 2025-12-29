@@ -31,6 +31,9 @@ export type ACPConnectionState =
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: SessionNotification) => void;
 type StderrCallback = (data: string) => void;
+type PermissionRequestCallback = (
+  params: RequestPermissionRequest
+) => Promise<RequestPermissionResponse>;
 
 export type SpawnFunction = (
   command: string,
@@ -54,6 +57,7 @@ export class ACPClient {
   private stateChangeListeners: Set<StateChangeCallback> = new Set();
   private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
   private stderrListeners: Set<StderrCallback> = new Set();
+  private permissionRequestHandler: PermissionRequestCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
@@ -94,6 +98,13 @@ export class ACPClient {
   setOnStderr(callback: StderrCallback): () => void {
     this.stderrListeners.add(callback);
     return () => this.stderrListeners.delete(callback);
+  }
+
+  setOnPermissionRequest(callback: PermissionRequestCallback): () => void {
+    this.permissionRequestHandler = callback;
+    return () => {
+      this.permissionRequestHandler = null;
+    };
   }
 
   isConnected(): boolean {
@@ -159,6 +170,16 @@ export class ACPClient {
             "[ACP] Permission request:",
             JSON.stringify(params, null, 2)
           );
+
+          if (this.permissionRequestHandler) {
+            try {
+              return await this.permissionRequestHandler(params);
+            } catch (error) {
+              console.error("[ACP] Permission handler error:", error);
+              return { outcome: { outcome: "cancelled" } };
+            }
+          }
+
           const allowOption = params.options.find(
             (opt) => opt.kind === "allow_once" || opt.kind === "allow_always"
           );

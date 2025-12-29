@@ -70,6 +70,11 @@ function createWebviewHTML(): string {
     <select id="mode-selector" style="display: none;"></select>
     <select id="model-selector" style="display: none;"></select>
   </div>
+  
+  <div id="permission-modal" style="display: none;">
+    <div id="permission-details"></div>
+    <div id="permission-options"></div>
+  </div>
 </body>
 </html>`;
 }

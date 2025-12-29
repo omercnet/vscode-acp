@@ -49,6 +49,51 @@ async function injectMockState(frame: Frame, setupFn: string): Promise<void> {
   console.log("Injection result:", result);
 }
 
+const PERMISSION_MODAL_SETUP = `
+  const statusDot = document.querySelector(".status-dot");
+  const statusText = document.querySelector(".status-text");
+  const connectBtn = document.getElementById("connect-btn");
+  const welcomeView = document.getElementById("welcome-view");
+  const messagesEl = document.getElementById("messages");
+  const permissionModal = document.getElementById("permission-modal");
+  const permissionDetails = document.getElementById("permission-details");
+  const permissionOptions = document.getElementById("permission-options");
+
+  if (statusDot) statusDot.className = "status-dot connected";
+  if (statusText) statusText.textContent = "Connected";
+  if (connectBtn) connectBtn.style.display = "none";
+  if (welcomeView) welcomeView.style.display = "none";
+  if (messagesEl) messagesEl.style.display = "flex";
+
+  const userMsg = document.createElement("div");
+  userMsg.className = "message user";
+  userMsg.innerHTML = "<p>Delete all test files</p>";
+  messagesEl?.appendChild(userMsg);
+
+  if (permissionDetails) {
+    permissionDetails.innerHTML = \`
+      <div class="permission-tool-title">Delete Files</div>
+      <div class="permission-tool-kind">Type: delete</div>
+      <pre class="permission-tool-input">{
+  "path": "src/**/*.test.ts",
+  "recursive": true
+}</pre>
+    \`;
+  }
+
+  if (permissionOptions) {
+    permissionOptions.innerHTML = \`
+      <button class="permission-btn permission-btn-allow">Allow Once</button>
+      <button class="permission-btn permission-btn-allow">Always Allow</button>
+      <button class="permission-btn permission-btn-reject">Reject</button>
+    \`;
+  }
+
+  if (permissionModal) {
+    permissionModal.style.display = "flex";
+  }
+`;
+
 const ANSI_OUTPUT_SETUP = `
   const statusDot = document.querySelector(".status-dot");
   const statusText = document.querySelector(".status-text");
@@ -230,6 +275,39 @@ test.describe("Feature Screenshots", () => {
       console.log("Falling back to full window screenshot");
       await window.screenshot({
         path: join(SCREENSHOTS_DIR, "plan-display.png"),
+      });
+    }
+  });
+
+  test("Permission request modal", async ({ window }) => {
+    await openACPView(window);
+
+    await window.waitForTimeout(2000);
+    const frame = await getWebviewContentFrame(window);
+
+    await injectMockState(frame, PERMISSION_MODAL_SETUP);
+    await window.waitForTimeout(1000);
+
+    const sidebarLocator = window.locator(
+      ".split-view-view.visible .pane-body"
+    );
+    const sidebar = await sidebarLocator.first().boundingBox();
+
+    if (sidebar) {
+      console.log("Sidebar bounds:", sidebar);
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "permission-modal.png"),
+        clip: {
+          x: sidebar.x,
+          y: sidebar.y,
+          width: Math.min(sidebar.width, 450),
+          height: sidebar.height,
+        },
+      });
+    } else {
+      console.log("Falling back to full window screenshot");
+      await window.screenshot({
+        path: join(SCREENSHOTS_DIR, "permission-modal.png"),
       });
     }
   });
