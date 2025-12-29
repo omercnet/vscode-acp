@@ -15,7 +15,7 @@ import {
   type VsCodeApi,
   type Tool,
   type WebviewElements,
-  type DiffData,
+  type DiffContent,
 } from "../views/webview/main";
 
 function createMockVsCodeApi(): VsCodeApi & {
@@ -1075,7 +1075,7 @@ suite("Webview", () => {
   });
 
   suite("isDiffData", () => {
-    test("returns DiffData for valid diff JSON", () => {
+    test("returns DiffContent for valid diff JSON", () => {
       const json = JSON.stringify({
         type: "diff",
         path: "src/file.ts",
@@ -1101,6 +1101,12 @@ suite("Webview", () => {
 
     test("returns null for JSON without path", () => {
       const json = JSON.stringify({ type: "diff", newText: "content" });
+      const result = isDiffData(json);
+      assert.strictEqual(result, null);
+    });
+
+    test("returns null for JSON without newText", () => {
+      const json = JSON.stringify({ type: "diff", path: "file.ts" });
       const result = isDiffData(json);
       assert.strictEqual(result, null);
     });
@@ -1164,7 +1170,7 @@ suite("Webview", () => {
 
   suite("renderDiff", () => {
     test("renders diff header with path", () => {
-      const diffData: DiffData = {
+      const diffData: DiffContent = {
         type: "diff",
         path: "src/test.ts",
         oldText: "old",
@@ -1176,7 +1182,7 @@ suite("Webview", () => {
     });
 
     test("renders add lines with + prefix", () => {
-      const diffData: DiffData = {
+      const diffData: DiffContent = {
         type: "diff",
         path: "file.ts",
         oldText: null,
@@ -1188,7 +1194,7 @@ suite("Webview", () => {
     });
 
     test("renders remove lines with - prefix", () => {
-      const diffData: DiffData = {
+      const diffData: DiffContent = {
         type: "diff",
         path: "file.ts",
         oldText: "old line",
@@ -1200,7 +1206,7 @@ suite("Webview", () => {
     });
 
     test("escapes HTML in diff content", () => {
-      const diffData: DiffData = {
+      const diffData: DiffContent = {
         type: "diff",
         path: "file.ts",
         oldText: null,

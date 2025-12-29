@@ -205,18 +205,15 @@ export function hasAnsiCodes(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
 }
 
-export interface DiffData {
-  type: "diff";
-  path: string;
-  oldText?: string | null;
-  newText: string;
-}
-
-export function isDiffData(output: string): DiffData | null {
+export function isDiffData(output: string): DiffContent | null {
   try {
     const parsed = JSON.parse(output);
-    if (parsed?.type === "diff" && typeof parsed.path === "string") {
-      return parsed as DiffData;
+    if (
+      parsed?.type === "diff" &&
+      typeof parsed.path === "string" &&
+      typeof parsed.newText === "string"
+    ) {
+      return parsed as DiffContent;
     }
   } catch {
     return null;
@@ -257,17 +254,17 @@ export function computeDiffLines(
     } else {
       result.push({ type: "remove", content: oldLines[oldIdx] });
       oldIdx++;
-      if (newIdx < newLines.length) {
-        result.push({ type: "add", content: newLines[newIdx] });
-        newIdx++;
-      }
+      // At this point both oldIdx < oldLines.length and newIdx < newLines.length
+      // were true at the start of this else branch, so newIdx < newLines.length is guaranteed
+      result.push({ type: "add", content: newLines[newIdx] });
+      newIdx++;
     }
   }
 
   return result;
 }
 
-export function renderDiff(diffData: DiffData): string {
+export function renderDiff(diffData: DiffContent): string {
   const lines = computeDiffLines(diffData.oldText, diffData.newText);
   const linesHtml = lines
     .map((line) => {
@@ -957,7 +954,6 @@ export class WebviewController {
           if (firstContent?.type === "content") {
             output = firstContent.content?.text || output;
           } else if (firstContent?.type === "diff") {
-            // Store raw diff data for rendering
             output = JSON.stringify({
               type: "diff",
               path: firstContent.path,

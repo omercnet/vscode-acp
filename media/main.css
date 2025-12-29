@@ -748,12 +748,12 @@ kbd {
 .diff-view {
   margin: 4px 0 0 18px;
   border-radius: var(--border-radius-small);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   font-family: var(--vscode-editor-font-family), monospace;
   font-size: 11px;
   line-height: 1.4;
   max-height: 300px;
-  overflow-y: auto;
 }
 
 .diff-header {
