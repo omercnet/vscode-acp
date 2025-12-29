@@ -336,6 +336,8 @@ export class WebviewController {
   private currentAssistantText = "";
   private thinkingEl: HTMLElement | null = null;
   private planEl: HTMLElement | null = null;
+  private thoughtEl: HTMLElement | null = null;
+  private thoughtText = "";
   private tools: Record<string, Tool> = {};
   private isConnected = false;
   private messageTexts = new Map<HTMLElement, string>();
@@ -774,6 +776,7 @@ export class WebviewController {
       case "streamStart":
         this.currentAssistantText = "";
         this.hasActiveTool = false;
+        this.hideThought();
         break;
       case "streamChunk":
         if (this.hasActiveTool && msg.text) {
@@ -824,6 +827,7 @@ export class WebviewController {
         this.tools = {};
         this.hasActiveTool = false;
         this.expandedToolId = null;
+        this.hideThought();
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
@@ -901,6 +905,7 @@ export class WebviewController {
         this.availableCommands = [];
         this.hideCommandAutocomplete();
         this.hidePlan();
+        this.hideThought();
         this.updateViewState();
         break;
       case "triggerNewChat":
@@ -975,6 +980,43 @@ export class WebviewController {
       case "planComplete":
         this.hidePlan();
         break;
+      case "thoughtChunk":
+        if (msg.text) {
+          this.appendThought(msg.text);
+        }
+        break;
+    }
+  }
+
+  appendThought(text: string): void {
+    this.thoughtText += text;
+
+    if (!this.thoughtEl) {
+      this.thoughtEl = this.doc.createElement("details");
+      this.thoughtEl.className = "agent-thought";
+      this.thoughtEl.setAttribute("open", "");
+      this.thoughtEl.innerHTML = `
+        <summary class="thought-header">
+          <span class="thought-icon">💭</span>
+          <span class="thought-title">Thinking...</span>
+        </summary>
+        <div class="thought-content"></div>
+      `;
+      this.elements.messagesEl.appendChild(this.thoughtEl);
+    }
+
+    const contentEl = this.thoughtEl.querySelector(".thought-content");
+    if (contentEl) {
+      contentEl.textContent = this.thoughtText;
+    }
+    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
+  }
+
+  hideThought(): void {
+    if (this.thoughtEl) {
+      this.thoughtEl.remove();
+      this.thoughtEl = null;
+      this.thoughtText = "";
     }
   }
 
