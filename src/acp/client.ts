@@ -206,7 +206,12 @@ export class ACPClient {
 
       const initResponse = await this.connection.initialize({
         protocolVersion: 1,
-        clientCapabilities: {},
+        clientCapabilities: {
+          fs: {
+            readTextFile: true,
+            writeTextFile: true,
+          },
+        },
         clientInfo: {
           name: "vscode-acp",
           version: "0.0.1",
