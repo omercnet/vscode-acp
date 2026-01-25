@@ -346,6 +346,7 @@ export interface WebviewElements {
   modelSelector: HTMLSelectElement;
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
+  planContainer: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -364,6 +365,7 @@ export function getElements(doc: Document): WebviewElements {
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
+    planContainer: doc.getElementById("agent-plan-container")!,
   };
 }
 
@@ -733,11 +735,11 @@ export class WebviewController {
 
     if (!this.planEl) {
       this.planEl = this.doc.createElement("div");
-      this.planEl.className = "agent-plan";
+      this.planEl.className = "agent-plan-sticky";
       this.planEl.setAttribute("role", "status");
       this.planEl.setAttribute("aria-live", "polite");
       this.planEl.setAttribute("aria-label", "Agent execution plan");
-      this.elements.messagesEl.appendChild(this.planEl);
+      this.elements.planContainer.appendChild(this.planEl);
     }
 
     const completedCount = entries.filter(
@@ -764,8 +766,6 @@ export class WebviewController {
           .join("")}
       </div>
     `;
-
-    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
   }
 
   private getPlanStatusIcon(status: string): string {
