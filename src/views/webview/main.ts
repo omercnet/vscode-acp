@@ -43,6 +43,11 @@ export interface PlanEntry {
   status: "pending" | "in_progress" | "completed";
 }
 
+export type ToolCallContentItem =
+  | { type: "content"; content?: { type: "text"; text?: string } }
+  | { type: "diff"; path?: string; oldText?: string; newText?: string }
+  | { type: "terminal"; terminalId?: string };
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -67,10 +72,11 @@ export interface ExtensionMessage {
   name?: string;
   title?: string;
   kind?: ToolKind;
-  content?: Array<{ content?: { text?: string } }>;
+  content?: ToolCallContentItem[];
   rawInput?: { command?: string; description?: string };
   rawOutput?: { output?: string };
   status?: string;
+  terminalOutput?: string;
 }
 
 export function escapeHtml(str: string): string {
@@ -891,8 +897,21 @@ export class WebviewController {
       case "toolCallComplete":
         if (msg.toolCallId && this.tools[msg.toolCallId]) {
           const tool = this.tools[msg.toolCallId];
-          const output =
-            msg.content?.[0]?.content?.text || msg.rawOutput?.output || "";
+
+          let output = "";
+          if (msg.content && msg.content.length > 0) {
+            const firstContent = msg.content[0];
+            if (firstContent.type === "content" && firstContent.content?.text) {
+              output = firstContent.content.text;
+            } else if (firstContent.type === "terminal") {
+              output = msg.terminalOutput || "";
+            }
+          }
+
+          if (!output) {
+            output = msg.rawOutput?.output || "";
+          }
+
           const input =
             msg.rawInput?.command || msg.rawInput?.description || "";
           if (msg.title) tool.name = msg.title;

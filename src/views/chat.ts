@@ -202,6 +202,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
     } else if (update.sessionUpdate === "tool_call_update") {
       if (update.status === "completed" || update.status === "failed") {
+        let terminalOutput: string | undefined;
+
+        if (update.content && update.content.length > 0) {
+          const terminalContent = update.content.find(
+            (c: { type: string; terminalId?: string }) => c.type === "terminal"
+          );
+          if (terminalContent && "terminalId" in terminalContent) {
+            terminalOutput = `[Terminal: ${terminalContent.terminalId}]`;
+          }
+        }
+
         this.postMessage({
           type: "toolCallComplete",
           toolCallId: update.toolCallId,
@@ -211,6 +222,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           rawInput: update.rawInput,
           rawOutput: update.rawOutput,
           status: update.status,
+          terminalOutput,
         });
       }
     } else if (update.sessionUpdate === "current_mode_update") {
