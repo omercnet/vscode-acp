@@ -743,3 +743,97 @@ kbd {
 .plan-priority-low {
   opacity: 0.8;
 }
+
+/* Agent Plan Sticky (Pinned at Top) */
+.agent-plan-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  margin: 0;
+  padding: 12px;
+  background: var(--vscode-sideBar-background);
+  border-bottom: 2px solid var(--vscode-activityBarBadge-background);
+  border-radius: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.agent-plan-sticky .plan-header {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.agent-plan-sticky .plan-icon {
+  font-size: 14px;
+}
+
+.agent-plan-sticky .plan-title {
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--vscode-foreground);
+}
+
+.agent-plan-sticky .plan-progress {
+  margin-left: auto;
+  font-size: 11px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.agent-plan-sticky .plan-entries {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agent-plan-sticky .plan-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 4px 0;
+}
+
+.agent-plan-sticky .plan-status-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.agent-plan-sticky .plan-entry-pending .plan-status-icon {
+  color: var(--vscode-descriptionForeground);
+}
+
+.agent-plan-sticky .plan-entry-in_progress .plan-status-icon {
+  color: var(--vscode-progressBar-background);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.agent-plan-sticky .plan-entry-completed .plan-status-icon {
+  color: var(--vscode-testing-iconPassed);
+}
+
+.agent-plan-sticky .plan-entry-completed .plan-content {
+  color: var(--vscode-descriptionForeground);
+  text-decoration: line-through;
+  text-decoration-color: var(--vscode-descriptionForeground);
+}
+
+.agent-plan-sticky .plan-content {
+  flex: 1;
+  color: var(--vscode-foreground);
+}
+
+.agent-plan-sticky .plan-priority-high .plan-content {
+  font-weight: 500;
+}
+
+.agent-plan-sticky .plan-priority-low {
+  opacity: 0.8;
+}
