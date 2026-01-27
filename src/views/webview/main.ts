@@ -223,6 +223,97 @@ export function hasAnsiCodes(text: string): boolean {
   return /\x1b\[[0-9;]*m/.test(text);
 }
 
+export interface DiffLine {
+  type: "add" | "remove" | "context";
+  line: string;
+}
+
+/**
+ * Compute a simple line-by-line diff between old and new text.
+ * Returns an array of diff lines marked as add/remove/context.
+ */
+export function computeLineDiff(
+  oldText: string | null | undefined,
+  newText: string | null | undefined
+): DiffLine[] {
+  // Handle edge cases
+  if (!oldText && !newText) {
+    return [];
+  }
+  if (!oldText) {
+    // New file - all lines are additions
+    return newText!.split("\n").map((line) => ({ type: "add", line }));
+  }
+  if (!newText) {
+    // Deleted file - all lines are deletions
+    return oldText!.split("\n").map((line) => ({ type: "remove", line }));
+  }
+
+  // Simple line-by-line diff
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const result: DiffLine[] = [];
+
+  // Simple algorithm: mark old lines as removed, new lines as added
+  // Future optimization: detect common lines and mark as context
+  for (const line of oldLines) {
+    result.push({ type: "remove", line });
+  }
+  for (const line of newLines) {
+    result.push({ type: "add", line });
+  }
+
+  return result;
+}
+
+export function renderDiff(
+  path: string | undefined,
+  oldText: string | null | undefined,
+  newText: string | null | undefined
+): string {
+  const diffLines = computeLineDiff(oldText, newText);
+
+  if (diffLines.length === 0) {
+    return '<div class="diff-container"><div class="diff-empty">No changes</div></div>';
+  }
+
+  const truncated = diffLines.length > 500;
+  const linesToShow = truncated ? diffLines.slice(0, 500) : diffLines;
+
+  let html = '<div class="diff-container">';
+
+  if (path) {
+    html += '<div class="diff-header">' + escapeHtml(path) + "</div>";
+  }
+
+  html += '<pre class="diff-content">';
+
+  for (const diffLine of linesToShow) {
+    const prefix =
+      diffLine.type === "add" ? "+ " : diffLine.type === "remove" ? "- " : "  ";
+    const className = "diff-line diff-" + diffLine.type;
+    html +=
+      '<div class="' +
+      className +
+      '">' +
+      escapeHtml(prefix + diffLine.line) +
+      "</div>";
+  }
+
+  html += "</pre>";
+
+  if (truncated) {
+    html +=
+      '<div class="diff-truncated">... (truncated, showing first 500 of ' +
+      diffLines.length +
+      " lines)</div>";
+  }
+
+  html += "</div>";
+
+  return html;
+}
+
 export function getToolsHtml(
   tools: Record<string, Tool>,
   expandedToolId?: string | null
@@ -909,6 +1000,12 @@ export class WebviewController {
               output = firstContent.content.text;
             } else if (firstContent.type === "terminal") {
               output = msg.terminalOutput || "";
+            } else if (firstContent.type === "diff") {
+              output = renderDiff(
+                firstContent.path,
+                firstContent.oldText,
+                firstContent.newText
+              );
             }
           }
 

@@ -10,6 +10,8 @@ import {
   ansiToHtml,
   hasAnsiCodes,
   getToolKindIcon,
+  computeLineDiff,
+  renderDiff,
   type VsCodeApi,
   type Tool,
   type WebviewElements,
@@ -1259,6 +1261,81 @@ suite("Webview", () => {
       };
       const html = getToolsHtml(tools);
       assert.ok(html.includes('title="edit"'));
+    });
+  });
+
+  suite("computeLineDiff", () => {
+    test("returns empty array for empty inputs", () => {
+      const result = computeLineDiff("", "");
+      assert.strictEqual(result.length, 0);
+    });
+
+    test("marks all lines as add for new file", () => {
+      const result = computeLineDiff(null, "line1\nline2");
+      assert.strictEqual(result.length, 2);
+      assert.strictEqual(result[0].type, "add");
+      assert.strictEqual(result[0].line, "line1");
+      assert.strictEqual(result[1].type, "add");
+      assert.strictEqual(result[1].line, "line2");
+    });
+
+    test("marks all lines as remove for deleted file", () => {
+      const result = computeLineDiff("line1\nline2", null);
+      assert.strictEqual(result.length, 2);
+      assert.strictEqual(result[0].type, "remove");
+      assert.strictEqual(result[1].type, "remove");
+    });
+
+    test("marks old as remove and new as add for modified file", () => {
+      const result = computeLineDiff("old", "new");
+      assert.strictEqual(result.length, 2);
+      assert.strictEqual(result[0].type, "remove");
+      assert.strictEqual(result[0].line, "old");
+      assert.strictEqual(result[1].type, "add");
+      assert.strictEqual(result[1].line, "new");
+    });
+  });
+
+  suite("renderDiff", () => {
+    test("returns no changes message for empty diff", () => {
+      const result = renderDiff(undefined, "", "");
+      assert.ok(result.includes("diff-container"));
+      assert.ok(result.includes("No changes"));
+    });
+
+    test("renders file path header when provided", () => {
+      const result = renderDiff("/path/to/file.ts", null, "new content");
+      assert.ok(result.includes("diff-header"));
+      assert.ok(result.includes("/path/to/file.ts"));
+    });
+
+    test("renders additions with diff-add class", () => {
+      const result = renderDiff(undefined, null, "added line");
+      assert.ok(result.includes("diff-add"));
+      assert.ok(result.includes("+ added line"));
+    });
+
+    test("renders deletions with diff-remove class", () => {
+      const result = renderDiff(undefined, "removed line", null);
+      assert.ok(result.includes("diff-remove"));
+      assert.ok(result.includes("- removed line"));
+    });
+
+    test("escapes HTML in diff content", () => {
+      const result = renderDiff(
+        undefined,
+        null,
+        "<script>alert('xss')</script>"
+      );
+      assert.ok(result.includes("&lt;script&gt;"));
+      assert.ok(!result.includes("<script>alert"));
+    });
+
+    test("truncates large diffs", () => {
+      const manyLines = Array(600).fill("line").join("\n");
+      const result = renderDiff(undefined, null, manyLines);
+      assert.ok(result.includes("diff-truncated"));
+      assert.ok(result.includes("500"));
     });
   });
 });

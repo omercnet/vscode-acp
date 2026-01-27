@@ -889,3 +889,69 @@ kbd {
 .thought-content {
   padding: 10px 12px;
 }
+
+/* Diff Display Styles */
+.diff-container {
+  margin: 8px 0;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border);
+}
+
+.diff-header {
+  font-weight: bold;
+  padding: 6px 10px;
+  background: var(--vscode-editor-lineHighlightBackground);
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+}
+
+.diff-content {
+  font-family: var(--vscode-editor-font-family);
+  font-size: var(--vscode-editor-font-size);
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+}
+
+.diff-line {
+  padding: 1px 10px;
+  white-space: pre;
+  line-height: 1.4;
+}
+
+.diff-add {
+  background-color: var(--vscode-diffEditor-insertedTextBackground);
+  color: var(
+    --vscode-diffEditor-insertedTextForeground,
+    var(--vscode-editor-foreground)
+  );
+}
+
+.diff-remove {
+  background-color: var(--vscode-diffEditor-removedTextBackground);
+  color: var(
+    --vscode-diffEditor-removedTextForeground,
+    var(--vscode-editor-foreground)
+  );
+}
+
+.diff-context {
+  color: var(--vscode-descriptionForeground);
+}
+
+.diff-empty {
+  padding: 10px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  text-align: center;
+}
+
+.diff-truncated {
+  padding: 6px 10px;
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  background: var(--vscode-editor-lineHighlightBackground);
+  border-top: 1px solid var(--vscode-panel-border);
+}
