@@ -66,6 +66,9 @@ type KillTerminalCommandCallback = (
 type ReleaseTerminalCallback = (
   params: ReleaseTerminalRequest
 ) => Promise<ReleaseTerminalResponse>;
+type RequestPermissionCallback = (
+  params: RequestPermissionRequest
+) => Promise<RequestPermissionResponse>;
 
 export type SpawnFunction = (
   command: string,
@@ -96,6 +99,7 @@ export class ACPClient {
   private waitForTerminalExitHandler: WaitForTerminalExitCallback | null = null;
   private killTerminalCommandHandler: KillTerminalCommandCallback | null = null;
   private releaseTerminalHandler: ReleaseTerminalCallback | null = null;
+  private requestPermissionHandler: RequestPermissionCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
@@ -166,6 +170,10 @@ export class ACPClient {
     this.releaseTerminalHandler = callback;
   }
 
+  setOnRequestPermission(callback: RequestPermissionCallback): void {
+    this.requestPermissionHandler = callback;
+  }
+
   isConnected(): boolean {
     return this.state === "connected";
   }
@@ -229,6 +237,9 @@ export class ACPClient {
             "[ACP] Permission request:",
             JSON.stringify(params, null, 2)
           );
+          if (this.requestPermissionHandler) {
+            return this.requestPermissionHandler(params);
+          }
           const allowOption = params.options.find(
             (opt) => opt.kind === "allow_once" || opt.kind === "allow_always"
           );
