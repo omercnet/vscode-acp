@@ -1241,6 +1241,12 @@ export class WebviewController {
   ): void {
     this.pendingPermissionRequestId = requestId;
     this.previouslyFocusedElement = this.doc.activeElement as HTMLElement;
+
+    if (this.escapeHandler) {
+      this.doc.removeEventListener("keydown", this.escapeHandler);
+      this.escapeHandler = null;
+    }
+
     const modal = this.elements.permissionModal;
 
     const titleEl = modal.querySelector(".permission-title") as HTMLElement;
@@ -1293,7 +1299,11 @@ export class WebviewController {
     }
 
     if (this.previouslyFocusedElement) {
-      this.previouslyFocusedElement.focus();
+      if (this.doc.contains(this.previouslyFocusedElement)) {
+        try {
+          this.previouslyFocusedElement.focus();
+        } catch {}
+      }
       this.previouslyFocusedElement = null;
     }
   }

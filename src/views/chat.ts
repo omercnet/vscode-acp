@@ -557,15 +557,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.permissionRequests.set(requestId, { resolve, reject, timeoutId });
 
       this.view?.webview.postMessage({
-        type: "permissionRequest",
+        type: "showPermissionModal",
         requestId,
-        toolCallId: params.toolCall?.toolCallId,
-        title: params.toolCall?.title,
-        kind: params.toolCall?.kind,
+        title: params.toolCall?.title || "Permission Required",
         rawInput: params.toolCall?.rawInput,
-        options: params.options?.map((opt) => ({
+        options: params.options.map((opt) => ({
           id: opt.optionId,
           label: opt.name,
+          description: (opt as any).description,
         })),
       });
     });
