@@ -78,6 +78,24 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.loadSession", () => {
+      chatProvider?.showSessionPicker();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.newSession", () => {
+      chatProvider?.newChat();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.deleteSession", () => {
+      chatProvider?.showSessionPicker();
+    })
+  );
+
   context.subscriptions.push({
     dispose: () => {
       acpClient?.dispose();

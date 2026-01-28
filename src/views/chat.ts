@@ -63,6 +63,7 @@ interface WebviewMessage {
     | "connect"
     | "newChat"
     | "clearChat"
+    | "showSessionPicker"
     | "copyMessage";
   text?: string;
   agentId?: string;
@@ -268,6 +269,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public clearChat(): void {
     this.postMessage({ type: "triggerClearChat" });
+  }
+
+  public showSessionPicker(): void {
+    this.postMessage({ type: "showSessionPicker" });
   }
 
   private stderrBuffer = "";

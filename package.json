@@ -70,6 +70,24 @@
         "title": "Clear Chat",
         "category": "ACP",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "vscode-acp.loadSession",
+        "title": "Load Session",
+        "category": "ACP",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "vscode-acp.newSession",
+        "title": "New Session",
+        "category": "ACP",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vscode-acp.deleteSession",
+        "title": "Delete Session",
+        "category": "ACP",
+        "icon": "$(trash)"
       }
     ],
     "viewsContainers": {
@@ -117,9 +135,33 @@
         {
           "command": "vscode-acp.clearChat",
           "when": "true"
+        },
+        {
+          "command": "vscode-acp.loadSession",
+          "when": "true"
+        },
+        {
+          "command": "vscode-acp.newSession",
+          "when": "true"
+        },
+        {
+          "command": "vscode-acp.deleteSession",
+          "when": "true"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "vscode-acp.newSession",
+        "key": "ctrl+shift+alt+n",
+        "mac": "cmd+shift+alt+n"
+      },
+      {
+        "command": "vscode-acp.loadSession",
+        "key": "ctrl+shift+alt+l",
+        "mac": "cmd+shift+alt+l"
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
