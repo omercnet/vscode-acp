@@ -83,6 +83,29 @@ interface ManagedTerminal {
   exitResolve: () => void;
 }
 
+/**
+ * Content block from ACP protocol.
+ * Used in session replay notifications.
+ */
+interface ContentBlock {
+  type: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * A message in the replay buffer.
+ * Stores messages during session replay before sending to UI.
+ */
+interface ReplayMessage {
+  /** Role of the message sender */
+  role: "user" | "agent";
+  /** Content blocks from the message */
+  content: ContentBlock[];
+  /** Timestamp when the message was received */
+  timestamp: number;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "vscode-acp.chatView";
 
@@ -94,6 +117,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private hasRestoredModeModel = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
+  private replayMessages: ReplayMessage[] = [];
+  private isReplaying = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -612,7 +637,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (update.sessionUpdate === "agent_message_chunk") {
       console.log("[Chat] Chunk content:", JSON.stringify(update.content));
-      if (update.content.type === "text") {
+      if (this.isReplaying) {
+        console.log(
+          "[Chat] Replay agent_message_chunk received:",
+          JSON.stringify(update.content)
+        );
+        this.handleReplayAgentMessageChunk(update.content);
+      } else if (update.content.type === "text") {
         this.streamingText += update.content.text;
         this.postMessage({ type: "streamChunk", text: update.content.text });
       } else {
@@ -669,6 +700,64 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           text: update.content.text,
         });
       }
+    } else if (update.sessionUpdate === "user_message_chunk") {
+      console.log(
+        "[Chat] Replay user_message_chunk received:",
+        JSON.stringify(update.content)
+      );
+      this.handleReplayUserMessageChunk(update.content);
+    }
+  }
+
+  private handleReplayUserMessageChunk(
+    content: ContentBlock | ContentBlock[]
+  ): void {
+    const contentBlocks = Array.isArray(content) ? content : [content];
+
+    const lastMessage = this.replayMessages[this.replayMessages.length - 1];
+    if (lastMessage && lastMessage.role === "user") {
+      lastMessage.content.push(...contentBlocks);
+      console.log(
+        "[Chat] Appended to existing user message, total blocks:",
+        lastMessage.content.length
+      );
+    } else {
+      const newMessage: ReplayMessage = {
+        role: "user",
+        content: contentBlocks,
+        timestamp: Date.now(),
+      };
+      this.replayMessages.push(newMessage);
+      console.log(
+        "[Chat] Created new user message, total messages:",
+        this.replayMessages.length
+      );
+    }
+  }
+
+  private handleReplayAgentMessageChunk(
+    content: ContentBlock | ContentBlock[]
+  ): void {
+    const contentBlocks = Array.isArray(content) ? content : [content];
+
+    const lastMessage = this.replayMessages[this.replayMessages.length - 1];
+    if (lastMessage && lastMessage.role === "agent") {
+      lastMessage.content.push(...contentBlocks);
+      console.log(
+        "[Chat] Appended to existing agent message, total blocks:",
+        lastMessage.content.length
+      );
+    } else {
+      const newMessage: ReplayMessage = {
+        role: "agent",
+        content: contentBlocks,
+        timestamp: Date.now(),
+      };
+      this.replayMessages.push(newMessage);
+      console.log(
+        "[Chat] Created new agent message, total messages:",
+        this.replayMessages.length
+      );
     }
   }
 
