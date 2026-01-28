@@ -161,7 +161,28 @@
         "key": "ctrl+shift+alt+l",
         "mac": "cmd+shift+alt+l"
       }
-    ]
+    ],
+    "configuration": {
+      "properties": {
+        "vscode-acp.sessions.autoSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save session after each message exchange"
+        },
+        "vscode-acp.sessions.maxHistory": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of sessions to keep in history"
+        },
+        "vscode-acp.sessions.showPickerOnStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show session picker when opening VS Code"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
