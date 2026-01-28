@@ -490,6 +490,8 @@ export class WebviewController {
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
   private pendingPermissionRequestId: string | null = null;
+  private previouslyFocusedElement: HTMLElement | null = null;
+  private escapeHandler: ((e: KeyboardEvent) => void) | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -657,6 +659,19 @@ export class WebviewController {
     this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
       this.handleMessage(e.data)
     );
+
+    this.elements.permissionModal.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === this.elements.permissionModal) {
+        this.cancelPermission();
+      }
+    });
+
+    const cancelBtn = this.elements.permissionModal.querySelector(
+      ".permission-cancel-btn"
+    );
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => this.cancelPermission());
+    }
   }
 
   addMessage(
@@ -1225,6 +1240,7 @@ export class WebviewController {
     options: Array<{ id: string; label: string; description?: string }>
   ): void {
     this.pendingPermissionRequestId = requestId;
+    this.previouslyFocusedElement = this.doc.activeElement as HTMLElement;
     const modal = this.elements.permissionModal;
 
     const titleEl = modal.querySelector(".permission-title") as HTMLElement;
@@ -1250,12 +1266,36 @@ export class WebviewController {
     });
 
     modal.classList.add("visible");
-    modal.focus();
+
+    this.escapeHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelPermission();
+      }
+    };
+    this.doc.addEventListener("keydown", this.escapeHandler);
+
+    const firstBtn = optionsEl.querySelector("button") as HTMLButtonElement;
+    if (firstBtn) {
+      firstBtn.focus();
+    } else {
+      modal.focus();
+    }
   }
 
   hidePermissionModal(): void {
     this.elements.permissionModal.classList.remove("visible");
     this.pendingPermissionRequestId = null;
+
+    if (this.escapeHandler) {
+      this.doc.removeEventListener("keydown", this.escapeHandler);
+      this.escapeHandler = null;
+    }
+
+    if (this.previouslyFocusedElement) {
+      this.previouslyFocusedElement.focus();
+      this.previouslyFocusedElement = null;
+    }
   }
 
   private handlePermissionOption(optionId: string): void {

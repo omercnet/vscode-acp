@@ -85,6 +85,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     {
       resolve: (response: RequestPermissionResponse) => void;
       reject: (error: Error) => void;
+      timeoutId: ReturnType<typeof setTimeout>;
     }
   > = new Map();
 
@@ -217,6 +218,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (message.requestId) {
             const pending = this.permissionRequests.get(message.requestId);
             if (pending) {
+              clearTimeout(pending.timeoutId);
               this.permissionRequests.delete(message.requestId);
               if (message.cancelled) {
                 pending.resolve({ outcome: { outcome: "cancelled" } });
@@ -224,6 +226,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
                 pending.resolve({
                   outcome: { outcome: "selected", optionId: message.optionId },
                 });
+              } else {
+                console.error(
+                  "[Chat] Malformed permissionResponse; treating as cancelled",
+                  { requestId: message.requestId, optionId: message.optionId }
+                );
+                pending.resolve({ outcome: { outcome: "cancelled" } });
               }
             }
           }
@@ -525,10 +533,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     params: RequestPermissionRequest
   ): Promise<RequestPermissionResponse> {
     console.log("[Chat] Permission request:", params.toolCall?.toolCallId);
+
+    if (!this.view) {
+      console.log("[Chat] No webview available, cancelling permission request");
+      return { outcome: { outcome: "cancelled" } };
+    }
+
+    if (!params.options || params.options.length === 0) {
+      console.log("[Chat] No options provided, cancelling permission request");
+      return { outcome: { outcome: "cancelled" } };
+    }
+
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     return new Promise((resolve, reject) => {
-      this.permissionRequests.set(requestId, { resolve, reject });
+      const timeoutId = setTimeout(() => {
+        if (this.permissionRequests.has(requestId)) {
+          this.permissionRequests.delete(requestId);
+          resolve({ outcome: { outcome: "cancelled" } });
+        }
+      }, 60000);
+
+      this.permissionRequests.set(requestId, { resolve, reject, timeoutId });
 
       this.view?.webview.postMessage({
         type: "permissionRequest",
@@ -536,16 +562,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         toolCallId: params.toolCall?.toolCallId,
         title: params.toolCall?.title,
         kind: params.toolCall?.kind,
-        content: params.toolCall?.rawInput,
-        options: params.options,
+        rawInput: params.toolCall?.rawInput,
+        options: params.options?.map((opt) => ({
+          id: opt.optionId,
+          label: opt.name,
+        })),
       });
-
-      setTimeout(() => {
-        if (this.permissionRequests.has(requestId)) {
-          this.permissionRequests.delete(requestId);
-          resolve({ outcome: { outcome: "cancelled" } });
-        }
-      }, 60000);
     });
   }
 
@@ -558,6 +580,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.terminals.clear();
     for (const pending of this.permissionRequests.values()) {
+      clearTimeout(pending.timeoutId);
       pending.reject(new Error("Provider disposed"));
     }
     this.permissionRequests.clear();
@@ -898,7 +921,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
       <pre class="permission-content"></pre>
       <div class="permission-options" role="group" aria-label="Permission options"></div>
-      <button class="permission-cancel-btn" onclick="window.webviewController?.cancelPermission()">Cancel</button>
+      <button class="permission-cancel-btn" type="button">Cancel</button>
     </div>
   </div>
   
