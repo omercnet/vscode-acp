@@ -99,6 +99,7 @@ export class ACPClient {
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
+  private supportsLoadSessionCapability: boolean = false;
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
@@ -352,6 +353,14 @@ export class ACPClient {
         },
       });
 
+      // Parse agent capabilities
+      this.supportsLoadSessionCapability =
+        initResponse.agentCapabilities?.loadSession ?? false;
+      console.log(
+        "[ACP] Agent supports loadSession:",
+        this.supportsLoadSessionCapability
+      );
+
       this.setState("connected");
       return initResponse;
     } catch (error) {
@@ -383,6 +392,10 @@ export class ACPClient {
 
   getSessionMetadata(): SessionMetadata | null {
     return this.sessionMetadata;
+  }
+
+  supportsLoadSession(): boolean {
+    return this.supportsLoadSessionCapability;
   }
 
   async setMode(modeId: string): Promise<void> {
