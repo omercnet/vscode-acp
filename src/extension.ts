@@ -21,7 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
-    context.globalState
+    context.globalState,
+    context.workspaceState
   );
 
   statusBarItem = vscode.window.createStatusBarItem(

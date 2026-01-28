@@ -33,6 +33,25 @@ marked.setOptions({
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
+const SESSIONS_STORAGE_KEY = "vscode-acp.sessions";
+const MAX_STORED_SESSIONS = 50;
+
+/**
+ * Metadata for a stored session.
+ * Contains minimal information needed to display and restore a session.
+ */
+export interface StoredSession {
+  /** Unique identifier for the session */
+  sessionId: string;
+  /** Unix timestamp when the session was last updated */
+  timestamp: number;
+  /** Working directory for the session */
+  cwd: string;
+  /** Preview of the last message in the session */
+  lastMessage: string;
+  /** Total number of messages in the session */
+  messageCount: number;
+}
 
 interface WebviewMessage {
   type:
@@ -70,6 +89,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private hasSession = false;
   private globalState: vscode.Memento;
+  private workspaceState: vscode.Memento;
   private streamingText = "";
   private hasRestoredModeModel = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
@@ -78,9 +98,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly acpClient: ACPClient,
-    globalState: vscode.Memento
+    globalState: vscode.Memento,
+    workspaceState?: vscode.Memento
   ) {
     this.globalState = globalState;
+    this.workspaceState = workspaceState ?? globalState;
 
     const savedAgentId = this.globalState.get<string>(SELECTED_AGENT_KEY);
     if (savedAgentId) {
@@ -485,6 +507,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     terminal.terminal?.dispose();
     this.terminals.delete(params.terminalId);
     return {};
+  }
+
+  /**
+   * Saves a session to workspace storage.
+   * Implements LRU eviction when MAX_STORED_SESSIONS is exceeded.
+   * @param sessionId - Unique identifier for the session
+   * @param metadata - Session metadata to store (excluding sessionId)
+   */
+  public async saveSession(
+    sessionId: string,
+    metadata: Omit<StoredSession, "sessionId">
+  ): Promise<void> {
+    try {
+      const sessions = this.loadSessionList();
+      const existingIndex = sessions.findIndex(
+        (s) => s.sessionId === sessionId
+      );
+
+      const storedSession: StoredSession = {
+        sessionId,
+        ...metadata,
+      };
+
+      if (existingIndex >= 0) {
+        sessions[existingIndex] = storedSession;
+      } else {
+        sessions.unshift(storedSession);
+      }
+
+      sessions.sort((a, b) => b.timestamp - a.timestamp);
+
+      while (sessions.length > MAX_STORED_SESSIONS) {
+        sessions.pop();
+      }
+
+      await this.workspaceState.update(SESSIONS_STORAGE_KEY, sessions);
+    } catch (error) {
+      console.error("[Chat] Failed to save session:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Loads the list of all stored sessions from workspace storage.
+   * @returns Array of stored sessions, sorted by timestamp (newest first)
+   */
+  public loadSessionList(): StoredSession[] {
+    try {
+      const sessions =
+        this.workspaceState.get<StoredSession[]>(SESSIONS_STORAGE_KEY) ?? [];
+      return sessions;
+    } catch (error) {
+      console.error("[Chat] Failed to load session list:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Deletes a session from workspace storage.
+   * @param sessionId - Unique identifier of the session to delete
+   */
+  public async deleteSession(sessionId: string): Promise<void> {
+    try {
+      const sessions = this.loadSessionList();
+      const filteredSessions = sessions.filter(
+        (s) => s.sessionId !== sessionId
+      );
+      await this.workspaceState.update(SESSIONS_STORAGE_KEY, filteredSessions);
+    } catch (error) {
+      console.error("[Chat] Failed to delete session:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets a specific session's metadata from workspace storage.
+   * @param sessionId - Unique identifier of the session to retrieve
+   * @returns The session metadata, or undefined if not found
+   */
+  public getSession(sessionId: string): StoredSession | undefined {
+    try {
+      const sessions = this.loadSessionList();
+      return sessions.find((s) => s.sessionId === sessionId);
+    } catch (error) {
+      console.error("[Chat] Failed to get session:", error);
+      return undefined;
+    }
   }
 
   public dispose(): void {
