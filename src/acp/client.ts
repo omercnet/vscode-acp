@@ -394,6 +394,10 @@ export class ACPClient {
     return this.sessionMetadata;
   }
 
+  getCurrentSessionId(): string | null {
+    return this.currentSessionId;
+  }
+
   supportsLoadSession(): boolean {
     return this.supportsLoadSessionCapability;
   }

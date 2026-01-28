@@ -120,6 +120,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private terminalCounter = 0;
   private replayMessages: ReplayMessage[] = [];
   private isReplaying = false;
+  private messageCount = 0;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -792,6 +793,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         JSON.stringify(response, null, 2)
       );
 
+      this.messageCount++;
+      await this.autoSaveSession(text);
+
       if (this.streamingText.length === 0) {
         console.warn("[Chat] No streaming text received from agent");
         console.warn("[Chat] stderr buffer:", this.stderrBuffer);
@@ -808,6 +812,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
           html: renderedHtml,
         });
+
+        this.messageCount++;
+        await this.autoSaveSession(this.streamingText);
       }
       this.streamingText = "";
     } catch (error) {
@@ -879,6 +886,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.hasSession = false;
     this.hasRestoredModeModel = false;
     this.streamingText = "";
+    this.messageCount = 0;
     this.postMessage({ type: "chatCleared" });
     this.postMessage({ type: "sessionMetadata", modes: null, models: null });
 
@@ -954,6 +962,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (modeRestored || modelRestored) {
       this.postMessage({ type: "sessionMetadata", ...metadata });
     }
+  }
+
+  private async autoSaveSession(lastMessage: string): Promise<void> {
+    const sessionId = this.acpClient.getCurrentSessionId();
+    if (!sessionId) return;
+
+    const cwd =
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    const preview = lastMessage.substring(0, 100);
+
+    await this.saveSession(sessionId, {
+      timestamp: Date.now(),
+      cwd,
+      lastMessage: preview,
+      messageCount: this.messageCount,
+    });
   }
 
   private postMessage(message: Record<string, unknown>): void {
