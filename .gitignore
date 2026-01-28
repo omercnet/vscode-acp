@@ -4,6 +4,7 @@ dist
 out
 .vscode-test
 .beads/
+.sisyphus/
 coverage/
 test-results/
 playwright-report/
