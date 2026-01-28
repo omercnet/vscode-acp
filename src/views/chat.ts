@@ -64,11 +64,15 @@ interface WebviewMessage {
     | "newChat"
     | "clearChat"
     | "showSessionPicker"
-    | "copyMessage";
+    | "copyMessage"
+    | "selectSession"
+    | "deleteSessionFromPicker"
+    | "createNewSession";
   text?: string;
   agentId?: string;
   modeId?: string;
   modelId?: string;
+  sessionId?: string;
 }
 
 interface ManagedTerminal {
@@ -260,6 +264,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.sendSessionMetadata();
           break;
+        case "selectSession":
+          if (message.sessionId) {
+            await this.handleSelectSession(message.sessionId);
+          }
+          break;
+        case "deleteSessionFromPicker":
+          if (message.sessionId) {
+            await this.handleDeleteSessionFromPicker(message.sessionId);
+          }
+          break;
+        case "createNewSession":
+          await this.handleNewChat();
+          break;
       }
     });
   }
@@ -273,7 +290,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public showSessionPicker(): void {
-    this.postMessage({ type: "showSessionPicker" });
+    const sessions = this.loadSessionList();
+    this.postMessage({ type: "showSessionPicker", sessions });
   }
 
   private stderrBuffer = "";
@@ -907,6 +925,74 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: "chatCleared" });
   }
 
+  private async handleSelectSession(sessionId: string): Promise<void> {
+    try {
+      if (!this.acpClient.isConnected()) {
+        await this.acpClient.connect();
+      }
+
+      if (!this.acpClient.supportsLoadSession()) {
+        this.postMessage({
+          type: "error",
+          text: "This agent does not support loading sessions",
+        });
+        return;
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      this.postMessage({ type: "chatCleared" });
+      this.replayMessages = [];
+      this.isReplaying = true;
+
+      await this.acpClient.loadSession(sessionId, workingDir, []);
+      this.hasSession = true;
+
+      this.flushReplayMessages();
+      this.isReplaying = false;
+      this.sendSessionMetadata();
+    } catch (error) {
+      console.error("[Chat] Failed to load session:", error);
+      this.isReplaying = false;
+      this.postMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : "Failed to load session",
+      });
+    }
+  }
+
+  private async handleDeleteSessionFromPicker(
+    sessionId: string
+  ): Promise<void> {
+    try {
+      await this.deleteSession(sessionId);
+      this.postMessage({ type: "sessionDeleted", sessionId });
+    } catch (error) {
+      console.error("[Chat] Failed to delete session:", error);
+    }
+  }
+
+  private flushReplayMessages(): void {
+    for (const msg of this.replayMessages) {
+      const textContent = msg.content
+        .filter((c) => c.type === "text" && c.text)
+        .map((c) => c.text)
+        .join("");
+
+      if (textContent) {
+        if (msg.role === "user") {
+          this.postMessage({ type: "userMessage", text: textContent });
+        } else {
+          this.postMessage({ type: "streamStart" });
+          this.postMessage({ type: "streamChunk", text: textContent });
+          this.postMessage({ type: "streamEnd", html: textContent });
+        }
+      }
+    }
+    this.replayMessages = [];
+  }
+
   private sendSessionMetadata(): void {
     const metadata = this.acpClient.getSessionMetadata();
     this.postMessage({
@@ -1052,6 +1138,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
+  </div>
+  
+  <!-- Session Picker Modal -->
+  <div id="session-picker-overlay" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="session-picker-title">
+    <div class="modal-container session-picker-modal">
+      <div class="modal-header">
+        <h3 id="session-picker-title">Load Session</h3>
+        <button id="session-picker-close" class="modal-close-btn" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="session-picker-loading" class="session-picker-loading">
+          <span class="loading-spinner"></span>
+          <span>Loading sessions...</span>
+        </div>
+        <div id="session-picker-empty" class="session-picker-empty" style="display: none;">
+          <p>No saved sessions found.</p>
+          <p class="session-picker-hint">Sessions are automatically saved as you chat.</p>
+        </div>
+        <div id="session-picker-list" class="session-picker-list" style="display: none;" role="listbox" aria-label="Available sessions"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="session-picker-new" class="modal-btn modal-btn-secondary">New Session</button>
+      </div>
+    </div>
   </div>
   
 <script src="${webviewScriptUri}"></script>

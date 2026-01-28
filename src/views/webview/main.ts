@@ -43,6 +43,14 @@ export interface PlanEntry {
   status: "pending" | "in_progress" | "completed";
 }
 
+export interface SessionPickerItem {
+  sessionId: string;
+  timestamp: number;
+  cwd: string;
+  lastMessage: string;
+  messageCount: number;
+}
+
 export type ToolCallContentItem =
   | { type: "content"; content?: { type: "text"; text?: string } }
   | { type: "diff"; path?: string; oldText?: string; newText?: string }
@@ -77,6 +85,8 @@ export interface ExtensionMessage {
   rawOutput?: { output?: string };
   status?: string;
   terminalOutput?: string;
+  sessions?: SessionPickerItem[];
+  sessionId?: string;
 }
 
 export function escapeHtml(str: string): string {
@@ -444,6 +454,12 @@ export interface WebviewElements {
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
   planContainer: HTMLElement;
+  sessionPickerOverlay: HTMLElement;
+  sessionPickerList: HTMLElement;
+  sessionPickerLoading: HTMLElement;
+  sessionPickerEmpty: HTMLElement;
+  sessionPickerClose: HTMLButtonElement;
+  sessionPickerNew: HTMLButtonElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -463,6 +479,16 @@ export function getElements(doc: Document): WebviewElements {
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
     planContainer: doc.getElementById("agent-plan-container")!,
+    sessionPickerOverlay: doc.getElementById("session-picker-overlay")!,
+    sessionPickerList: doc.getElementById("session-picker-list")!,
+    sessionPickerLoading: doc.getElementById("session-picker-loading")!,
+    sessionPickerEmpty: doc.getElementById("session-picker-empty")!,
+    sessionPickerClose: doc.getElementById(
+      "session-picker-close"
+    ) as HTMLButtonElement,
+    sessionPickerNew: doc.getElementById(
+      "session-picker-new"
+    ) as HTMLButtonElement,
   };
 }
 
@@ -522,8 +548,23 @@ export class WebviewController {
     const { sendBtn, inputEl, messagesEl, connectBtn, welcomeConnectBtn } =
       this.elements;
     const { agentSelector, modeSelector, modelSelector } = this.elements;
+    const { sessionPickerOverlay, sessionPickerClose, sessionPickerNew } =
+      this.elements;
 
     const { commandAutocomplete } = this.elements;
+
+    sessionPickerClose?.addEventListener("click", () =>
+      this.hideSessionPicker()
+    );
+    sessionPickerNew?.addEventListener("click", () => {
+      this.hideSessionPicker();
+      this.vscode.postMessage({ type: "createNewSession" });
+    });
+    sessionPickerOverlay?.addEventListener("click", (e) => {
+      if (e.target === sessionPickerOverlay) {
+        this.hideSessionPicker();
+      }
+    });
 
     sendBtn.addEventListener("click", () => this.send());
 
@@ -1144,6 +1185,16 @@ export class WebviewController {
           this.appendThought(msg.text);
         }
         break;
+      case "showSessionPicker":
+        if (msg.sessions) {
+          this.showSessionPicker(msg.sessions);
+        }
+        break;
+      case "sessionDeleted":
+        if (msg.sessionId) {
+          this.removeSessionFromPicker(msg.sessionId);
+        }
+        break;
     }
   }
 
@@ -1179,6 +1230,93 @@ export class WebviewController {
       this.thoughtEl.remove();
       this.thoughtEl = null;
       this.thoughtText = "";
+    }
+  }
+
+  showSessionPicker(sessions: SessionPickerItem[]): void {
+    const {
+      sessionPickerOverlay,
+      sessionPickerList,
+      sessionPickerLoading,
+      sessionPickerEmpty,
+    } = this.elements;
+
+    sessionPickerOverlay.style.display = "flex";
+    sessionPickerLoading.style.display = "none";
+
+    if (sessions.length === 0) {
+      sessionPickerEmpty.style.display = "block";
+      sessionPickerList.style.display = "none";
+      return;
+    }
+
+    sessionPickerEmpty.style.display = "none";
+    sessionPickerList.style.display = "block";
+    sessionPickerList.innerHTML = sessions
+      .map((session) => this.renderSessionItem(session))
+      .join("");
+
+    sessionPickerList.querySelectorAll(".session-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        const sessionId = item.getAttribute("data-session-id");
+        if (sessionId) {
+          this.hideSessionPicker();
+          this.vscode.postMessage({ type: "selectSession", sessionId });
+        }
+      });
+    });
+
+    sessionPickerList.querySelectorAll(".session-delete-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const sessionId = btn.getAttribute("data-session-id");
+        if (sessionId) {
+          this.vscode.postMessage({
+            type: "deleteSessionFromPicker",
+            sessionId,
+          });
+        }
+      });
+    });
+  }
+
+  hideSessionPicker(): void {
+    this.elements.sessionPickerOverlay.style.display = "none";
+  }
+
+  private renderSessionItem(session: SessionPickerItem): string {
+    const date = new Date(session.timestamp);
+    const timeStr = date.toLocaleString();
+    const cwdShort = session.cwd.split("/").slice(-2).join("/");
+    const preview =
+      session.lastMessage.length > 60
+        ? session.lastMessage.substring(0, 60) + "..."
+        : session.lastMessage;
+
+    return `
+      <div class="session-item" data-session-id="${escapeHtml(session.sessionId)}" role="option" tabindex="0">
+        <div class="session-item-header">
+          <span class="session-item-time">${escapeHtml(timeStr)}</span>
+          <span class="session-item-count">${session.messageCount} messages</span>
+          <button class="session-delete-btn" data-session-id="${escapeHtml(session.sessionId)}" aria-label="Delete session" title="Delete session">&times;</button>
+        </div>
+        <div class="session-item-cwd" title="${escapeHtml(session.cwd)}">${escapeHtml(cwdShort)}</div>
+        <div class="session-item-preview">${escapeHtml(preview)}</div>
+      </div>
+    `;
+  }
+
+  removeSessionFromPicker(sessionId: string): void {
+    const item = this.elements.sessionPickerList.querySelector(
+      `[data-session-id="${sessionId}"]`
+    );
+    if (item) {
+      item.remove();
+    }
+
+    if (this.elements.sessionPickerList.children.length === 0) {
+      this.elements.sessionPickerEmpty.style.display = "block";
+      this.elements.sessionPickerList.style.display = "none";
     }
   }
 
