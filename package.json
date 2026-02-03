@@ -119,6 +119,46 @@
           "when": "true"
         }
       ]
+    },
+    "configuration": {
+      "title": "VSCode ACP",
+      "properties": {
+        "acp.customAgents": {
+          "type": "array",
+          "default": [],
+          "description": "Custom ACP agents to add alongside the built-in agents",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "command"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Unique identifier for the agent (e.g., 'my-agent')"
+              },
+              "name": {
+                "type": "string",
+                "description": "Display name shown in the agent selector (e.g., 'My Custom Agent')"
+              },
+              "command": {
+                "type": "string",
+                "description": "Command to execute (e.g., 'my-agent' or 'npx')"
+              },
+              "args": {
+                "type": "array",
+                "default": [],
+                "description": "Command-line arguments to pass to the agent",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "scripts": {

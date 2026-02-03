@@ -1,4 +1,5 @@
 import { execSync } from "child_process";
+import * as vscode from "vscode";
 
 export interface AgentConfig {
   id: string;
@@ -9,9 +10,13 @@ export interface AgentConfig {
 
 export interface AgentWithStatus extends AgentConfig {
   available: boolean;
+  isCustom?: boolean;
 }
 
-export const AGENTS: AgentConfig[] = [
+/**
+ * Built-in agents that ship with the extension.
+ */
+export const BUILTIN_AGENTS: AgentConfig[] = [
   {
     id: "opencode",
     name: "OpenCode",
@@ -86,12 +91,55 @@ export const AGENTS: AgentConfig[] = [
   },
 ];
 
+/**
+ * Get custom agents from VS Code settings.
+ * These are defined in settings.json under "acp.customAgents".
+ */
+export function getCustomAgents(): AgentConfig[] {
+  // Guard for test environments where vscode may not be fully available
+  if (!vscode?.workspace?.getConfiguration) {
+    return [];
+  }
+
+  try {
+    const config = vscode.workspace.getConfiguration("acp");
+    const customAgents = config.get<AgentConfig[]>("customAgents", []);
+
+    // Validate and normalize custom agents
+    return customAgents
+      .filter((agent) => agent.id && agent.name && agent.command)
+      .map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        command: agent.command,
+        args: agent.args || [],
+      }));
+  } catch {
+    // Return empty array if settings can't be read
+    return [];
+  }
+}
+
+/**
+ * Get all agents (built-in + custom).
+ * Custom agents appear after built-in agents.
+ */
+export function getAllAgents(): AgentConfig[] {
+  return [...BUILTIN_AGENTS, ...getCustomAgents()];
+}
+
+/**
+ * For backwards compatibility - returns all agents.
+ * @deprecated Use getAllAgents() instead
+ */
+export const AGENTS = BUILTIN_AGENTS;
+
 export function getAgent(id: string): AgentConfig | undefined {
-  return AGENTS.find((a) => a.id === id);
+  return getAllAgents().find((a) => a.id === id);
 }
 
 export function getDefaultAgent(): AgentConfig {
-  return AGENTS[0];
+  return getAllAgents()[0];
 }
 
 /**
@@ -121,21 +169,28 @@ function isCommandAvailable(command: string): boolean {
 
 /**
  * Get all agents with their availability status.
- * Caches the result for performance.
+ * Note: Custom agents are always re-fetched since settings can change.
  */
-let cachedAgentsWithStatus: AgentWithStatus[] | null = null;
+let cachedBuiltinAgentsWithStatus: AgentWithStatus[] | null = null;
 
 export function getAgentsWithStatus(forceRefresh = false): AgentWithStatus[] {
-  if (cachedAgentsWithStatus && !forceRefresh) {
-    return cachedAgentsWithStatus;
+  // Cache built-in agents status (they don't change)
+  if (!cachedBuiltinAgentsWithStatus || forceRefresh) {
+    cachedBuiltinAgentsWithStatus = BUILTIN_AGENTS.map((agent) => ({
+      ...agent,
+      available: isCommandAvailable(agent.command),
+      isCustom: false,
+    }));
   }
 
-  cachedAgentsWithStatus = AGENTS.map((agent) => ({
+  // Always fetch custom agents fresh (settings can change)
+  const customAgentsWithStatus = getCustomAgents().map((agent) => ({
     ...agent,
     available: isCommandAvailable(agent.command),
+    isCustom: true,
   }));
 
-  return cachedAgentsWithStatus;
+  return [...cachedBuiltinAgentsWithStatus, ...customAgentsWithStatus];
 }
 
 /**
@@ -144,7 +199,7 @@ export function getAgentsWithStatus(forceRefresh = false): AgentWithStatus[] {
 export function getFirstAvailableAgent(): AgentConfig {
   const agents = getAgentsWithStatus();
   const available = agents.find((a) => a.available);
-  return available ?? AGENTS[0];
+  return available ?? getAllAgents()[0];
 }
 
 export function isAgentAvailable(agentId: string): boolean {
