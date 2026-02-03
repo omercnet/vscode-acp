@@ -97,7 +97,8 @@ export const BUILTIN_AGENTS: AgentConfig[] = [
  */
 export function getCustomAgents(): AgentConfig[] {
   // Guard for test environments where vscode may not be fully available
-  if (!vscode?.workspace?.getConfiguration) {
+  const isTestEnv = process.env.NODE_ENV === "test";
+  if (isTestEnv && !vscode?.workspace?.getConfiguration) {
     return [];
   }
 
@@ -132,7 +133,7 @@ export function getAllAgents(): AgentConfig[] {
  * For backwards compatibility - returns all agents.
  * @deprecated Use getAllAgents() instead
  */
-export const AGENTS = BUILTIN_AGENTS;
+export const AGENTS = getAllAgents();
 
 export function getAgent(id: string): AgentConfig | undefined {
   return getAllAgents().find((a) => a.id === id);

@@ -1,20 +1,20 @@
 import * as assert from "assert";
-import { AGENTS, getAgent, getDefaultAgent } from "../acp/agents";
+import { BUILTIN_AGENTS, getAgent, getDefaultAgent } from "../acp/agents";
 
 suite("agents", () => {
-  suite("AGENTS", () => {
+  suite("BUILTIN_AGENTS", () => {
     test("should have at least one agent defined", () => {
-      assert.ok(AGENTS.length > 0);
+      assert.ok(BUILTIN_AGENTS.length > 0);
     });
 
     test("should have unique ids for all agents", () => {
-      const ids = AGENTS.map((a) => a.id);
+      const ids = BUILTIN_AGENTS.map((a) => a.id);
       const uniqueIds = new Set(ids);
       assert.strictEqual(uniqueIds.size, ids.length);
     });
 
     test("should have required properties for each agent", () => {
-      for (const agent of AGENTS) {
+      for (const agent of BUILTIN_AGENTS) {
         assert.ok(agent.id, "agent.id should be defined");
         assert.ok(agent.name, "agent.name should be defined");
         assert.ok(agent.command, "agent.command should be defined");
@@ -23,13 +23,13 @@ suite("agents", () => {
     });
 
     test("should include opencode agent", () => {
-      const opencode = AGENTS.find((a) => a.id === "opencode");
+      const opencode = BUILTIN_AGENTS.find((a) => a.id === "opencode");
       assert.ok(opencode, "opencode agent should exist");
       assert.strictEqual(opencode?.command, "opencode");
     });
 
     test("should include claude-code agent", () => {
-      const claude = AGENTS.find((a) => a.id === "claude-code");
+      const claude = BUILTIN_AGENTS.find((a) => a.id === "claude-code");
       assert.ok(claude, "claude-code agent should exist");
       assert.strictEqual(claude?.command, "npx");
     });
@@ -52,7 +52,7 @@ suite("agents", () => {
   suite("getDefaultAgent", () => {
     test("should return first agent as default", () => {
       const defaultAgent = getDefaultAgent();
-      assert.strictEqual(defaultAgent, AGENTS[0]);
+      assert.strictEqual(defaultAgent, BUILTIN_AGENTS[0]);
     });
 
     test("should return opencode as default", () => {
