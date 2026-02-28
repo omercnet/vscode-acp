@@ -84,6 +84,12 @@ export const AGENTS: AgentConfig[] = [
     command: "qwen",
     args: ["--experimental-acp"],
   },
+  {
+    id: "kiro",
+    name: "Kiro CLI",
+    command: "kiro-cli",
+    args: ["acp"],
+  }
 ];
 
 export function getAgent(id: string): AgentConfig | undefined {
