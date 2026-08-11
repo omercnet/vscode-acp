@@ -23,6 +23,8 @@ import type {
   KillTerminalCommandResponse,
   ReleaseTerminalRequest,
   ReleaseTerminalResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 
 marked.setOptions({
@@ -44,11 +46,15 @@ interface WebviewMessage {
     | "connect"
     | "newChat"
     | "clearChat"
-    | "copyMessage";
+    | "copyMessage"
+    | "permissionResponse";
   text?: string;
   agentId?: string;
   modeId?: string;
   modelId?: string;
+  requestId?: string;
+  optionId?: string;
+  cancelled?: boolean;
 }
 
 interface ManagedTerminal {
@@ -74,6 +80,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private hasRestoredModeModel = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
+  private permissionRequests: Map<
+    string,
+    {
+      resolve: (response: RequestPermissionResponse) => void;
+      reject: (error: Error) => void;
+      timeoutId: ReturnType<typeof setTimeout>;
+    }
+  > = new Map();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -141,6 +155,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return this.handleReleaseTerminal(params);
       }
     );
+
+    this.acpClient.setOnRequestPermission(
+      async (params: RequestPermissionRequest) => {
+        return this.handleRequestPermission(params);
+      }
+    );
   }
 
   resolveWebviewView(
@@ -192,6 +212,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           if (message.text) {
             await vscode.env.clipboard.writeText(message.text);
             vscode.window.showInformationMessage("Message copied to clipboard");
+          }
+          break;
+        case "permissionResponse":
+          if (message.requestId) {
+            const pending = this.permissionRequests.get(message.requestId);
+            if (pending) {
+              clearTimeout(pending.timeoutId);
+              this.permissionRequests.delete(message.requestId);
+              if (message.cancelled) {
+                pending.resolve({ outcome: { outcome: "cancelled" } });
+              } else if (message.optionId) {
+                pending.resolve({
+                  outcome: { outcome: "selected", optionId: message.optionId },
+                });
+              } else {
+                console.error(
+                  "[Chat] Malformed permissionResponse; treating as cancelled",
+                  { requestId: message.requestId, optionId: message.optionId }
+                );
+                pending.resolve({ outcome: { outcome: "cancelled" } });
+              }
+            }
           }
           break;
         case "ready":
@@ -487,6 +529,47 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return {};
   }
 
+  private async handleRequestPermission(
+    params: RequestPermissionRequest
+  ): Promise<RequestPermissionResponse> {
+    console.log("[Chat] Permission request:", params.toolCall?.toolCallId);
+
+    if (!this.view) {
+      console.log("[Chat] No webview available, cancelling permission request");
+      return { outcome: { outcome: "cancelled" } };
+    }
+
+    if (!params.options || params.options.length === 0) {
+      console.log("[Chat] No options provided, cancelling permission request");
+      return { outcome: { outcome: "cancelled" } };
+    }
+
+    const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        if (this.permissionRequests.has(requestId)) {
+          this.permissionRequests.delete(requestId);
+          resolve({ outcome: { outcome: "cancelled" } });
+        }
+      }, 60000);
+
+      this.permissionRequests.set(requestId, { resolve, reject, timeoutId });
+
+      this.view?.webview.postMessage({
+        type: "showPermissionModal",
+        requestId,
+        title: params.toolCall?.title || "Permission Required",
+        rawInput: params.toolCall?.rawInput,
+        options: params.options.map((opt) => ({
+          id: opt.optionId,
+          label: opt.name,
+          description: (opt as any).description,
+        })),
+      });
+    });
+  }
+
   public dispose(): void {
     for (const terminal of this.terminals.values()) {
       this.killTerminalProcess(terminal);
@@ -495,6 +578,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } catch {}
     }
     this.terminals.clear();
+    for (const pending of this.permissionRequests.values()) {
+      clearTimeout(pending.timeoutId);
+      pending.reject(new Error("Provider disposed"));
+    }
+    this.permissionRequests.clear();
   }
 
   private handleSessionUpdate(notification: SessionNotification): void {
@@ -825,6 +913,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
+  </div>
+  
+  <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" tabindex="-1">
+    <div class="permission-modal-content">
+      <h3 class="permission-title" id="permission-title">Permission Required</h3>
+      <pre class="permission-content"></pre>
+      <div class="permission-options" role="group" aria-label="Permission options"></div>
+      <button class="permission-cancel-btn" type="button">Cancel</button>
+    </div>
   </div>
   
 <script src="${webviewScriptUri}"></script>

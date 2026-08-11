@@ -75,6 +75,15 @@ function createWebviewHTML(): string {
     <select id="mode-selector" style="display: none;"></select>
     <select id="model-selector" style="display: none;"></select>
   </div>
+  
+  <div id="permission-modal" class="permission-modal" role="dialog">
+    <div class="permission-modal-content">
+      <h3 class="permission-title">Permission Required</h3>
+      <pre class="permission-content"></pre>
+      <div class="permission-options"></div>
+      <button class="permission-cancel-btn">Cancel</button>
+    </div>
+  </div>
 </body>
 </html>`;
 }
@@ -1336,6 +1345,137 @@ suite("Webview", () => {
       const result = renderDiff(undefined, null, manyLines);
       assert.ok(result.includes("diff-truncated"));
       assert.ok(result.includes("500"));
+    });
+  });
+
+  suite("Permission Modal", () => {
+    let dom: JSDOM;
+    let document: Document;
+    let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
+    let controller: WebviewController;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML(), { runScripts: "dangerously" });
+      document = dom.window.document;
+      mockVsCode = createMockVsCodeApi();
+      controller = initWebview(
+        mockVsCode,
+        document,
+        dom.window as unknown as Window
+      );
+      mockVsCode._clearMessages();
+    });
+
+    test("showPermissionModal displays modal with options", () => {
+      const options = [
+        { id: "allow", label: "Allow", description: "Permit this action" },
+        { id: "deny", label: "Deny" },
+      ];
+
+      controller.showPermissionModal(
+        "req-123",
+        "File Access",
+        "Read /path/to/file",
+        options
+      );
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "File Access");
+
+      const content = modal?.querySelector(".permission-content");
+      assert.strictEqual(content?.textContent, "Read /path/to/file");
+
+      const optionBtns = modal?.querySelectorAll(".permission-option-btn");
+      assert.strictEqual(optionBtns?.length, 2);
+    });
+
+    test("showPermissionModal handles object content", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal(
+        "req-456",
+        "Tool Call",
+        { command: "ls", args: ["-la"] },
+        options
+      );
+
+      const modal = document.getElementById("permission-modal");
+      const content = modal?.querySelector(".permission-content");
+      const text = content?.textContent || "";
+      assert.ok(text.includes("command"));
+      assert.ok(text.includes("ls"));
+    });
+
+    test("hidePermissionModal hides the modal", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal("req-789", "Test", "content", options);
+      controller.hidePermissionModal();
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(!modal?.classList.contains("visible"));
+    });
+
+    test("clicking option sends permissionResponse message", () => {
+      const options = [{ id: "allow", label: "Allow" }];
+
+      controller.showPermissionModal("req-100", "Test", "content", options);
+
+      const optionBtn = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+      optionBtn?.click();
+
+      const messages = mockVsCode._getMessages();
+      const response = messages.find(
+        (m: unknown) => (m as { type: string }).type === "permissionResponse"
+      );
+      assert.ok(response);
+      assert.strictEqual(
+        (response as { requestId: string }).requestId,
+        "req-100"
+      );
+      assert.strictEqual((response as { optionId: string }).optionId, "allow");
+    });
+
+    test("cancelPermission sends cancelled response", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal("req-200", "Test", "content", options);
+      controller.cancelPermission();
+
+      const messages = mockVsCode._getMessages();
+      const response = messages.find(
+        (m: unknown) => (m as { type: string }).type === "permissionResponse"
+      );
+      assert.ok(response);
+      assert.strictEqual(
+        (response as { requestId: string }).requestId,
+        "req-200"
+      );
+      assert.strictEqual((response as { cancelled: boolean }).cancelled, true);
+    });
+
+    test("handleMessage shows modal on permissionRequest", () => {
+      controller.handleMessage({
+        type: "permissionRequest",
+        requestId: "req-300",
+        title: "Execute Command",
+        rawInput: { command: "npm test" },
+        options: [
+          { id: "run", label: "Run" },
+          { id: "skip", label: "Skip" },
+        ],
+      });
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "Execute Command");
     });
   });
 });

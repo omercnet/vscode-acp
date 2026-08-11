@@ -77,6 +77,8 @@ export interface ExtensionMessage {
   rawOutput?: { output?: string };
   status?: string;
   terminalOutput?: string;
+  requestId?: string;
+  options?: Array<{ id: string; label: string; description?: string }>;
 }
 
 export function escapeHtml(str: string): string {
@@ -444,6 +446,7 @@ export interface WebviewElements {
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
   planContainer: HTMLElement;
+  permissionModal: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -463,6 +466,7 @@ export function getElements(doc: Document): WebviewElements {
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
     planContainer: doc.getElementById("agent-plan-container")!,
+    permissionModal: doc.getElementById("permission-modal")!,
   };
 }
 
@@ -485,6 +489,9 @@ export class WebviewController {
   private selectedCommandIndex = -1;
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
+  private pendingPermissionRequestId: string | null = null;
+  private previouslyFocusedElement: HTMLElement | null = null;
+  private escapeHandler: ((e: KeyboardEvent) => void) | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -652,6 +659,19 @@ export class WebviewController {
     this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
       this.handleMessage(e.data)
     );
+
+    this.elements.permissionModal.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === this.elements.permissionModal) {
+        this.cancelPermission();
+      }
+    });
+
+    const cancelBtn = this.elements.permissionModal.querySelector(
+      ".permission-cancel-btn"
+    );
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => this.cancelPermission());
+    }
   }
 
   addMessage(
@@ -1144,6 +1164,16 @@ export class WebviewController {
           this.appendThought(msg.text);
         }
         break;
+      case "permissionRequest":
+        if (msg.requestId && msg.options) {
+          this.showPermissionModal(
+            msg.requestId,
+            msg.title,
+            msg.rawInput,
+            msg.options
+          );
+        }
+        break;
     }
   }
 
@@ -1202,6 +1232,103 @@ export class WebviewController {
   getIsConnected(): boolean {
     return this.isConnected;
   }
+
+  showPermissionModal(
+    requestId: string,
+    title: string | undefined,
+    content: unknown,
+    options: Array<{ id: string; label: string; description?: string }>
+  ): void {
+    this.pendingPermissionRequestId = requestId;
+    this.previouslyFocusedElement = this.doc.activeElement as HTMLElement;
+
+    if (this.escapeHandler) {
+      this.doc.removeEventListener("keydown", this.escapeHandler);
+      this.escapeHandler = null;
+    }
+
+    const modal = this.elements.permissionModal;
+
+    const titleEl = modal.querySelector(".permission-title") as HTMLElement;
+    const contentEl = modal.querySelector(".permission-content") as HTMLElement;
+    const optionsEl = modal.querySelector(".permission-options") as HTMLElement;
+
+    titleEl.textContent = title || "Permission Required";
+    contentEl.textContent =
+      typeof content === "string"
+        ? content
+        : content
+          ? JSON.stringify(content, null, 2)
+          : "";
+
+    optionsEl.innerHTML = "";
+    options.forEach((opt) => {
+      const btn = this.doc.createElement("button");
+      btn.className = "permission-option-btn";
+      btn.dataset.optionId = opt.id;
+      btn.innerHTML = `<span class="option-label">${escapeHtml(opt.label)}</span>${opt.description ? `<span class="option-desc">${escapeHtml(opt.description)}</span>` : ""}`;
+      btn.addEventListener("click", () => this.handlePermissionOption(opt.id));
+      optionsEl.appendChild(btn);
+    });
+
+    modal.classList.add("visible");
+
+    this.escapeHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelPermission();
+      }
+    };
+    this.doc.addEventListener("keydown", this.escapeHandler);
+
+    const firstBtn = optionsEl.querySelector("button") as HTMLButtonElement;
+    if (firstBtn) {
+      firstBtn.focus();
+    } else {
+      modal.focus();
+    }
+  }
+
+  hidePermissionModal(): void {
+    this.elements.permissionModal.classList.remove("visible");
+    this.pendingPermissionRequestId = null;
+
+    if (this.escapeHandler) {
+      this.doc.removeEventListener("keydown", this.escapeHandler);
+      this.escapeHandler = null;
+    }
+
+    if (this.previouslyFocusedElement) {
+      if (this.doc.contains(this.previouslyFocusedElement)) {
+        try {
+          this.previouslyFocusedElement.focus();
+        } catch {}
+      }
+      this.previouslyFocusedElement = null;
+    }
+  }
+
+  private handlePermissionOption(optionId: string): void {
+    if (this.pendingPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        requestId: this.pendingPermissionRequestId,
+        optionId,
+      });
+      this.hidePermissionModal();
+    }
+  }
+
+  cancelPermission(): void {
+    if (this.pendingPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        requestId: this.pendingPermissionRequestId,
+        cancelled: true,
+      });
+      this.hidePermissionModal();
+    }
+  }
 }
 
 export function initWebview(
@@ -1213,7 +1340,13 @@ export function initWebview(
   return new WebviewController(vscode, elements, doc, win);
 }
 
+declare global {
+  interface Window {
+    webviewController?: WebviewController;
+  }
+}
+
 if (typeof acquireVsCodeApi !== "undefined") {
   const vscode = acquireVsCodeApi();
-  initWebview(vscode, document, window);
+  window.webviewController = initWebview(vscode, document, window);
 }

@@ -21,6 +21,7 @@ interface MockACPClient {
   setOnWaitForTerminalExit: (callback: any) => void;
   setOnKillTerminalCommand: (callback: any) => void;
   setOnReleaseTerminal: (callback: any) => void;
+  setOnRequestPermission: (callback: any) => void;
   isConnected: () => boolean;
   connect: () => Promise<void>;
   newSession: (dir: string) => Promise<void>;
@@ -77,6 +78,7 @@ class TestACPClient implements MockACPClient {
   setOnWaitForTerminalExit(): void {}
   setOnKillTerminalCommand(): void {}
   setOnReleaseTerminal(): void {}
+  setOnRequestPermission(): void {}
   isConnected(): boolean {
     return false;
   }

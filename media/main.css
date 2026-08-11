@@ -955,3 +955,110 @@ kbd {
   background: var(--vscode-editor-lineHighlightBackground);
   border-top: 1px solid var(--vscode-panel-border);
 }
+
+.permission-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+}
+
+.permission-modal.visible {
+  display: flex;
+}
+
+.permission-modal-content {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 16px;
+  max-width: 90%;
+  max-height: 80%;
+  overflow: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.permission-title {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.permission-content {
+  margin: 0 0 16px 0;
+  padding: 10px;
+  background: var(--vscode-textBlockQuote-background);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow: auto;
+  color: var(--vscode-foreground);
+}
+
+.permission-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.permission-option-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease;
+}
+
+.permission-option-btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.permission-option-btn:first-child {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-color: var(--vscode-button-background);
+}
+
+.permission-option-btn:first-child:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.option-label {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.option-desc {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.permission-cancel-btn {
+  width: 100%;
+  padding: 8px;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.permission-cancel-btn:hover {
+  background: var(--vscode-list-hoverBackground);
+}
