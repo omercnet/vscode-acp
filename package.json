@@ -170,7 +170,7 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.12.0",
+    "@agentclientprotocol/sdk": "^0.29.0",
     "marked": "^17.0.1",
     "vscode-jsonrpc": "^8.2.0"
   },
