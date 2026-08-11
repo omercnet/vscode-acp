@@ -21,7 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
-    context.globalState
+    context.globalState,
+    context.workspaceState
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
@@ -74,6 +75,24 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.clearChat", () => {
       chatProvider?.clearChat();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.loadSession", () => {
+      chatProvider?.showSessionPicker();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.newSession", () => {
+      chatProvider?.newChat();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.deleteSession", () => {
+      chatProvider?.showSessionPicker();
     })
   );
 

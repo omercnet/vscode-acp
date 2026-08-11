@@ -33,6 +33,25 @@ marked.setOptions({
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
+const SESSIONS_STORAGE_KEY = "vscode-acp.sessions";
+const MAX_STORED_SESSIONS = 50;
+
+/**
+ * Metadata for a stored session.
+ * Contains minimal information needed to display and restore a session.
+ */
+export interface StoredSession {
+  /** Unique identifier for the session */
+  sessionId: string;
+  /** Unix timestamp when the session was last updated */
+  timestamp: number;
+  /** Working directory for the session */
+  cwd: string;
+  /** Preview of the last message in the session */
+  lastMessage: string;
+  /** Total number of messages in the session */
+  messageCount: number;
+}
 
 interface WebviewMessage {
   type:
@@ -44,11 +63,16 @@ interface WebviewMessage {
     | "connect"
     | "newChat"
     | "clearChat"
-    | "copyMessage";
+    | "showSessionPicker"
+    | "copyMessage"
+    | "selectSession"
+    | "deleteSessionFromPicker"
+    | "createNewSession";
   text?: string;
   agentId?: string;
   modeId?: string;
   modelId?: string;
+  sessionId?: string;
 }
 
 interface ManagedTerminal {
@@ -64,23 +88,52 @@ interface ManagedTerminal {
   exitResolve: () => void;
 }
 
+/**
+ * Content block from ACP protocol.
+ * Used in session replay notifications.
+ */
+interface ContentBlock {
+  type: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * A message in the replay buffer.
+ * Stores messages during session replay before sending to UI.
+ */
+interface ReplayMessage {
+  /** Role of the message sender */
+  role: "user" | "agent";
+  /** Content blocks from the message */
+  content: ContentBlock[];
+  /** Timestamp when the message was received */
+  timestamp: number;
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "vscode-acp.chatView";
 
   private view?: vscode.WebviewView;
   private hasSession = false;
   private globalState: vscode.Memento;
+  private workspaceState: vscode.Memento;
   private streamingText = "";
   private hasRestoredModeModel = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
+  private replayMessages: ReplayMessage[] = [];
+  private isReplaying = false;
+  private messageCount = 0;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly acpClient: ACPClient,
-    globalState: vscode.Memento
+    globalState: vscode.Memento,
+    workspaceState?: vscode.Memento
   ) {
     this.globalState = globalState;
+    this.workspaceState = workspaceState ?? globalState;
 
     const savedAgentId = this.globalState.get<string>(SELECTED_AGENT_KEY);
     if (savedAgentId) {
@@ -211,6 +264,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.sendSessionMetadata();
           break;
+        case "selectSession":
+          if (message.sessionId) {
+            await this.handleSelectSession(message.sessionId);
+          }
+          break;
+        case "deleteSessionFromPicker":
+          if (message.sessionId) {
+            await this.handleDeleteSessionFromPicker(message.sessionId);
+          }
+          break;
+        case "createNewSession":
+          await this.handleNewChat();
+          break;
       }
     });
   }
@@ -221,6 +287,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public clearChat(): void {
     this.postMessage({ type: "triggerClearChat" });
+  }
+
+  public showSessionPicker(): void {
+    const sessions = this.loadSessionList();
+    this.postMessage({ type: "showSessionPicker", sessions });
   }
 
   private stderrBuffer = "";
@@ -487,6 +558,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return {};
   }
 
+  /**
+   * Saves a session to workspace storage.
+   * Implements LRU eviction when MAX_STORED_SESSIONS is exceeded.
+   * @param sessionId - Unique identifier for the session
+   * @param metadata - Session metadata to store (excluding sessionId)
+   */
+  public async saveSession(
+    sessionId: string,
+    metadata: Omit<StoredSession, "sessionId">
+  ): Promise<void> {
+    try {
+      const sessions = this.loadSessionList();
+      const existingIndex = sessions.findIndex(
+        (s) => s.sessionId === sessionId
+      );
+
+      const storedSession: StoredSession = {
+        sessionId,
+        ...metadata,
+      };
+
+      if (existingIndex >= 0) {
+        sessions[existingIndex] = storedSession;
+      } else {
+        sessions.unshift(storedSession);
+      }
+
+      sessions.sort((a, b) => b.timestamp - a.timestamp);
+
+      while (sessions.length > MAX_STORED_SESSIONS) {
+        sessions.pop();
+      }
+
+      await this.workspaceState.update(SESSIONS_STORAGE_KEY, sessions);
+    } catch (error) {
+      console.error("[Chat] Failed to save session:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Loads the list of all stored sessions from workspace storage.
+   * @returns Array of stored sessions, sorted by timestamp (newest first)
+   */
+  public loadSessionList(): StoredSession[] {
+    try {
+      const sessions =
+        this.workspaceState.get<StoredSession[]>(SESSIONS_STORAGE_KEY) ?? [];
+      return sessions;
+    } catch (error) {
+      console.error("[Chat] Failed to load session list:", error);
+      return [];
+    }
+  }
+
+  /**
+   * Deletes a session from workspace storage.
+   * @param sessionId - Unique identifier of the session to delete
+   */
+  public async deleteSession(sessionId: string): Promise<void> {
+    try {
+      const sessions = this.loadSessionList();
+      const filteredSessions = sessions.filter(
+        (s) => s.sessionId !== sessionId
+      );
+      await this.workspaceState.update(SESSIONS_STORAGE_KEY, filteredSessions);
+    } catch (error) {
+      console.error("[Chat] Failed to delete session:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets a specific session's metadata from workspace storage.
+   * @param sessionId - Unique identifier of the session to retrieve
+   * @returns The session metadata, or undefined if not found
+   */
+  public getSession(sessionId: string): StoredSession | undefined {
+    try {
+      const sessions = this.loadSessionList();
+      return sessions.find((s) => s.sessionId === sessionId);
+    } catch (error) {
+      console.error("[Chat] Failed to get session:", error);
+      return undefined;
+    }
+  }
+
   public dispose(): void {
     for (const terminal of this.terminals.values()) {
       this.killTerminalProcess(terminal);
@@ -503,7 +661,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (update.sessionUpdate === "agent_message_chunk") {
       console.log("[Chat] Chunk content:", JSON.stringify(update.content));
-      if (update.content.type === "text") {
+      if (this.isReplaying) {
+        console.log(
+          "[Chat] Replay agent_message_chunk received:",
+          JSON.stringify(update.content)
+        );
+        this.handleReplayAgentMessageChunk(update.content);
+      } else if (update.content.type === "text") {
         this.streamingText += update.content.text;
         this.postMessage({ type: "streamChunk", text: update.content.text });
       } else {
@@ -560,6 +724,64 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           text: update.content.text,
         });
       }
+    } else if (update.sessionUpdate === "user_message_chunk") {
+      console.log(
+        "[Chat] Replay user_message_chunk received:",
+        JSON.stringify(update.content)
+      );
+      this.handleReplayUserMessageChunk(update.content);
+    }
+  }
+
+  private handleReplayUserMessageChunk(
+    content: ContentBlock | ContentBlock[]
+  ): void {
+    const contentBlocks = Array.isArray(content) ? content : [content];
+
+    const lastMessage = this.replayMessages[this.replayMessages.length - 1];
+    if (lastMessage && lastMessage.role === "user") {
+      lastMessage.content.push(...contentBlocks);
+      console.log(
+        "[Chat] Appended to existing user message, total blocks:",
+        lastMessage.content.length
+      );
+    } else {
+      const newMessage: ReplayMessage = {
+        role: "user",
+        content: contentBlocks,
+        timestamp: Date.now(),
+      };
+      this.replayMessages.push(newMessage);
+      console.log(
+        "[Chat] Created new user message, total messages:",
+        this.replayMessages.length
+      );
+    }
+  }
+
+  private handleReplayAgentMessageChunk(
+    content: ContentBlock | ContentBlock[]
+  ): void {
+    const contentBlocks = Array.isArray(content) ? content : [content];
+
+    const lastMessage = this.replayMessages[this.replayMessages.length - 1];
+    if (lastMessage && lastMessage.role === "agent") {
+      lastMessage.content.push(...contentBlocks);
+      console.log(
+        "[Chat] Appended to existing agent message, total blocks:",
+        lastMessage.content.length
+      );
+    } else {
+      const newMessage: ReplayMessage = {
+        role: "agent",
+        content: contentBlocks,
+        timestamp: Date.now(),
+      };
+      this.replayMessages.push(newMessage);
+      console.log(
+        "[Chat] Created new agent message, total messages:",
+        this.replayMessages.length
+      );
     }
   }
 
@@ -589,6 +811,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         JSON.stringify(response, null, 2)
       );
 
+      this.messageCount++;
+      await this.autoSaveSession(text);
+
       if (this.streamingText.length === 0) {
         console.warn("[Chat] No streaming text received from agent");
         console.warn("[Chat] stderr buffer:", this.stderrBuffer);
@@ -605,6 +830,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
           html: renderedHtml,
         });
+
+        this.messageCount++;
+        await this.autoSaveSession(this.streamingText);
       }
       this.streamingText = "";
     } catch (error) {
@@ -676,6 +904,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.hasSession = false;
     this.hasRestoredModeModel = false;
     this.streamingText = "";
+    this.messageCount = 0;
     this.postMessage({ type: "chatCleared" });
     this.postMessage({ type: "sessionMetadata", modes: null, models: null });
 
@@ -694,6 +923,74 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private handleClearChat(): void {
     this.postMessage({ type: "chatCleared" });
+  }
+
+  private async handleSelectSession(sessionId: string): Promise<void> {
+    try {
+      if (!this.acpClient.isConnected()) {
+        await this.acpClient.connect();
+      }
+
+      if (!this.acpClient.supportsLoadSession()) {
+        this.postMessage({
+          type: "error",
+          text: "This agent does not support loading sessions",
+        });
+        return;
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+
+      this.postMessage({ type: "chatCleared" });
+      this.replayMessages = [];
+      this.isReplaying = true;
+
+      await this.acpClient.loadSession(sessionId, workingDir, []);
+      this.hasSession = true;
+
+      this.flushReplayMessages();
+      this.isReplaying = false;
+      this.sendSessionMetadata();
+    } catch (error) {
+      console.error("[Chat] Failed to load session:", error);
+      this.isReplaying = false;
+      this.postMessage({
+        type: "error",
+        text: error instanceof Error ? error.message : "Failed to load session",
+      });
+    }
+  }
+
+  private async handleDeleteSessionFromPicker(
+    sessionId: string
+  ): Promise<void> {
+    try {
+      await this.deleteSession(sessionId);
+      this.postMessage({ type: "sessionDeleted", sessionId });
+    } catch (error) {
+      console.error("[Chat] Failed to delete session:", error);
+    }
+  }
+
+  private flushReplayMessages(): void {
+    for (const msg of this.replayMessages) {
+      const textContent = msg.content
+        .filter((c) => c.type === "text" && c.text)
+        .map((c) => c.text)
+        .join("");
+
+      if (textContent) {
+        if (msg.role === "user") {
+          this.postMessage({ type: "userMessage", text: textContent });
+        } else {
+          this.postMessage({ type: "streamStart" });
+          this.postMessage({ type: "streamChunk", text: textContent });
+          this.postMessage({ type: "streamEnd", html: textContent });
+        }
+      }
+    }
+    this.replayMessages = [];
   }
 
   private sendSessionMetadata(): void {
@@ -751,6 +1048,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (modeRestored || modelRestored) {
       this.postMessage({ type: "sessionMetadata", ...metadata });
     }
+  }
+
+  private async autoSaveSession(lastMessage: string): Promise<void> {
+    const sessionId = this.acpClient.getCurrentSessionId();
+    if (!sessionId) return;
+
+    const cwd =
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    const preview = lastMessage.substring(0, 100);
+
+    await this.saveSession(sessionId, {
+      timestamp: Date.now(),
+      cwd,
+      lastMessage: preview,
+      messageCount: this.messageCount,
+    });
   }
 
   private postMessage(message: Record<string, unknown>): void {
@@ -825,6 +1138,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
+  </div>
+  
+  <!-- Session Picker Modal -->
+  <div id="session-picker-overlay" class="modal-overlay" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="session-picker-title">
+    <div class="modal-container session-picker-modal">
+      <div class="modal-header">
+        <h3 id="session-picker-title">Load Session</h3>
+        <button id="session-picker-close" class="modal-close-btn" aria-label="Close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="session-picker-loading" class="session-picker-loading">
+          <span class="loading-spinner"></span>
+          <span>Loading sessions...</span>
+        </div>
+        <div id="session-picker-empty" class="session-picker-empty" style="display: none;">
+          <p>No saved sessions found.</p>
+          <p class="session-picker-hint">Sessions are automatically saved as you chat.</p>
+        </div>
+        <div id="session-picker-list" class="session-picker-list" style="display: none;" role="listbox" aria-label="Available sessions"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="session-picker-new" class="modal-btn modal-btn-secondary">New Session</button>
+      </div>
+    </div>
   </div>
   
 <script src="${webviewScriptUri}"></script>

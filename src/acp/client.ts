@@ -99,6 +99,7 @@ export class ACPClient {
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private skipAvailabilityCheck: boolean;
+  private supportsLoadSessionCapability: boolean = false;
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
@@ -352,6 +353,14 @@ export class ACPClient {
         },
       });
 
+      // Parse agent capabilities
+      this.supportsLoadSessionCapability =
+        initResponse.agentCapabilities?.loadSession ?? false;
+      console.log(
+        "[ACP] Agent supports loadSession:",
+        this.supportsLoadSessionCapability
+      );
+
       this.setState("connected");
       return initResponse;
     } catch (error) {
@@ -383,6 +392,62 @@ export class ACPClient {
 
   getSessionMetadata(): SessionMetadata | null {
     return this.sessionMetadata;
+  }
+
+  getCurrentSessionId(): string | null {
+    return this.currentSessionId;
+  }
+
+  supportsLoadSession(): boolean {
+    return this.supportsLoadSessionCapability;
+  }
+
+  /**
+   * Loads an existing session by ID.
+   *
+   * This method is only available if the agent advertises the `loadSession` capability.
+   * Check `supportsLoadSession()` before calling this method.
+   *
+   * @param sessionId - The ID of the session to load
+   * @param cwd - The working directory for this session
+   * @param mcpServers - List of MCP servers to connect to for this session
+   * @returns The session mode state, or null if not provided by the agent
+   * @throws Error if not connected or if the agent doesn't support loadSession
+   */
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    mcpServers: import("@agentclientprotocol/sdk").McpServer[]
+  ): Promise<SessionModeState | null> {
+    if (!this.connection) {
+      throw new Error("Not connected");
+    }
+
+    if (!this.supportsLoadSessionCapability) {
+      throw new Error("Agent does not support loadSession capability");
+    }
+
+    try {
+      const response = await this.connection.loadSession({
+        sessionId,
+        cwd,
+        mcpServers,
+      });
+
+      this.currentSessionId = sessionId;
+      this.sessionMetadata = {
+        modes: response.modes ?? null,
+        models: response.models ?? null,
+        commands: this.pendingCommands,
+      };
+      this.pendingCommands = null;
+
+      console.log("[ACP] Session loaded:", sessionId);
+      return response.modes ?? null;
+    } catch (error) {
+      console.error("[ACP] Failed to load session:", error);
+      throw error;
+    }
   }
 
   async setMode(modeId: string): Promise<void> {

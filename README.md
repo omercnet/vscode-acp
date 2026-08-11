@@ -18,6 +18,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **📝 Rich Markdown** — Code blocks, syntax highlighting, and formatted responses
 - **🔄 Streaming Responses** — Watch the AI think in real-time
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
+- **💾 Session Persistence** — Save and resume conversations across VS Code restarts
 
 ## Requirements
 
@@ -56,6 +57,24 @@ When the AI uses tools (like running commands or reading files), you'll see them
 - **✗** — Tool failed
 
 Click on any tool to see the command input and output.
+
+## Session Management
+
+VSCode ACP automatically saves your conversation sessions, allowing you to resume where you left off even after closing VS Code.
+
+### Commands
+
+- **Load Session** (`Ctrl+Shift+Alt+L` / `Cmd+Shift+Alt+L`) — Browse and load a saved session
+- **New Session** (`Ctrl+Shift+Alt+N` / `Cmd+Shift+Alt+N`) — Start a fresh conversation
+- **Delete Session** — Remove old sessions from history
+
+### Settings
+
+Configure session behavior in VS Code settings (`Cmd+,` / `Ctrl+,`):
+
+- `vscode-acp.sessions.autoSave` (default: `true`) — Automatically save after each message
+- `vscode-acp.sessions.maxHistory` (default: `50`) — Maximum sessions to keep (1-200)
+- `vscode-acp.sessions.showPickerOnStart` (default: `false`) — Show session picker on startup
 
 ## Configuration
 
