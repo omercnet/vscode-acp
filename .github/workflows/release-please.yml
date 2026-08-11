@@ -46,7 +46,7 @@ jobs:
         run: npx --no-install vsce package --no-dependencies
 
       - name: Upload VSIX to release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ needs.release-please.outputs.tag_name }}
           files: "*.vsix"
