@@ -43,7 +43,7 @@ jobs:
         run: npm run compile
 
       - name: Package extension
-        run: npx vsce package --no-dependencies
+        run: npx --no-install vsce package --no-dependencies
 
       - name: Upload VSIX to release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
@@ -52,10 +52,10 @@ jobs:
           files: "*.vsix"
 
       - name: Publish to VS Code Marketplace
-        run: npx vsce publish --no-dependencies
+        run: npx --no-install vsce publish --no-dependencies
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
       - name: Publish to Open VSX Registry
-        run: npx ovsx publish *.vsix -p ${{ secrets.OVSX_PAT }}
+        run: npx --no-install ovsx publish *.vsix -p ${{ secrets.OVSX_PAT }}
         continue-on-error: true
