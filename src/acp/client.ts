@@ -62,6 +62,7 @@ export type ACPErrorKind =
   | "agent"
   | "authentication-required"
   | "resource-not-found"
+  | "cancelled"
   | "unknown";
 
 export interface ACPErrorPresentation {
@@ -88,6 +89,7 @@ const ERROR_PRESENTATIONS: Record<
     summary: "Authentication required",
   },
   [-32002]: { kind: "resource-not-found", summary: "File not found" },
+  [-32800]: { kind: "cancelled", summary: "Request cancelled" },
 };
 
 /**

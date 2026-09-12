@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
 import { marked } from "marked";
-import { ACPClient, formatACPError } from "../acp/client";
+import { ACPClient, describeACPError, formatACPError } from "../acp/client";
 import {
   getAgent,
   getAgentsWithStatus,
@@ -780,8 +780,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
-      this.postACPError("Error in handleUserMessage", error);
-      this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
+      const { kind } = describeACPError(error);
+      if (kind === "cancelled") {
+        console.log("[Chat] Prompt cancelled:", error);
+      } else {
+        this.postACPError("Error in handleUserMessage", error);
+      }
+      this.postMessage({
+        type: "streamEnd",
+        stopReason: kind === "cancelled" ? "cancelled" : "error",
+        html: "",
+      });
       this.streamingText = "";
       this.stderrBuffer = "";
     }

@@ -656,6 +656,41 @@ suite("ChatViewProvider", () => {
       html: "",
     });
   });
+
+  test("ends a cancelled prompt without an error card", async () => {
+    class CancellingClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async sendMessage(): Promise<{ stopReason: string }> {
+        throw new RequestError(-32800, "Request cancelled");
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new CancellingClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const handleUserMessage = Reflect.get(provider, "handleUserMessage") as (
+      this: ChatViewProvider,
+      text: string
+    ) => Promise<void>;
+
+    await handleUserMessage.call(provider, "Hello");
+
+    assert.ok(!messages.some((message) => message.type === "error"));
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "streamEnd",
+      stopReason: "cancelled",
+      html: "",
+    });
+  });
   suite("Client capability handlers", () => {
     test("reads files using the protocol's 1-based line offset", async () => {
       const provider = new ChatViewProvider(

@@ -97,6 +97,7 @@ suite("ACP error presentation", () => {
     [-32603, "agent", "Agent error"],
     [-32000, "authentication-required", "Authentication required"],
     [-32002, "resource-not-found", "File not found"],
+    [-32800, "cancelled", "Request cancelled"],
   ] as const;
 
   for (const [code, kind, summary] of cases) {
