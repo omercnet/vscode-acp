@@ -9,6 +9,8 @@ import {
 } from "../acp/agents";
 import type {
   SessionNotification,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   WriteTextFileRequest,
@@ -103,6 +105,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
     });
+
+    this.acpClient.setOnRequestPermission((params) =>
+      this.handleRequestPermission(params)
+    );
 
     this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
       return this.handleReadTextFile(params);
@@ -251,6 +257,30 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleRequestPermission(
+    params: RequestPermissionRequest
+  ): Promise<RequestPermissionResponse> {
+    const options: Array<vscode.QuickPickItem & { optionId: string }> =
+      params.options.map((option) => ({
+        label: option.name,
+        description: option.kind,
+        optionId: option.optionId,
+      }));
+    const selected = await vscode.window.showQuickPick(options, {
+      placeHolder: params.toolCall.title ?? "Agent requests permission",
+      ignoreFocusOut: true,
+    });
+
+    return selected
+      ? {
+          outcome: {
+            outcome: "selected",
+            optionId: selected.optionId,
+          },
+        }
+      : { outcome: { outcome: "cancelled" } };
+  }
+
   private async handleReadTextFile(
     params: ReadTextFileRequest
   ): Promise<ReadTextFileResponse> {
@@ -271,7 +301,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       if (params.line !== undefined || params.limit !== undefined) {
         const lines = content.split("\n");
-        const startLine = params.line ?? 0;
+        const startLine = Math.max((params.line ?? 1) - 1, 0);
         const lineLimit = params.limit ?? lines.length;
         const selectedLines = lines.slice(startLine, startLine + lineLimit);
         content = selectedLines.join("\n");
@@ -406,8 +436,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const byteLength = Buffer.byteLength(terminal.output, "utf8");
       if (byteLength > terminal.outputByteLimit) {
         const encoded = Buffer.from(terminal.output, "utf8");
-        const sliced = encoded.slice(-terminal.outputByteLimit);
-        terminal.output = sliced.toString("utf8");
+        let start = encoded.length - terminal.outputByteLimit;
+        while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) {
+          start++;
+        }
+        terminal.output = encoded.subarray(start).toString("utf8");
         terminal.truncated = true;
       }
     }

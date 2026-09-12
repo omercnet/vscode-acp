@@ -2,7 +2,12 @@ import * as assert from "assert";
 import { ChildProcess } from "child_process";
 import { ACPClient, type SpawnFunction } from "../acp/client";
 import { getAgent } from "../acp/agents";
-import { createMockProcess, type DemoMode } from "./mocks/acp-server";
+import type { RequestPermissionResponse } from "@agentclientprotocol/sdk";
+import {
+  createMockProcess,
+  type DemoMode,
+  type MockChildProcess,
+} from "./mocks/acp-server";
 
 suite("ACPClient", () => {
   let client: ACPClient;
@@ -77,15 +82,19 @@ suite("ACPClient with Mock Server", () => {
   let client: ACPClient;
   let mockSpawn: SpawnFunction;
   let demoMode: DemoMode;
+  let mockProcesses: MockChildProcess[];
 
   setup(() => {
     demoMode = "default";
+    mockProcesses = [];
     mockSpawn = (
       _command: string,
       _args: string[],
       _options: unknown
     ): ChildProcess => {
-      return createMockProcess(demoMode) as unknown as ChildProcess;
+      const process = createMockProcess(demoMode);
+      mockProcesses.push(process);
+      return process as unknown as ChildProcess;
     };
 
     client = new ACPClient({
@@ -153,6 +162,26 @@ suite("ACPClient with Mock Server", () => {
         await client.connect();
       }, /Already connected or connecting/);
     });
+
+    test("advertises only client capabilities backed by handlers", async () => {
+      await client.connect();
+
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getInitializeRequest()?.clientCapabilities,
+        {}
+      );
+    });
+
+    test("rejects an unsupported negotiated protocol version", async () => {
+      demoMode = "invalid-version";
+
+      await assert.rejects(
+        () => client.connect(),
+        /Unsupported ACP protocol version/
+      );
+      assert.strictEqual(client.getState(), "error");
+      assert.strictEqual(mockProcesses[0].killed, true);
+    });
   });
 
   suite("newSession", () => {
@@ -201,6 +230,64 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(models?.currentModelId, "claude-3-opus");
     });
 
+    test("does not expose a model selector with an invalid current value", async () => {
+      demoMode = "invalid-config";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      assert.strictEqual(client.getSessionMetadata()?.models, null);
+    });
+
+    test("tracks current mode updates in session metadata", async () => {
+      demoMode = "mode-update";
+      await client.connect();
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(
+        client.getSessionMetadata()?.modes?.currentModeId,
+        "architect"
+      );
+    });
+
+    test("keeps pre-response metadata scoped to its session", async () => {
+      demoMode = "session-isolation";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      let staleReadCount = 0;
+      client.setOnReadTextFile(async () => {
+        staleReadCount++;
+        return { content: "stale" };
+      });
+      const observedSessionIds: string[] = [];
+      client.setOnSessionUpdate((notification) => {
+        observedSessionIds.push(notification.sessionId);
+      });
+
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const metadata = client.getSessionMetadata();
+      assert.strictEqual(metadata?.models?.currentModelId, "session-2-model");
+      assert.strictEqual(metadata?.commands?.[0]?.name, "session-2");
+      assert.deepStrictEqual(observedSessionIds, []);
+      assert.strictEqual(staleReadCount, 0);
+    });
+
+    test("cancels work in the replaced session", async () => {
+      demoMode = "ansi";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const prompt = client.sendMessage("Hello");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.newSession("/test/dir");
+
+      assert.strictEqual((await prompt).stopReason, "cancelled");
+    });
+
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
         await client.newSession("/test/dir");
@@ -236,6 +323,53 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(updates1.length, updates2.length);
     });
 
+    test("cancels permission requests without a user decision handler", async () => {
+      demoMode = "permission";
+      const streamed: string[] = [];
+      client.setOnSessionUpdate((notification) => {
+        if (
+          notification.update.sessionUpdate === "agent_message_chunk" &&
+          notification.update.content.type === "text"
+        ) {
+          streamed.push(notification.update.content.text);
+        }
+      });
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.sendMessage("Request permission");
+
+      assert.deepStrictEqual(streamed, ["permission:cancelled"]);
+    });
+
+    test("cancels a permission choice after its session is replaced", async () => {
+      demoMode = "permission";
+      let resolvePermission:
+        ((response: RequestPermissionResponse) => void) | undefined;
+      client.setOnRequestPermission(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolvePermission = resolve;
+          })
+      );
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const prompt = client.sendMessage("Request permission");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.newSession("/test/dir");
+      assert.ok(resolvePermission);
+      resolvePermission({
+        outcome: { outcome: "selected", optionId: "always" },
+      });
+
+      assert.strictEqual((await prompt).stopReason, "cancelled");
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getPermissionOutcomes().at(-1),
+        { outcome: "cancelled" }
+      );
+    });
+
     test("should throw if no session", async () => {
       await client.connect();
 
@@ -256,6 +390,20 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(metadata?.modes?.currentModeId, "architect");
     });
 
+    test("rejects a mode that the agent did not offer", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.setMode("missing-mode"),
+        /Mode is not available: missing-mode/
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.modes?.currentModeId,
+        "code"
+      );
+    });
+
     test("should throw if no session", async () => {
       await client.connect();
 
@@ -274,6 +422,20 @@ suite("ACPClient with Mock Server", () => {
 
       const metadata = client.getSessionMetadata();
       assert.strictEqual(metadata?.models?.currentModelId, "claude-3-opus");
+    });
+
+    test("rejects a model value that the agent did not offer", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.setModel("missing-model"),
+        /Model is not available: missing-model/
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.models?.currentModelId,
+        "claude-3-sonnet"
+      );
     });
 
     test("should throw if no session", async () => {
@@ -329,6 +491,24 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getState(), "connected");
       const session = await client.newSession("/test/dir");
       assert.ok(session.sessionId);
+    });
+
+    test("does not let a disposed connection attempt tear down its replacement", async () => {
+      demoMode = "no-initialize";
+      const firstConnect = client.connect();
+      const firstResult = firstConnect.then(
+        () => null,
+        (error: unknown) => error
+      );
+
+      client.dispose();
+      demoMode = "default";
+      const replacementConnect = client.connect();
+
+      assert.ok((await firstResult) instanceof Error);
+      await replacementConnect;
+      assert.strictEqual(client.getState(), "connected");
+      assert.ok((await client.newSession("/test/dir")).sessionId);
     });
   });
 });

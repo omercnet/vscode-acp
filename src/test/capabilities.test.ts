@@ -1,10 +1,11 @@
 import * as assert from "assert";
 import { ChildProcess } from "child_process";
 import { ACPClient, type SpawnFunction } from "../acp/client";
-import { createMockProcess } from "./mocks/acp-server";
+import { createMockProcess, type MockChildProcess } from "./mocks/acp-server";
 
 suite("Client capabilities", () => {
   let client: ACPClient;
+  let mockProcess: MockChildProcess;
 
   setup(() => {
     const mockSpawn: SpawnFunction = (
@@ -12,7 +13,8 @@ suite("Client capabilities", () => {
       _args: string[],
       _options: unknown
     ): ChildProcess => {
-      return createMockProcess("capabilities") as unknown as ChildProcess;
+      mockProcess = createMockProcess("capabilities");
+      return mockProcess as unknown as ChildProcess;
     };
 
     client = new ACPClient({
@@ -42,6 +44,16 @@ suite("Client capabilities", () => {
       ) {
         streamed.push(update.content.text);
       }
+    });
+
+    client.setOnRequestPermission(async (params) => {
+      const allowOnce = params.options.find(
+        (option) => option.kind === "allow_once"
+      );
+      assert.ok(allowOnce);
+      return {
+        outcome: { outcome: "selected", optionId: allowOnce.optionId },
+      };
     });
 
     client.setOnReadTextFile(async (params) => {
@@ -87,6 +99,13 @@ suite("Client capabilities", () => {
 
     await client.connect();
     await client.newSession("/workspace");
+    assert.deepStrictEqual(
+      mockProcess.server.getInitializeRequest()?.clientCapabilities,
+      {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: true,
+      }
+    );
     const response = await client.sendMessage("Exercise capabilities");
 
     assert.strictEqual(response.stopReason, "end_turn");
@@ -100,8 +119,8 @@ suite("Client capabilities", () => {
       "release",
     ]);
 
-    // The agent offers allow_always before allow_once; auto-approval must take
-    // the narrower grant.
+    // The agent offers allow_always before allow_once; the explicit client
+    // decision must be returned unchanged.
     assert.ok(
       streamed.includes("permission:once"),
       `expected allow_once approval, got ${JSON.stringify(streamed)}`

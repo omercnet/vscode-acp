@@ -10,7 +10,17 @@ interface JsonRpcMessage {
 }
 
 export type DemoMode =
-  "ansi" | "capabilities" | "deferred-config" | "plan" | "default";
+  | "ansi"
+  | "capabilities"
+  | "deferred-config"
+  | "invalid-config"
+  | "invalid-version"
+  | "no-initialize"
+  | "session-isolation"
+  | "mode-update"
+  | "permission"
+  | "plan"
+  | "default";
 
 interface MockSession {
   id: string;
@@ -34,6 +44,16 @@ export class MockACPServer {
     number,
     { resolve: (result: unknown) => void; reject: (error: Error) => void }
   >();
+  private permissionOutcomes: acp.RequestPermissionOutcome[] = [];
+  private initializeRequest: acp.InitializeRequest | null = null;
+
+  getInitializeRequest(): acp.InitializeRequest | null {
+    return this.initializeRequest;
+  }
+
+  getPermissionOutcomes(): readonly acp.RequestPermissionOutcome[] {
+    return this.permissionOutcomes;
+  }
 
   constructor(demoMode: DemoMode = "default") {
     this.demoMode = demoMode;
@@ -106,9 +126,15 @@ export class MockACPServer {
 
     switch (method) {
       case "initialize":
-        if (id !== undefined) {
+        if (params) {
+          this.initializeRequest = params as acp.InitializeRequest;
+        }
+        if (id !== undefined && this.demoMode !== "no-initialize") {
           this.sendResponse(id, {
-            protocolVersion: acp.PROTOCOL_VERSION,
+            protocolVersion:
+              this.demoMode === "invalid-version"
+                ? acp.PROTOCOL_VERSION + 1
+                : acp.PROTOCOL_VERSION,
             agentCapabilities: { loadSession: false },
           });
         }
@@ -144,8 +170,14 @@ export class MockACPServer {
   }
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
+    let previousSession: MockSession | undefined;
+    for (const session of this.sessions.values()) {
+      previousSession = session;
+    }
+
     const sessionId = `mock-session-${++this.sessionCounter}`;
     const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
+    const isolatedModel = `session-${this.sessionCounter}-model`;
     const configOptions: acp.SessionConfigOption[] =
       this.demoMode === "deferred-config"
         ? [
@@ -173,11 +205,22 @@ export class MockACPServer {
               type: "select",
               name: "Model",
               category: "model",
-              currentValue: "claude-3-sonnet",
-              options: [
-                { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-                { value: "claude-3-opus", name: "Claude 3 Opus" },
-              ],
+              currentValue:
+                this.demoMode === "invalid-config"
+                  ? "missing-model"
+                  : this.demoMode === "session-isolation"
+                    ? isolatedModel
+                    : "claude-3-sonnet",
+              options:
+                this.demoMode === "session-isolation"
+                  ? [{ value: isolatedModel, name: isolatedModel }]
+                  : [
+                      {
+                        value: "claude-3-sonnet",
+                        name: "Claude 3 Sonnet",
+                      },
+                      { value: "claude-3-opus", name: "Claude 3 Opus" },
+                    ],
             },
           ];
 
@@ -190,19 +233,27 @@ export class MockACPServer {
 
     this.sendSessionUpdate(sessionId, {
       sessionUpdate: "available_commands_update",
-      availableCommands: [
-        {
-          name: "web",
-          description: "Search the web",
-          input: { hint: "query" },
-        },
-        { name: "test", description: "Run tests" },
-        {
-          name: "plan",
-          description: "Create a plan",
-          input: { hint: "description" },
-        },
-      ],
+      availableCommands:
+        this.demoMode === "session-isolation"
+          ? [
+              {
+                name: `session-${this.sessionCounter}`,
+                description: `Commands for ${sessionId}`,
+              },
+            ]
+          : [
+              {
+                name: "web",
+                description: "Search the web",
+                input: { hint: "query" },
+              },
+              { name: "test", description: "Run tests" },
+              {
+                name: "plan",
+                description: "Create a plan",
+                input: { hint: "description" },
+              },
+            ],
     });
 
     if (this.demoMode === "deferred-config") {
@@ -227,6 +278,34 @@ export class MockACPServer {
     };
 
     this.sendResponse(id, response);
+
+    if (this.demoMode === "mode-update") {
+      setImmediate(() => {
+        this.sendSessionUpdate(sessionId, {
+          sessionUpdate: "current_mode_update",
+          currentModeId: "architect",
+        });
+      });
+    }
+
+    if (this.demoMode === "session-isolation" && previousSession) {
+      setImmediate(() => {
+        this.sendSessionUpdate(previousSession.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: previousSession.configOptions,
+        });
+        this.sendSessionUpdate(previousSession.id, {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "stale", description: "Stale session command" },
+          ],
+        });
+        void this.requestClient("fs/read_text_file", {
+          sessionId: previousSession.id,
+          path: "/workspace/stale.ts",
+        }).catch(() => {});
+      });
+    }
   }
 
   private handleSetConfigOption(
@@ -280,6 +359,9 @@ export class MockACPServer {
         case "capabilities":
           await this.demoCapabilities(session.id);
           break;
+        case "permission":
+          await this.demoPermission(session.id);
+          break;
         case "plan":
           await this.demoPlanDisplay(session.id);
           break;
@@ -317,8 +399,7 @@ export class MockACPServer {
     });
   }
 
-  private async demoCapabilities(sessionId: string): Promise<void> {
-    const terminalId = "mock-terminal";
+  private async demoPermission(sessionId: string): Promise<void> {
     const permission = (await this.requestClient("session/request_permission", {
       sessionId,
       toolCall: { toolCallId: "tool-1", title: "Write file", kind: "edit" },
@@ -329,6 +410,7 @@ export class MockACPServer {
       ],
     })) as acp.RequestPermissionResponse;
     const outcome = permission.outcome;
+    this.permissionOutcomes.push(outcome);
     this.sendSessionUpdate(sessionId, {
       sessionUpdate: "agent_message_chunk",
       content: {
@@ -338,6 +420,11 @@ export class MockACPServer {
         }`,
       },
     });
+  }
+
+  private async demoCapabilities(sessionId: string): Promise<void> {
+    const terminalId = "mock-terminal";
+    await this.demoPermission(sessionId);
     await this.requestClient("fs/read_text_file", {
       sessionId,
       path: "/workspace/input.ts",
@@ -533,6 +620,7 @@ export interface MockChildProcess extends EventEmitter {
   pid: number;
   killed: boolean;
   kill: () => boolean;
+  server: MockACPServer;
 }
 
 export function createMockProcess(
@@ -551,6 +639,10 @@ export function createMockProcess(
   });
   Object.defineProperty(mockProcess, "stderr", {
     value: server.stderr,
+    writable: false,
+  });
+  Object.defineProperty(mockProcess, "server", {
+    value: server,
     writable: false,
   });
   Object.defineProperty(mockProcess, "pid", { value: 99999, writable: false });
