@@ -247,10 +247,9 @@ export class ACPClient {
               "[ACP] Permission request:",
               JSON.stringify(params, null, 2)
             );
-            const allowOption = params.options.find(
-              (option) =>
-                option.kind === "allow_once" || option.kind === "allow_always"
-            );
+            const allowOption =
+              params.options.find((option) => option.kind === "allow_once") ??
+              params.options.find((option) => option.kind === "allow_always");
             if (allowOption) {
               console.log(
                 "[ACP] Auto-approving with option:",

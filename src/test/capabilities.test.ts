@@ -33,6 +33,16 @@ suite("Client capabilities", () => {
 
   test("routes filesystem and terminal requests through registered handlers", async () => {
     const calls: string[] = [];
+    const streamed: string[] = [];
+    client.setOnSessionUpdate((notification) => {
+      const update = notification.update;
+      if (
+        update.sessionUpdate === "agent_message_chunk" &&
+        update.content.type === "text"
+      ) {
+        streamed.push(update.content.text);
+      }
+    });
 
     client.setOnReadTextFile(async (params) => {
       calls.push("read");
@@ -89,5 +99,12 @@ suite("Client capabilities", () => {
       "kill",
       "release",
     ]);
+
+    // The agent offers allow_always before allow_once; auto-approval must take
+    // the narrower grant.
+    assert.ok(
+      streamed.includes("permission:once"),
+      `expected allow_once approval, got ${JSON.stringify(streamed)}`
+    );
   });
 });

@@ -32,7 +32,7 @@ export class MockACPServer {
   private nextClientRequestId = 10_000;
   private pendingClientRequests = new Map<
     number,
-    { resolve: () => void; reject: (error: Error) => void }
+    { resolve: (result: unknown) => void; reject: (error: Error) => void }
   >();
 
   constructor(demoMode: DemoMode = "default") {
@@ -90,7 +90,7 @@ export class MockACPServer {
     this.pendingClientRequests.delete(id);
 
     if (response.error === undefined) {
-      pendingRequest.resolve();
+      pendingRequest.resolve(response.result);
     } else {
       pendingRequest.reject(new Error(JSON.stringify(response.error)));
     }
@@ -307,9 +307,9 @@ export class MockACPServer {
   private requestClient(
     method: string,
     params: Record<string, unknown>
-  ): Promise<void> {
+  ): Promise<unknown> {
     const id = this.nextClientRequestId++;
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<unknown>((resolve, reject) => {
       this.pendingClientRequests.set(id, { resolve, reject });
       this.stdout.push(
         `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`
@@ -319,6 +319,25 @@ export class MockACPServer {
 
   private async demoCapabilities(sessionId: string): Promise<void> {
     const terminalId = "mock-terminal";
+    const permission = (await this.requestClient("session/request_permission", {
+      sessionId,
+      toolCall: { toolCallId: "tool-1", title: "Write file", kind: "edit" },
+      options: [
+        { optionId: "always", name: "Always allow", kind: "allow_always" },
+        { optionId: "once", name: "Allow once", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    })) as acp.RequestPermissionResponse;
+    const outcome = permission.outcome;
+    this.sendSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: `permission:${
+          outcome.outcome === "selected" ? outcome.optionId : outcome.outcome
+        }`,
+      },
+    });
     await this.requestClient("fs/read_text_file", {
       sessionId,
       path: "/workspace/input.ts",
