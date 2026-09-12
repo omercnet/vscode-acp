@@ -511,7 +511,8 @@ export function createMockProcess(
   mockProcess.kill = () => {
     server.kill();
     killed = true;
-    mockProcess.emit("exit", 0);
+    // Real child processes report exit on a later turn of the event loop.
+    setImmediate(() => mockProcess.emit("exit", 0));
     return true;
   };
 

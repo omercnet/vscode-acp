@@ -302,5 +302,20 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.isConnected(), false);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
+
+    test("keeps the new connection usable when reconnecting right after dispose", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      client.dispose();
+      await client.connect();
+      // Let the killed process deliver its exit event.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(client.getState(), "connected");
+      const session = await client.newSession("/test/dir");
+      assert.ok(session.sessionId);
+    });
   });
 });
