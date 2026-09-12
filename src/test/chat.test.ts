@@ -495,6 +495,42 @@ suite("ChatViewProvider", () => {
     });
   });
 
+  test("restores session metadata when a replacement chat fails", async () => {
+    const metadata = { modes: null, models: null, commands: [] };
+    class FailingReplacementClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async newSession(): Promise<void> {
+        throw new Error("Replacement session failed");
+      }
+
+      getSessionMetadata() {
+        return metadata;
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new FailingReplacementClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const handleNewChat = Reflect.get(provider, "handleNewChat") as (
+      this: ChatViewProvider
+    ) => Promise<void>;
+
+    await handleNewChat.call(provider);
+
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "sessionMetadata",
+      ...metadata,
+    });
+  });
   suite("Client capability handlers", () => {
     test("reads files using the protocol's 1-based line offset", async () => {
       const provider = new ChatViewProvider(

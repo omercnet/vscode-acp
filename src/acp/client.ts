@@ -108,6 +108,7 @@ export class ACPClient {
     acp.SessionId,
     acp.SessionConfigOption[]
   >();
+  private pendingModeBySession = new Map<acp.SessionId, acp.SessionModeId>();
   private connectionGeneration = 0;
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
@@ -275,6 +276,7 @@ export class ACPClient {
         this.pendingCommandsBySession.clear();
         this.pendingConfigOptionsBySession.clear();
         this.pendingSessionRequestGeneration = null;
+        this.pendingModeBySession.clear();
         this.activePrompt = null;
         this.setState("disconnected");
       });
@@ -455,12 +457,12 @@ export class ACPClient {
           update.configOptions
         );
       }
-    } else if (
-      update.sessionUpdate === "current_mode_update" &&
-      isCurrentSession &&
-      this.sessionMetadata?.modes
-    ) {
-      this.sessionMetadata.modes.currentModeId = update.currentModeId;
+    } else if (update.sessionUpdate === "current_mode_update") {
+      if (isCurrentSession && this.sessionMetadata?.modes) {
+        this.sessionMetadata.modes.currentModeId = update.currentModeId;
+      } else if (this.pendingSessionRequestGeneration !== null) {
+        this.pendingModeBySession.set(params.sessionId, update.currentModeId);
+      }
     }
 
     if (!isCurrentSession) {
@@ -486,17 +488,21 @@ export class ACPClient {
     this.pendingSessionRequestGeneration = requestGeneration;
     this.pendingCommandsBySession.clear();
     this.pendingConfigOptionsBySession.clear();
+    this.pendingModeBySession.clear();
+    const replacedSessionId = this.currentSessionId;
+    const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
 
     const replacedPromptSessionId = this.activePrompt?.sessionId;
-    if (replacedPromptSessionId) {
-      await connection.agent.notify(acp.methods.agent.session.cancel, {
-        sessionId: replacedPromptSessionId,
-      });
-    }
 
     try {
+      if (replacedPromptSessionId) {
+        await connection.agent.notify(acp.methods.agent.session.cancel, {
+          sessionId: replacedPromptSessionId,
+        });
+      }
+
       const response = await connection.agent.request(
         acp.methods.agent.session.new,
         {
@@ -515,9 +521,18 @@ export class ACPClient {
       const bufferedConfigOptions = this.pendingConfigOptionsBySession.get(
         response.sessionId
       );
+      const modes = response.modes ?? null;
+      const bufferedMode = this.pendingModeBySession.get(response.sessionId);
+      if (
+        modes &&
+        bufferedMode &&
+        modes.availableModes.some((mode) => mode.id === bufferedMode)
+      ) {
+        modes.currentModeId = bufferedMode;
+      }
       this.currentSessionId = response.sessionId;
       this.sessionMetadata = {
-        modes: response.modes ?? null,
+        modes,
         models: getModelState(
           response.configOptions === undefined
             ? bufferedConfigOptions
@@ -528,13 +543,41 @@ export class ACPClient {
       this.pendingSessionRequestGeneration = null;
       this.pendingCommandsBySession.clear();
       this.pendingConfigOptionsBySession.clear();
+      this.pendingModeBySession.clear();
 
       return response;
     } catch (error) {
       if (this.pendingSessionRequestGeneration === requestGeneration) {
+        if (
+          !connection.signal.aborted &&
+          replacedSessionId &&
+          replacedSessionMetadata
+        ) {
+          const commands = this.pendingCommandsBySession.get(replacedSessionId);
+          const configOptions =
+            this.pendingConfigOptionsBySession.get(replacedSessionId);
+          const modeId = this.pendingModeBySession.get(replacedSessionId);
+          if (commands) {
+            replacedSessionMetadata.commands = commands;
+          }
+          if (configOptions) {
+            replacedSessionMetadata.models = getModelState(configOptions);
+          }
+          if (
+            modeId &&
+            replacedSessionMetadata.modes?.availableModes.some(
+              (mode) => mode.id === modeId
+            )
+          ) {
+            replacedSessionMetadata.modes.currentModeId = modeId;
+          }
+          this.currentSessionId = replacedSessionId;
+          this.sessionMetadata = replacedSessionMetadata;
+        }
         this.pendingSessionRequestGeneration = null;
         this.pendingCommandsBySession.clear();
         this.pendingConfigOptionsBySession.clear();
+        this.pendingModeBySession.clear();
       }
       throw error;
     }
@@ -661,6 +704,7 @@ export class ACPClient {
     this.sessionMetadata = null;
     this.pendingCommandsBySession.clear();
     this.pendingConfigOptionsBySession.clear();
+    this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
     this.activePrompt = null;
     this.setState("disconnected");

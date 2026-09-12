@@ -288,6 +288,24 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual((await prompt).stopReason, "cancelled");
     });
 
+    test("restores the current session when its replacement fails", async () => {
+      demoMode = "replacement-failure";
+      await client.connect();
+      await client.newSession("/test/dir");
+      const previousMetadata = client.getSessionMetadata();
+
+      await assert.rejects(
+        () => client.newSession("/test/dir"),
+        /Replacement session failed/
+      );
+
+      assert.deepStrictEqual(client.getSessionMetadata(), previousMetadata);
+      assert.strictEqual(
+        (await client.sendMessage("Still active")).stopReason,
+        "end_turn"
+      );
+    });
+
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
         await client.newSession("/test/dir");

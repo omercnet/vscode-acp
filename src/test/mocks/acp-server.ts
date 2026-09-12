@@ -19,6 +19,7 @@ export type DemoMode =
   | "session-isolation"
   | "mode-update"
   | "permission"
+  | "replacement-failure"
   | "plan"
   | "default";
 
@@ -171,6 +172,10 @@ export class MockACPServer {
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
     let previousSession: MockSession | undefined;
+    if (this.demoMode === "replacement-failure" && this.sessionCounter === 1) {
+      this.sendError(id, -32000, "Replacement session failed");
+      return;
+    }
     for (const session of this.sessions.values()) {
       previousSession = session;
     }

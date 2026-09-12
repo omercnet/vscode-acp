@@ -726,6 +726,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       console.error("[Chat] Failed to create new session:", error);
+      this.hasSession = this.acpClient.getSessionMetadata() !== null;
+      this.sendSessionMetadata();
     }
   }
 
