@@ -79,6 +79,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push({
     dispose: () => {
+      chatProvider?.dispose();
       acpClient?.dispose();
     },
   });
@@ -121,5 +122,6 @@ function updateStatusBar(
 
 export function deactivate() {
   console.log("VSCode ACP extension deactivating");
+  chatProvider?.dispose();
   acpClient?.dispose();
 }

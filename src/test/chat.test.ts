@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
 import type { ACPClient } from "../acp/client";
+import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -14,6 +15,7 @@ interface MockMemento {
 interface MockACPClient {
   setAgent: (config: any) => void;
   getAgentId: () => string;
+  getCurrentSessionId: () => string | null;
   setOnStateChange: (callback: any) => () => void;
   setOnSessionUpdate: (callback: any) => () => void;
   setOnStderr: (callback: any) => () => void;
@@ -24,6 +26,7 @@ interface MockACPClient {
   setOnWaitForTerminalExit: (callback: any) => void;
   setOnKillTerminalCommand: (callback: any) => void;
   setOnReleaseTerminal: (callback: any) => void;
+  setOnRequestPermission: (callback: any) => void;
   isConnected: () => boolean;
   connect: () => Promise<void>;
   newSession: (dir: string) => Promise<void>;
@@ -84,15 +87,31 @@ class TestACPClient implements MockACPClient {
   private agentIdValue = "test-agent";
   private setModeCallCount = 0;
   private setModelCallCount = 0;
+  private stateChangeCallback:
+    | ((state: "disconnected" | "connecting" | "connected" | "error") => void)
+    | null = null;
   public lastSetModeId: string | null = null;
   public lastSetModelId: string | null = null;
+  public currentSessionId: string | null = "test-session";
 
   setAgent(): void {}
   getAgentId(): string {
     return this.agentIdValue;
   }
-  setOnStateChange(): () => void {
-    return () => {};
+  getCurrentSessionId(): string | null {
+    return this.currentSessionId;
+  }
+  setOnStateChange(
+    callback: (
+      state: "disconnected" | "connecting" | "connected" | "error"
+    ) => void
+  ): () => void {
+    this.stateChangeCallback = callback;
+    return () => {
+      if (this.stateChangeCallback === callback) {
+        this.stateChangeCallback = null;
+      }
+    };
   }
   setOnSessionUpdate(): () => void {
     return () => {};
@@ -107,6 +126,7 @@ class TestACPClient implements MockACPClient {
   setOnWaitForTerminalExit(): void {}
   setOnKillTerminalCommand(): void {}
   setOnReleaseTerminal(): void {}
+  setOnRequestPermission(): void {}
   isConnected(): boolean {
     return false;
   }
@@ -147,6 +167,52 @@ class TestACPClient implements MockACPClient {
     this.lastSetModeId = null;
     this.lastSetModelId = null;
   }
+
+  emitStateChange(
+    state: "disconnected" | "connecting" | "connected" | "error"
+  ): void {
+    this.stateChangeCallback?.(state);
+  }
+}
+
+interface FakeWebview {
+  view: {
+    webview: {
+      postMessage: (message: Record<string, unknown>) => Promise<boolean>;
+    };
+  };
+  messages: Record<string, unknown>[];
+}
+
+function createFakeWebview(
+  delivery: boolean | Promise<boolean> = true
+): FakeWebview {
+  const messages: Record<string, unknown>[] = [];
+  return {
+    view: {
+      webview: {
+        postMessage: async (message: Record<string, unknown>) => {
+          messages.push(message);
+          return delivery;
+        },
+      },
+    },
+    messages,
+  };
+}
+
+function makePermissionRequest(
+  overrides: Partial<RequestPermissionRequest> = {}
+): RequestPermissionRequest {
+  return {
+    sessionId: "test-session",
+    toolCall: { toolCallId: "tool-1", title: "Write file" },
+    options: [
+      { optionId: "allow", name: "Allow", kind: "allow_once" },
+      { optionId: "deny", name: "Deny", kind: "reject_once" },
+    ],
+    ...overrides,
+  };
 }
 
 suite("ChatViewProvider", () => {
@@ -591,6 +657,456 @@ suite("ChatViewProvider", () => {
         exitStatus: null,
       });
       assert.ok(Buffer.byteLength(response.output, "utf8") <= 3);
+    });
+  });
+
+  suite("Permission Requests", () => {
+    test("should cancel immediately when no webview is attached", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+    });
+
+    test("should cancel immediately when no options are provided", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest({ options: [] })
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 0);
+    });
+
+    test("should reject a permission request from a stale session", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+      acpClient.currentSessionId = "new-session";
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest({ sessionId: "old-session" })
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 0);
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+    });
+
+    test("should cancel immediately when webview delivery fails", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview(false);
+      (provider as any).view = fakeWebview.view;
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 1);
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+    });
+
+    test("should time out even when webview delivery never settles", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const neverDelivered = new Promise<boolean>(() => {});
+      const fakeWebview = createFakeWebview(neverDelivered);
+      (provider as any).view = fakeWebview.view;
+      (provider as any).permissionRequestTimeoutMs = 10;
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 2);
+      assert.strictEqual(
+        fakeWebview.messages[1].type,
+        "permissionRequestExpired"
+      );
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+    });
+
+    test("should post a mapped permissionRequest message to the webview", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.strictEqual(fakeWebview.messages.length, 1);
+      const sent = fakeWebview.messages[0];
+      assert.strictEqual(sent.type, "permissionRequest");
+      assert.strictEqual(sent.title, "Write file");
+      assert.deepStrictEqual(sent.options, [
+        { id: "allow", label: "Allow" },
+        { id: "deny", label: "Deny" },
+      ]);
+
+      (provider as any).handlePermissionResponse({
+        requestId: sent.requestId,
+        cancelled: true,
+      });
+      await promise;
+    });
+
+    test("should resolve with the selected option when the webview responds", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+      const requestId = fakeWebview.messages[0].requestId;
+
+      (provider as any).handlePermissionResponse({
+        requestId,
+        optionId: "allow",
+      });
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "selected", optionId: "allow" },
+      });
+    });
+
+    test("should resolve with cancelled when the user cancels", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+      const requestId = fakeWebview.messages[0].requestId;
+
+      (provider as any).handlePermissionResponse({
+        requestId,
+        cancelled: true,
+      });
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+    });
+
+    test("should resolve with cancelled on a malformed response", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+      const requestId = fakeWebview.messages[0].requestId;
+
+      // Neither `cancelled` nor `optionId` set: must never hang or auto-approve.
+      (provider as any).handlePermissionResponse({ requestId });
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+    });
+
+    test("should resolve with cancelled for an option that was not offered", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+      const requestId = fakeWebview.messages[0].requestId;
+
+      (provider as any).handlePermissionResponse({
+        requestId,
+        optionId: "not-offered",
+      });
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+    });
+
+    test("should ignore a response for an unknown or already-settled requestId", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const messageCount = fakeWebview.messages.length;
+      (provider as any).handlePermissionResponse({
+        requestId: "does-not-exist",
+        optionId: "allow",
+      });
+
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.strictEqual(fakeWebview.messages.length, messageCount);
+    });
+
+    test("should track concurrent requests independently", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const p1 = (provider as any).handleRequestPermission(
+        makePermissionRequest({ toolCall: { toolCallId: "tc-1" } })
+      );
+      const p2 = (provider as any).handleRequestPermission(
+        makePermissionRequest({ toolCall: { toolCallId: "tc-2" } })
+      );
+
+      assert.strictEqual(fakeWebview.messages.length, 2);
+      const id1 = fakeWebview.messages[0].requestId as string;
+      const id2 = fakeWebview.messages[1].requestId as string;
+      assert.notStrictEqual(id1, id2);
+
+      // Resolve the second request first; the first must remain unaffected.
+      (provider as any).handlePermissionResponse({
+        requestId: id2,
+        optionId: "allow",
+      });
+      (provider as any).handlePermissionResponse({
+        requestId: id1,
+        cancelled: true,
+      });
+
+      const [r1, r2] = await Promise.all([p1, p2]);
+      assert.deepStrictEqual(r1, { outcome: { outcome: "cancelled" } });
+      assert.deepStrictEqual(r2, {
+        outcome: { outcome: "selected", optionId: "allow" },
+      });
+    });
+
+    test("should time out, resolve cancelled, and notify the webview", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+      (provider as any).permissionRequestTimeoutMs = 20;
+
+      const response = await (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      const expired = fakeWebview.messages.find(
+        (m) => m.type === "permissionRequestExpired"
+      );
+      assert.ok(expired, "expected a permissionRequestExpired notification");
+    });
+
+    test("should ignore a late response that arrives after timeout", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+      (provider as any).permissionRequestTimeoutMs = 10;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+      const requestId = fakeWebview.messages[0].requestId;
+      const response = await promise;
+      const messageCount = fakeWebview.messages.length;
+
+      (provider as any).handlePermissionResponse({
+        requestId,
+        optionId: "allow",
+      });
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.strictEqual(fakeWebview.messages.length, messageCount);
+    });
+
+    test("dispose() should resolve pending requests as cancelled, never rejected", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      provider.dispose();
+
+      const response = await promise;
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      const expired = fakeWebview.messages.find(
+        (m) => m.type === "permissionRequestExpired"
+      );
+      assert.ok(expired, "expected a permissionRequestExpired notification");
+    });
+
+    test("changing agents should cancel all pending permission requests", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      (provider as any).handleAgentChange("opencode");
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.ok(
+        fakeWebview.messages.some(
+          (message) => message.type === "permissionRequestExpired"
+        )
+      );
+    });
+
+    test("starting a new chat should cancel all pending permission requests", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      await (provider as any).handleNewChat();
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.ok(
+        fakeWebview.messages.some(
+          (message) => message.type === "permissionRequestExpired"
+        )
+      );
+    });
+
+    test("clearing chat should cancel all pending permission requests", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      (provider as any).handleClearChat();
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.ok(
+        fakeWebview.messages.some(
+          (message) => message.type === "permissionRequestExpired"
+        )
+      );
+    });
+
+    test("disconnecting should cancel all pending permission requests", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      (provider as any).view = fakeWebview.view;
+
+      const promise = (provider as any).handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      acpClient.emitStateChange("disconnected");
+
+      assert.deepStrictEqual(await promise, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual((provider as any).permissionRequests.size, 0);
+      assert.ok(
+        fakeWebview.messages.some(
+          (message) => message.type === "permissionRequestExpired"
+        )
+      );
     });
   });
 });

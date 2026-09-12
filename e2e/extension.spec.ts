@@ -11,7 +11,7 @@ test.describe("VSCode ACP Extension", () => {
     await window.waitForTimeout(2000);
 
     const acpActivityItem = window.locator(
-      '.action-item[aria-label*="VSCode ACP"]'
+      '.action-label[aria-label="VSCode ACP"]'
     );
     await expect(acpActivityItem).toBeVisible({ timeout: 10000 });
   });

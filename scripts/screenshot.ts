@@ -1,11 +1,12 @@
 #!/usr/bin/env npx tsx
 import { _electron as electron } from "@playwright/test";
 import { join } from "path";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, rm, writeFile } from "fs/promises";
 import { findVSCodeExecutable, cmdOrCtrl, PROJECT_ROOT } from "../e2e/utils";
 
 const SCREENSHOTS_DIR = join(PROJECT_ROOT, "screenshots");
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data");
+const EXTENSIONS_DIR = join(PROJECT_ROOT, ".vscode-test/extensions-screenshot");
 
 const TIMING = {
   VSCODE_INIT: 5000,
@@ -26,6 +27,8 @@ async function takeScreenshot() {
 
   const settingsDir = join(USER_DATA_DIR, "User");
   await mkdir(settingsDir, { recursive: true });
+  await rm(EXTENSIONS_DIR, { recursive: true, force: true });
+  await mkdir(EXTENSIONS_DIR, { recursive: true });
   await writeFile(
     join(settingsDir, "settings.json"),
     JSON.stringify({
@@ -42,7 +45,7 @@ async function takeScreenshot() {
     args: [
       "--extensionDevelopmentPath=" + PROJECT_ROOT,
       "--user-data-dir=" + USER_DATA_DIR,
-      "--disable-extensions",
+      "--extensions-dir=" + EXTENSIONS_DIR,
       "--disable-gpu-sandbox",
       "--no-sandbox",
       "--disable-workspace-trust",
@@ -74,7 +77,7 @@ async function takeScreenshot() {
     const modifier = cmdOrCtrl();
     await window.keyboard.press(`${modifier}+Shift+P`);
     await window.waitForTimeout(TIMING.COMMAND_PALETTE_OPEN);
-    await window.keyboard.type("View: Focus on Chat View");
+    await window.keyboard.type("VSCode ACP: Focus on Chat View");
     await window.waitForTimeout(TIMING.COMMAND_TYPE);
     await window.keyboard.press("Enter");
     await window.waitForTimeout(TIMING.COMMAND_EXECUTE);

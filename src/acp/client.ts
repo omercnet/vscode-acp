@@ -165,6 +165,10 @@ export class ACPClient {
     return this.agentConfig.id;
   }
 
+  getCurrentSessionId(): string | null {
+    return this.isConnected() ? this.currentSessionId : null;
+  }
+
   setOnStateChange(callback: StateChangeCallback): () => void {
     this.stateChangeListeners.add(callback);
     return () => this.stateChangeListeners.delete(callback);

@@ -75,6 +75,15 @@ function createWebviewHTML(): string {
     <select id="mode-selector" style="display: none;"></select>
     <select id="model-selector" style="display: none;"></select>
   </div>
+  
+  <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" tabindex="-1">
+    <div class="permission-modal-content">
+      <h3 class="permission-title" id="permission-title">Permission Required</h3>
+      <pre class="permission-content"></pre>
+      <div class="permission-options"></div>
+      <button class="permission-cancel-btn">Cancel</button>
+    </div>
+  </div>
 </body>
 </html>`;
 }
@@ -1336,6 +1345,406 @@ suite("Webview", () => {
       const result = renderDiff(undefined, null, manyLines);
       assert.ok(result.includes("diff-truncated"));
       assert.ok(result.includes("500"));
+    });
+  });
+
+  suite("Permission Modal", () => {
+    let dom: JSDOM;
+    let document: Document;
+    let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
+    let controller: WebviewController;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML(), { runScripts: "dangerously" });
+      document = dom.window.document;
+      mockVsCode = createMockVsCodeApi();
+      controller = initWebview(
+        mockVsCode,
+        document,
+        dom.window as unknown as Window
+      );
+      mockVsCode._clearMessages();
+    });
+
+    test("showPermissionModal displays modal with options", () => {
+      const options = [
+        { id: "allow", label: "Allow" },
+        { id: "deny", label: "Deny" },
+      ];
+
+      controller.showPermissionModal(
+        "req-123",
+        "File Access",
+        "Read /path/to/file",
+        options
+      );
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "File Access");
+
+      const content = modal?.querySelector(".permission-content");
+      assert.strictEqual(content?.textContent, "Read /path/to/file");
+
+      const optionBtns = modal?.querySelectorAll(".permission-option-btn");
+      assert.strictEqual(optionBtns?.length, 2);
+    });
+
+    test("showPermissionModal handles object content", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal(
+        "req-456",
+        "Tool Call",
+        { command: "ls", args: ["-la"] },
+        options
+      );
+
+      const modal = document.getElementById("permission-modal");
+      const content = modal?.querySelector(".permission-content");
+      const text = content?.textContent || "";
+      assert.ok(text.includes("command"));
+      assert.ok(text.includes("ls"));
+    });
+
+    test("hidePermissionModal hides the modal", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal("req-789", "Test", "content", options);
+      controller.hidePermissionModal();
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(!modal?.classList.contains("visible"));
+    });
+
+    test("clicking option sends permissionResponse message", () => {
+      const options = [{ id: "allow", label: "Allow" }];
+
+      controller.showPermissionModal("req-100", "Test", "content", options);
+
+      const optionBtn = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+      optionBtn?.click();
+
+      const messages = mockVsCode._getMessages();
+      const response = messages.find(
+        (m: unknown) => (m as { type: string }).type === "permissionResponse"
+      );
+      assert.ok(response);
+      assert.strictEqual(
+        (response as { requestId: string }).requestId,
+        "req-100"
+      );
+      assert.strictEqual((response as { optionId: string }).optionId, "allow");
+    });
+
+    test("cancelPermission sends cancelled response", () => {
+      const options = [{ id: "ok", label: "OK" }];
+
+      controller.showPermissionModal("req-200", "Test", "content", options);
+      controller.cancelPermission();
+
+      const messages = mockVsCode._getMessages();
+      const response = messages.find(
+        (m: unknown) => (m as { type: string }).type === "permissionResponse"
+      );
+      assert.ok(response);
+      assert.strictEqual(
+        (response as { requestId: string }).requestId,
+        "req-200"
+      );
+      assert.strictEqual((response as { cancelled: boolean }).cancelled, true);
+    });
+
+    test("handleMessage shows modal on permissionRequest", () => {
+      controller.handleMessage({
+        type: "permissionRequest",
+        requestId: "req-300",
+        title: "Execute Command",
+        rawInput: { command: "npm test" },
+        options: [
+          { id: "run", label: "Run" },
+          { id: "skip", label: "Skip" },
+        ],
+      });
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "Execute Command");
+    });
+
+    test("queues a concurrent request and shows it after the first is cancelled", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+      controller.showPermissionModal("req-2", "Second", "c2", [
+        { id: "b", label: "B" },
+      ]);
+
+      const modal = document.getElementById("permission-modal");
+      let title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "First");
+      assert.ok(modal?.classList.contains("visible"));
+
+      controller.cancelPermission();
+
+      title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "Second");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const messages = mockVsCode._getMessages() as Array<{
+        requestId: string;
+        cancelled?: boolean;
+      }>;
+      assert.strictEqual(messages.length, 1);
+      assert.strictEqual(messages[0].requestId, "req-1");
+      assert.strictEqual(document.activeElement, modal);
+      controller.cancelPermission();
+      assert.strictEqual(messages.length, 1);
+      assert.strictEqual(title?.textContent, "Second");
+      document.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(
+        document.activeElement,
+        modal?.querySelector(".permission-option-btn")
+      );
+      controller.cancelPermission();
+    });
+
+    test("queues a concurrent request and shows it after the first option is selected", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "allow", label: "Allow" },
+      ]);
+      controller.showPermissionModal("req-2", "Second", "c2", [
+        { id: "b", label: "B" },
+      ]);
+
+      const optionBtn = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+      optionBtn?.click();
+
+      const modal = document.getElementById("permission-modal");
+      const title = modal?.querySelector(".permission-title");
+      assert.strictEqual(title?.textContent, "Second");
+      assert.ok(modal?.classList.contains("visible"));
+
+      const messages = mockVsCode._getMessages() as Array<{
+        requestId: string;
+        optionId?: string;
+      }>;
+      assert.strictEqual(messages.length, 1);
+      assert.strictEqual(messages[0].requestId, "req-1");
+      assert.strictEqual(messages[0].optionId, "allow");
+      controller.hidePermissionModal();
+    });
+
+    test("does not let a repeated click approve the next queued request", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "allow-1", label: "Allow first" },
+      ]);
+      controller.showPermissionModal("req-2", "Second", "c2", [
+        { id: "allow-2", label: "Allow second" },
+      ]);
+
+      const firstButton = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+      firstButton.click();
+
+      const secondButton = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+      assert.strictEqual(secondButton.disabled, true);
+      secondButton.click();
+
+      const responses = mockVsCode._getMessages() as Array<{
+        requestId: string;
+        optionId?: string;
+      }>;
+      assert.deepStrictEqual(responses, [
+        { type: "permissionResponse", requestId: "req-1", optionId: "allow-1" },
+      ]);
+      assert.strictEqual(
+        document.querySelector(".permission-title")?.textContent,
+        "Second"
+      );
+
+      controller.hidePermissionModal();
+    });
+
+    test("permissionRequestExpired hides the currently displayed modal without responding", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+
+      controller.handleMessage({
+        type: "permissionRequestExpired",
+        requestId: "req-1",
+      });
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(!modal?.classList.contains("visible"));
+      assert.strictEqual(mockVsCode._getMessages().length, 0);
+      assert.ok(
+        document
+          .getElementById("messages")
+          ?.textContent?.includes("Permission request expired and was denied.")
+      );
+    });
+
+    test("permissionRequestExpired removes a queued request without disturbing the visible modal", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+      controller.showPermissionModal("req-2", "Second", "c2", [
+        { id: "b", label: "B" },
+      ]);
+
+      controller.handleMessage({
+        type: "permissionRequestExpired",
+        requestId: "req-2",
+      });
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(modal?.classList.contains("visible"));
+      assert.strictEqual(
+        modal?.querySelector(".permission-title")?.textContent,
+        "First"
+      );
+
+      controller.cancelPermission();
+
+      assert.ok(!modal?.classList.contains("visible"));
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-1",
+          cancelled: true,
+        },
+      ]);
+    });
+
+    test("chatCleared closes the visible modal and drops the queue", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+      controller.showPermissionModal("req-2", "Second", "c2", [
+        { id: "b", label: "B" },
+      ]);
+
+      controller.handleMessage({ type: "chatCleared" });
+
+      const modal = document.getElementById("permission-modal");
+      assert.ok(!modal?.classList.contains("visible"));
+      controller.cancelPermission();
+      assert.strictEqual(mockVsCode._getMessages().length, 0);
+    });
+
+    test("Escape cancels the visible request and restores previous focus", () => {
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      input.focus();
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+
+      document.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+
+      assert.strictEqual(document.activeElement, input);
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-1",
+          cancelled: true,
+        },
+      ]);
+    });
+
+    test("clicking the backdrop cancels the visible request", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+      ]);
+      const modal = document.getElementById("permission-modal") as HTMLElement;
+
+      modal.dispatchEvent(
+        new dom.window.MouseEvent("click", { bubbles: true, cancelable: true })
+      );
+
+      assert.ok(!modal.classList.contains("visible"));
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-1",
+          cancelled: true,
+        },
+      ]);
+    });
+
+    test("Tab wraps focus from the last to the first focusable element", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+        { id: "b", label: "B" },
+      ]);
+
+      const modal = document.getElementById("permission-modal") as HTMLElement;
+      const cancelBtn = modal.querySelector(
+        ".permission-cancel-btn"
+      ) as HTMLButtonElement;
+      const firstOptionBtn = modal.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+
+      cancelBtn.focus();
+      const event = new dom.window.KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(event);
+
+      assert.strictEqual(document.activeElement, firstOptionBtn);
+    });
+
+    test("Shift+Tab wraps focus from the first to the last focusable element", () => {
+      controller.showPermissionModal("req-1", "First", "c1", [
+        { id: "a", label: "A" },
+        { id: "b", label: "B" },
+      ]);
+
+      const modal = document.getElementById("permission-modal") as HTMLElement;
+      const cancelBtn = modal.querySelector(
+        ".permission-cancel-btn"
+      ) as HTMLButtonElement;
+      const firstOptionBtn = modal.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+
+      firstOptionBtn.focus();
+      const event = new dom.window.KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(event);
+
+      assert.strictEqual(document.activeElement, cancelBtn);
     });
   });
 });
