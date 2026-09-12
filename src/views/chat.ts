@@ -641,6 +641,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set mode:", error);
+      this.sendSessionMetadata();
     }
   }
 
@@ -651,6 +652,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set model:", error);
+      this.sendSessionMetadata();
     }
   }
 
