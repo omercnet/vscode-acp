@@ -180,14 +180,17 @@ interface FakeWebview {
     webview: {
       postMessage: (message: Record<string, unknown>) => Promise<boolean>;
     };
+    show: (preserveFocus?: boolean) => void;
   };
   messages: Record<string, unknown>[];
+  shownWith: (boolean | undefined)[];
 }
 
 function createFakeWebview(
   delivery: boolean | Promise<boolean> = true
 ): FakeWebview {
   const messages: Record<string, unknown>[] = [];
+  const shownWith: (boolean | undefined)[] = [];
   return {
     view: {
       webview: {
@@ -196,8 +199,12 @@ function createFakeWebview(
           return delivery;
         },
       },
+      show: (preserveFocus?: boolean) => {
+        shownWith.push(preserveFocus);
+      },
     },
     messages,
+    shownWith,
   };
 }
 
@@ -774,6 +781,9 @@ suite("ChatViewProvider", () => {
         { id: "allow", label: "Allow" },
         { id: "deny", label: "Deny" },
       ]);
+      // A prompt posted to a collapsed sidebar is delivered but never seen, so
+      // the view is revealed without taking focus away from the editor.
+      assert.deepStrictEqual(fakeWebview.shownWith, [true]);
 
       (provider as any).handlePermissionResponse({
         requestId: sent.requestId,

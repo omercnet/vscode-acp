@@ -581,6 +581,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     };
 
+    // The view is kept alive while hidden, so a prompt posted to a collapsed
+    // sidebar is delivered but never seen and would silently expire. Reveal it
+    // without stealing focus from the editor.
+    try {
+      this.view.show?.(true);
+    } catch (error) {
+      console.error("[Chat] Failed to reveal the chat view", error);
+    }
+
     try {
       const delivery = this.view.webview.postMessage({
         type: "permissionRequest",
