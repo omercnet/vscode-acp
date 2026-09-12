@@ -48,6 +48,21 @@ test.describe("Permission Request Modal", () => {
     await expect(frame.locator(".permission-title")).toHaveText("Write File");
     await expect(frame.locator(".permission-option-btn")).toHaveCount(3);
 
+    // The prompt opens inert: the dialog, not an approval button, holds focus
+    // and every agent-supplied option is disabled, so input aimed at whatever
+    // was on screen before cannot decide an unread request.
+    await expect(
+      frame.locator(".permission-option-btn").first()
+    ).toBeDisabled();
+    expect(await frame.evaluate(() => document.activeElement?.id)).toBe(
+      "permission-modal"
+    );
+    await expect(frame.locator(".permission-cancel-btn")).toBeEnabled();
+
+    await expect(frame.locator(".permission-option-btn").first()).toBeEnabled({
+      timeout: 1500,
+    });
+
     const sidebarLocator = window.locator(
       ".split-view-view.visible .pane-body"
     );
@@ -143,7 +158,9 @@ test.describe("Permission Request Modal", () => {
     const modal = frame.locator("#permission-modal");
     await expect(modal).toHaveClass(/visible/);
 
-    await frame.locator(".permission-option-btn").first().press("Escape");
+    // Escape reaches the dialog while its options are still guarded: denial
+    // must never be delayed by the repeat-input protection.
+    await frame.locator("#permission-modal").press("Escape");
 
     await expect(modal).not.toHaveClass(/visible/);
     await expect(frame.locator("#input")).toBeFocused();

@@ -93,7 +93,12 @@ export interface ExtensionMessage {
   options?: PermissionOption[];
 }
 
-const QUEUED_PERMISSION_GUARD_MS = 500;
+/**
+ * How long a freshly shown permission prompt keeps its agent-supplied options
+ * inert, so held keys or double clicks aimed at the previous screen cannot
+ * decide a request the user has not read yet.
+ */
+const PERMISSION_GUARD_MS = 500;
 
 export function escapeHtml(str: string): string {
   return str
@@ -1273,8 +1278,7 @@ export class WebviewController {
     requestId: string,
     title: string | undefined,
     content: unknown,
-    options: PermissionOption[],
-    fromQueue = false
+    options: PermissionOption[]
   ): void {
     this.pendingPermissionRequestId = requestId;
     this.previouslyFocusedElement = this.doc.activeElement as HTMLElement;
@@ -1288,7 +1292,11 @@ export class WebviewController {
       this.win.clearTimeout(this.permissionUnlockTimer);
       this.permissionUnlockTimer = null;
     }
-    this.permissionControlsLocked = fromQueue;
+    // Every prompt starts locked: a key held down or a double click aimed at
+    // whatever was on screen before must never land on an agent-supplied
+    // option. Denial (Cancel/Escape/backdrop) stays available throughout,
+    // because failing closed is always safe.
+    this.permissionControlsLocked = true;
 
     const modal = this.elements.permissionModal;
 
@@ -1309,7 +1317,7 @@ export class WebviewController {
       const btn = this.doc.createElement("button");
       btn.className = "permission-option-btn";
       btn.dataset.optionId = opt.id;
-      btn.disabled = fromQueue;
+      btn.disabled = true;
       const label = this.doc.createElement("span");
       label.className = "option-label";
       label.textContent = opt.label;
@@ -1335,36 +1343,18 @@ export class WebviewController {
     };
     this.doc.addEventListener("keydown", this.permissionKeydownHandler);
 
-    const cancelBtn = modal.querySelector(
-      ".permission-cancel-btn"
-    ) as HTMLButtonElement | null;
-    if (cancelBtn) {
-      cancelBtn.disabled = fromQueue;
-    }
-    const firstBtn = optionsEl.querySelector(
-      "button"
-    ) as HTMLButtonElement | null;
-    if (fromQueue) {
-      this.permissionUnlockTimer = this.win.setTimeout(() => {
-        if (this.pendingPermissionRequestId === requestId) {
-          this.setPermissionControlsLocked(false);
-        }
-      }, QUEUED_PERMISSION_GUARD_MS);
-    }
+    this.permissionUnlockTimer = this.win.setTimeout(() => {
+      if (this.pendingPermissionRequestId === requestId) {
+        this.setPermissionControlsLocked(false);
+      }
+    }, PERMISSION_GUARD_MS);
 
-    const focusTarget = fromQueue ? modal : firstBtn || cancelBtn;
-    if (focusTarget) {
-      focusTarget.focus();
-    } else {
-      modal.focus();
-    }
+    modal.focus();
   }
 
   private setPermissionControlsLocked(locked: boolean): void {
     this.elements.permissionModal
-      .querySelectorAll<HTMLButtonElement>(
-        ".permission-option-btn, .permission-cancel-btn"
-      )
+      .querySelectorAll<HTMLButtonElement>(".permission-option-btn")
       .forEach((button) => {
         button.disabled = locked;
       });
@@ -1446,8 +1436,7 @@ export class WebviewController {
         next.requestId,
         next.title,
         next.content,
-        next.options,
-        true
+        next.options
       );
     }
   }
@@ -1470,6 +1459,9 @@ export class WebviewController {
   }
 
   private handlePermissionOption(optionId: string): void {
+    if (this.permissionControlsLocked) {
+      return;
+    }
     if (this.pendingPermissionRequestId) {
       this.vscode.postMessage({
         type: "permissionResponse",
@@ -1481,9 +1473,6 @@ export class WebviewController {
   }
 
   cancelPermission(): void {
-    if (this.permissionControlsLocked) {
-      return;
-    }
     if (this.pendingPermissionRequestId) {
       this.vscode.postMessage({
         type: "permissionResponse",

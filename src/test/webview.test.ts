@@ -88,6 +88,36 @@ function createWebviewHTML(): string {
 </html>`;
 }
 
+/**
+ * Replaces a JSDOM window's timer functions with ones the test drives, so the
+ * permission repeat-input guard can be released deterministically instead of
+ * by sleeping.
+ */
+function installControllableTimers(win: Window): () => void {
+  const pending = new Map<number, () => void>();
+  let nextHandle = 0;
+
+  Object.defineProperty(win, "setTimeout", {
+    configurable: true,
+    writable: true,
+    value: (callback: () => void) => {
+      pending.set(++nextHandle, callback);
+      return nextHandle;
+    },
+  });
+  Object.defineProperty(win, "clearTimeout", {
+    configurable: true,
+    writable: true,
+    value: (handle: number) => pending.delete(handle),
+  });
+
+  return () => {
+    const due = [...pending.values()];
+    pending.clear();
+    due.forEach((callback) => callback());
+  };
+}
+
 suite("Webview", () => {
   suite("escapeHtml", () => {
     test("escapes ampersands", () => {
@@ -1353,16 +1383,15 @@ suite("Webview", () => {
     let document: Document;
     let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
     let controller: WebviewController;
+    let releasePermissionGuard: () => void;
 
     setup(() => {
       dom = new JSDOM(createWebviewHTML(), { runScripts: "dangerously" });
       document = dom.window.document;
       mockVsCode = createMockVsCodeApi();
-      controller = initWebview(
-        mockVsCode,
-        document,
-        dom.window as unknown as Window
-      );
+      const win = dom.window as unknown as Window;
+      releasePermissionGuard = installControllableTimers(win);
+      controller = initWebview(mockVsCode, document, win);
       mockVsCode._clearMessages();
     });
 
@@ -1423,22 +1452,93 @@ suite("Webview", () => {
       const options = [{ id: "allow", label: "Allow" }];
 
       controller.showPermissionModal("req-100", "Test", "content", options);
+      releasePermissionGuard();
 
       const optionBtn = document.querySelector(
         ".permission-option-btn"
       ) as HTMLButtonElement;
       optionBtn?.click();
 
-      const messages = mockVsCode._getMessages();
-      const response = messages.find(
-        (m: unknown) => (m as { type: string }).type === "permissionResponse"
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-100",
+          optionId: "allow",
+        },
+      ]);
+    });
+
+    test("a new prompt starts inert with focus on the dialog, not an option", () => {
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      input.focus();
+
+      controller.showPermissionModal("req-guard", "Write File", "c", [
+        { id: "allow_always", label: "Allow Always" },
+        { id: "reject_once", label: "Reject" },
+      ]);
+
+      const modal = document.getElementById("permission-modal");
+      assert.strictEqual(document.activeElement, modal);
+
+      const optionButtons = [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          ".permission-option-btn"
+        ),
+      ];
+      assert.deepStrictEqual(
+        optionButtons.map((button) => button.disabled),
+        [true, true]
       );
-      assert.ok(response);
-      assert.strictEqual(
-        (response as { requestId: string }).requestId,
-        "req-100"
+
+      optionButtons[0].click();
+      assert.deepStrictEqual(mockVsCode._getMessages(), []);
+
+      releasePermissionGuard();
+      assert.deepStrictEqual(
+        optionButtons.map((button) => button.disabled),
+        [false, false]
       );
-      assert.strictEqual((response as { optionId: string }).optionId, "allow");
+
+      optionButtons[0].click();
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-guard",
+          optionId: "allow_always",
+        },
+      ]);
+    });
+
+    test("denial stays available while the options are still guarded", () => {
+      controller.showPermissionModal("req-deny", "Write File", "c", [
+        { id: "allow_always", label: "Allow Always" },
+      ]);
+
+      const cancelBtn = document.querySelector(
+        ".permission-cancel-btn"
+      ) as HTMLButtonElement;
+      assert.strictEqual(cancelBtn.disabled, false);
+
+      document.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+
+      assert.ok(
+        !document
+          .getElementById("permission-modal")
+          ?.classList.contains("visible")
+      );
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        {
+          type: "permissionResponse",
+          requestId: "req-deny",
+          cancelled: true,
+        },
+      ]);
     });
 
     test("cancelPermission sends cancelled response", () => {
@@ -1497,16 +1597,16 @@ suite("Webview", () => {
       assert.strictEqual(title?.textContent, "Second");
       assert.ok(modal?.classList.contains("visible"));
 
-      const messages = mockVsCode._getMessages() as Array<{
-        requestId: string;
-        cancelled?: boolean;
-      }>;
-      assert.strictEqual(messages.length, 1);
-      assert.strictEqual(messages[0].requestId, "req-1");
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        { type: "permissionResponse", requestId: "req-1", cancelled: true },
+      ]);
       assert.strictEqual(document.activeElement, modal);
-      controller.cancelPermission();
-      assert.strictEqual(messages.length, 1);
-      assert.strictEqual(title?.textContent, "Second");
+      assert.strictEqual(
+        modal?.querySelector<HTMLButtonElement>(".permission-option-btn")
+          ?.disabled,
+        true
+      );
+
       document.dispatchEvent(
         new dom.window.KeyboardEvent("keydown", {
           key: "Tab",
@@ -1529,6 +1629,7 @@ suite("Webview", () => {
         { id: "b", label: "B" },
       ]);
 
+      releasePermissionGuard();
       const optionBtn = document.querySelector(
         ".permission-option-btn"
       ) as HTMLButtonElement;
@@ -1539,13 +1640,9 @@ suite("Webview", () => {
       assert.strictEqual(title?.textContent, "Second");
       assert.ok(modal?.classList.contains("visible"));
 
-      const messages = mockVsCode._getMessages() as Array<{
-        requestId: string;
-        optionId?: string;
-      }>;
-      assert.strictEqual(messages.length, 1);
-      assert.strictEqual(messages[0].requestId, "req-1");
-      assert.strictEqual(messages[0].optionId, "allow");
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
+        { type: "permissionResponse", requestId: "req-1", optionId: "allow" },
+      ]);
       controller.hidePermissionModal();
     });
 
@@ -1557,6 +1654,7 @@ suite("Webview", () => {
         { id: "allow-2", label: "Allow second" },
       ]);
 
+      releasePermissionGuard();
       const firstButton = document.querySelector(
         ".permission-option-btn"
       ) as HTMLButtonElement;
@@ -1568,11 +1666,7 @@ suite("Webview", () => {
       assert.strictEqual(secondButton.disabled, true);
       secondButton.click();
 
-      const responses = mockVsCode._getMessages() as Array<{
-        requestId: string;
-        optionId?: string;
-      }>;
-      assert.deepStrictEqual(responses, [
+      assert.deepStrictEqual(mockVsCode._getMessages(), [
         { type: "permissionResponse", requestId: "req-1", optionId: "allow-1" },
       ]);
       assert.strictEqual(

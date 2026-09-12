@@ -1038,8 +1038,7 @@ kbd {
   background: var(--vscode-button-hoverBackground);
 }
 
-.permission-option-btn:disabled,
-.permission-cancel-btn:disabled {
+.permission-option-btn:disabled {
   opacity: 0.55;
   cursor: wait;
 }
