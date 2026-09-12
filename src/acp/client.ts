@@ -122,9 +122,31 @@ export function describeACPError(error: unknown): ACPErrorPresentation {
   };
 }
 
+/**
+ * Renders a presentation as user-facing text.
+ *
+ * Unclassified errors keep their own wording instead of gaining a synthetic
+ * "Error" prefix, and agents that send the SDK's default message for a code
+ * (for example `RequestError.authRequired()`) do not repeat the summary.
+ */
 export function formatACPError(error: unknown): string {
-  const { summary, diagnostic } = describeACPError(error);
-  return diagnostic ? `${summary}: ${diagnostic}` : summary;
+  const { code, summary, diagnostic } = describeACPError(error);
+  const detail = diagnostic.trim();
+  if (!detail) {
+    return summary;
+  }
+  if (code === undefined) {
+    return detail;
+  }
+
+  const lowerDetail = detail.toLowerCase();
+  const lowerSummary = summary.toLowerCase();
+  if (lowerDetail === lowerSummary) {
+    return summary;
+  }
+  return lowerDetail.startsWith(`${lowerSummary}: `)
+    ? `${summary}: ${detail.slice(summary.length + 2)}`
+    : `${summary}: ${detail}`;
 }
 
 type StateChangeCallback = (state: ACPConnectionState) => void;

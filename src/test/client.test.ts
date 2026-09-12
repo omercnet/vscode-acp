@@ -113,7 +113,7 @@ suite("ACP error presentation", () => {
     });
   }
 
-  test("does not classify an unstructured error from its text", () => {
+  test("keeps an unstructured error's own wording", () => {
     const error = new Error("Internal error (-32603)");
 
     assert.deepStrictEqual(describeACPError(error), {
@@ -121,6 +121,18 @@ suite("ACP error presentation", () => {
       summary: "Error",
       diagnostic: "Internal error (-32603)",
     });
+    assert.strictEqual(formatACPError(error), "Internal error (-32603)");
+  });
+
+  test("does not repeat the summary for the SDK's default message", () => {
+    assert.strictEqual(
+      formatACPError(RequestError.authRequired()),
+      "Authentication required"
+    );
+    assert.strictEqual(
+      formatACPError(RequestError.authRequired(undefined, "Sign in")),
+      "Authentication required: Sign in"
+    );
   });
 });
 

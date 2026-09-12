@@ -60,7 +60,9 @@ export function activate(context: vscode.ExtensionContext) {
           vscode.window.showInformationMessage("VSCode ACP connected");
         } catch (error) {
           console.error("[ACP] Failed to connect:", error);
-          vscode.window.showErrorMessage(formatACPError(error));
+          vscode.window.showErrorMessage(
+            `Failed to connect: ${formatACPError(error)}`
+          );
         }
       }
     })
