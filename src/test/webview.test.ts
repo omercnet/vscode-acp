@@ -452,13 +452,16 @@ suite("Webview", () => {
         assert.strictEqual(elements.connectBtn.style.display, "none");
       });
 
-      test("handles error", () => {
+      test("shows an error while disconnected", () => {
         controller.handleMessage({
           type: "error",
-          text: "Something went wrong",
+          text: "Authentication required: Sign in to continue",
         });
+
         const msgs = elements.messagesEl.querySelectorAll(".message.error");
         assert.strictEqual(msgs.length, 1);
+        assert.strictEqual(elements.welcomeView.style.display, "none");
+        assert.strictEqual(elements.messagesEl.style.display, "flex");
       });
 
       test("handles agents list", () => {
