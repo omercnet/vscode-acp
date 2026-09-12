@@ -17,7 +17,6 @@ interface MockACPClient {
   setOnStateChange: (callback: any) => () => void;
   setOnSessionUpdate: (callback: any) => () => void;
   setOnStderr: (callback: any) => () => void;
-  setOnRequestPermission: (callback: unknown) => void;
   setOnReadTextFile: (callback: any) => void;
   setOnWriteTextFile: (callback: any) => void;
   setOnCreateTerminal: (callback: any) => void;
@@ -101,7 +100,6 @@ class TestACPClient implements MockACPClient {
   setOnStderr(): () => void {
     return () => {};
   }
-  setOnRequestPermission(): void {}
   setOnReadTextFile(): void {}
   setOnWriteTextFile(): void {}
   setOnCreateTerminal(): void {}

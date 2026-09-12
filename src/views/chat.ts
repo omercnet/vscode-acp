@@ -9,8 +9,6 @@ import {
 } from "../acp/agents";
 import type {
   SessionNotification,
-  RequestPermissionRequest,
-  RequestPermissionResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   WriteTextFileRequest,
@@ -105,10 +103,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
     });
-
-    this.acpClient.setOnRequestPermission((params) =>
-      this.handleRequestPermission(params)
-    );
 
     this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
       return this.handleReadTextFile(params);
@@ -255,30 +249,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (this.stderrBuffer.length > 10000) {
       this.stderrBuffer = this.stderrBuffer.slice(-5000);
     }
-  }
-
-  private async handleRequestPermission(
-    params: RequestPermissionRequest
-  ): Promise<RequestPermissionResponse> {
-    const options: Array<vscode.QuickPickItem & { optionId: string }> =
-      params.options.map((option) => ({
-        label: option.name,
-        description: option.kind,
-        optionId: option.optionId,
-      }));
-    const selected = await vscode.window.showQuickPick(options, {
-      placeHolder: params.toolCall.title ?? "Agent requests permission",
-      ignoreFocusOut: true,
-    });
-
-    return selected
-      ? {
-          outcome: {
-            outcome: "selected",
-            optionId: selected.optionId,
-          },
-        }
-      : { outcome: { outcome: "cancelled" } };
   }
 
   private async handleReadTextFile(
