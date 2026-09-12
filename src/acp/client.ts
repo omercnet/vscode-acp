@@ -88,7 +88,7 @@ const ERROR_PRESENTATIONS: Record<
     kind: "authentication-required",
     summary: "Authentication required",
   },
-  [-32002]: { kind: "resource-not-found", summary: "File not found" },
+  [-32002]: { kind: "resource-not-found", summary: "Resource not found" },
   [-32800]: { kind: "cancelled", summary: "Request cancelled" },
 };
 

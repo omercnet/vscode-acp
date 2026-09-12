@@ -96,7 +96,7 @@ suite("ACP error presentation", () => {
     [-32602, "invalid-parameters", "Invalid parameters"],
     [-32603, "agent", "Agent error"],
     [-32000, "authentication-required", "Authentication required"],
-    [-32002, "resource-not-found", "File not found"],
+    [-32002, "resource-not-found", "Resource not found"],
     [-32800, "cancelled", "Request cancelled"],
   ] as const;
 
@@ -133,6 +133,10 @@ suite("ACP error presentation", () => {
     assert.strictEqual(
       formatACPError(RequestError.authRequired(undefined, "Sign in")),
       "Authentication required: Sign in"
+    );
+    assert.strictEqual(
+      formatACPError(RequestError.resourceNotFound("file:///tmp/missing.ts")),
+      "Resource not found: file:///tmp/missing.ts"
     );
   });
 });
