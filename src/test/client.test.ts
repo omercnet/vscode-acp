@@ -288,6 +288,39 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual((await prompt).stopReason, "cancelled");
     });
 
+    test("cancels permission requests arriving after replacement starts", async () => {
+      demoMode = "late-permission";
+      let permissionHandlerCalls = 0;
+      client.setOnRequestPermission(async () => {
+        permissionHandlerCalls++;
+        return { outcome: { outcome: "selected", optionId: "once" } };
+      });
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(permissionHandlerCalls, 0);
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getPermissionOutcomes().at(-1),
+        { outcome: "cancelled" }
+      );
+    });
+
+    test("closes a replaced session when the agent advertises support", async () => {
+      demoMode = "session-close";
+      await client.connect();
+      const firstSession = await client.newSession("/test/dir");
+
+      const secondSession = await client.newSession("/test/dir");
+
+      assert.notStrictEqual(secondSession.sessionId, firstSession.sessionId);
+      assert.deepStrictEqual(mockProcesses[0].server.getClosedSessionIds(), [
+        firstSession.sessionId,
+      ]);
+    });
+
     test("restores the current session when its replacement fails", async () => {
       demoMode = "replacement-failure";
       await client.connect();

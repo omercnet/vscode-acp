@@ -112,6 +112,7 @@ export class ACPClient {
   private connectionGeneration = 0;
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
+  private canCloseSessions = false;
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -234,6 +235,7 @@ export class ACPClient {
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
+    this.canCloseSessions = false;
     this.setState("connecting");
 
     try {
@@ -278,6 +280,7 @@ export class ACPClient {
         this.pendingSessionRequestGeneration = null;
         this.pendingModeBySession.clear();
         this.activePrompt = null;
+        this.canCloseSessions = false;
         this.setState("disconnected");
       });
 
@@ -291,7 +294,9 @@ export class ACPClient {
         .onRequest(
           acp.methods.client.session.requestPermission,
           async ({ params }) => {
-            this.requireActiveSession(params.sessionId);
+            if (!this.isActiveSession(params.sessionId)) {
+              return { outcome: { outcome: "cancelled" as const } };
+            }
             console.log(
               "[ACP] Permission request:",
               JSON.stringify(params, null, 2)
@@ -409,6 +414,8 @@ export class ACPClient {
           `Unsupported ACP protocol version: ${initResponse.protocolVersion}`
         );
       }
+      this.canCloseSessions =
+        initResponse.agentCapabilities?.sessionCapabilities?.close != null;
 
       this.setState("connected");
       return initResponse;
@@ -427,6 +434,7 @@ export class ACPClient {
       if (isCurrentAttempt) {
         this.currentSessionId = null;
         this.sessionMetadata = null;
+        this.canCloseSessions = false;
         this.setState("error");
       }
       throw error;
@@ -543,6 +551,15 @@ export class ACPClient {
         ),
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
+      if (replacedSessionId && this.canCloseSessions) {
+        try {
+          await connection.agent.request(acp.methods.agent.session.close, {
+            sessionId: replacedSessionId,
+          });
+        } catch (error) {
+          console.warn("[ACP] Failed to close replaced session:", error);
+        }
+      }
       this.pendingSessionRequestGeneration = null;
       this.pendingCommandsBySession.clear();
       this.pendingConfigOptionsBySession.clear();
@@ -709,6 +726,7 @@ export class ACPClient {
     this.pendingConfigOptionsBySession.clear();
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
+    this.canCloseSessions = false;
     this.activePrompt = null;
     this.setState("disconnected");
   }

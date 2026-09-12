@@ -15,11 +15,13 @@ export type DemoMode =
   | "deferred-config"
   | "invalid-config"
   | "invalid-version"
+  | "late-permission"
   | "no-initialize"
   | "session-isolation"
   | "mode-update"
   | "permission"
   | "replacement-failure"
+  | "session-close"
   | "plan"
   | "default";
 
@@ -47,6 +49,7 @@ export class MockACPServer {
   >();
   private permissionOutcomes: acp.RequestPermissionOutcome[] = [];
   private initializeRequest: acp.InitializeRequest | null = null;
+  private closedSessionIds: string[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -54,6 +57,10 @@ export class MockACPServer {
 
   getPermissionOutcomes(): readonly acp.RequestPermissionOutcome[] {
     return this.permissionOutcomes;
+  }
+
+  getClosedSessionIds(): readonly string[] {
+    return this.closedSessionIds;
   }
 
   constructor(demoMode: DemoMode = "default") {
@@ -136,7 +143,12 @@ export class MockACPServer {
               this.demoMode === "invalid-version"
                 ? acp.PROTOCOL_VERSION + 1
                 : acp.PROTOCOL_VERSION,
-            agentCapabilities: { loadSession: false },
+            agentCapabilities: {
+              loadSession: false,
+              ...(this.demoMode === "session-close"
+                ? { sessionCapabilities: { close: {} } }
+                : {}),
+            },
           });
         }
         break;
@@ -160,6 +172,11 @@ export class MockACPServer {
           this.handleSetConfigOption(id, params);
         }
         break;
+      case "session/close":
+        if (id !== undefined) {
+          this.handleCloseSession(id, params);
+        }
+        break;
       case "session/cancel":
         this.handleCancel(params);
         break;
@@ -178,6 +195,23 @@ export class MockACPServer {
     }
     for (const session of this.sessions.values()) {
       previousSession = session;
+    }
+
+    if (this.demoMode === "late-permission" && previousSession) {
+      void this.requestClient("session/request_permission", {
+        sessionId: previousSession.id,
+        toolCall: {
+          toolCallId: "late-tool",
+          title: "Late permission",
+          kind: "edit",
+        },
+        options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }],
+      })
+        .then((response) => {
+          const permission = response as acp.RequestPermissionResponse;
+          this.permissionOutcomes.push(permission.outcome);
+        })
+        .catch(() => {});
     }
 
     const sessionId = `mock-session-${++this.sessionCounter}`;
@@ -576,6 +610,24 @@ export class MockACPServer {
         text: "\n\nCurrently analyzing the code structure...",
       },
     });
+  }
+
+  private handleCloseSession(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!sessionId || !session) {
+      this.sendError(id, -32000, "Session not found");
+      return;
+    }
+
+    session.pendingPrompt?.abort();
+    this.sessions.delete(sessionId);
+    this.closedSessionIds.push(sessionId);
+    this.sendResponse(id, {});
   }
 
   private handleCancel(params?: Record<string, unknown>): void {
