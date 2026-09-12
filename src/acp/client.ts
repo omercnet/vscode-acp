@@ -483,6 +483,9 @@ export class ACPClient {
     if (!connection) {
       throw new Error("Not connected");
     }
+    if (this.pendingSessionRequestGeneration !== null) {
+      throw new Error("Session creation already in progress");
+    }
 
     const requestGeneration = ++this.sessionRequestGeneration;
     this.pendingSessionRequestGeneration = requestGeneration;

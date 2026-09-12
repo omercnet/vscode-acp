@@ -306,6 +306,19 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("rejects overlapping session creation", async () => {
+      await client.connect();
+
+      const firstSession = client.newSession("/test/dir");
+      await assert.rejects(
+        () => client.newSession("/test/dir"),
+        /Session creation already in progress/
+      );
+
+      assert.ok((await firstSession).sessionId);
+      assert.ok(client.getSessionMetadata());
+    });
+
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
         await client.newSession("/test/dir");
