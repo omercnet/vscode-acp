@@ -48,6 +48,18 @@ export type ToolCallContentItem =
   | { type: "diff"; path?: string; oldText?: string; newText?: string }
   | { type: "terminal"; terminalId?: string };
 
+export interface PermissionOption {
+  id: string;
+  label: string;
+}
+
+interface QueuedPermissionRequest {
+  requestId: string;
+  title: string | undefined;
+  content: unknown;
+  options: PermissionOption[];
+}
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -73,11 +85,25 @@ export interface ExtensionMessage {
   title?: string;
   kind?: ToolKind;
   content?: ToolCallContentItem[];
-  rawInput?: { command?: string; description?: string };
+  // Arbitrary agent-supplied tool input; `command`/`description` are the only
+  // fields this UI reads directly.
+  rawInput?: { command?: string; description?: string } & Record<
+    string,
+    unknown
+  >;
   rawOutput?: { output?: string };
   status?: string;
   terminalOutput?: string;
+  requestId?: string;
+  options?: PermissionOption[];
 }
+
+/**
+ * How long a freshly shown permission prompt keeps its agent-supplied options
+ * inert, so held keys or double clicks aimed at the previous screen cannot
+ * decide a request the user has not read yet.
+ */
+const PERMISSION_GUARD_MS = 500;
 
 export function escapeHtml(str: string): string {
   return str
@@ -444,6 +470,7 @@ export interface WebviewElements {
   welcomeView: HTMLElement;
   commandAutocomplete: HTMLElement;
   planContainer: HTMLElement;
+  permissionModal: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -463,6 +490,7 @@ export function getElements(doc: Document): WebviewElements {
     welcomeView: doc.getElementById("welcome-view")!,
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
     planContainer: doc.getElementById("agent-plan-container")!,
+    permissionModal: doc.getElementById("permission-modal")!,
   };
 }
 
@@ -485,6 +513,12 @@ export class WebviewController {
   private selectedCommandIndex = -1;
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
+  private pendingPermissionRequestId: string | null = null;
+  private previouslyFocusedElement: HTMLElement | null = null;
+  private permissionKeydownHandler: ((e: KeyboardEvent) => void) | null = null;
+  private permissionQueue: QueuedPermissionRequest[] = [];
+  private permissionControlsLocked = false;
+  private permissionUnlockTimer: number | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -652,6 +686,19 @@ export class WebviewController {
     this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
       this.handleMessage(e.data)
     );
+
+    this.elements.permissionModal.addEventListener("click", (e: MouseEvent) => {
+      if (e.target === this.elements.permissionModal) {
+        this.cancelPermission();
+      }
+    });
+
+    const cancelBtn = this.elements.permissionModal.querySelector(
+      ".permission-cancel-btn"
+    );
+    if (cancelBtn) {
+      cancelBtn.addEventListener("click", () => this.cancelPermission());
+    }
   }
 
   addMessage(
@@ -1061,6 +1108,7 @@ export class WebviewController {
         this.messageTexts.clear();
         modeSelector.style.display = "none";
         modelSelector.style.display = "none";
+        this.clearPermissionModal();
         this.availableCommands = [];
         this.hideCommandAutocomplete();
         this.hidePlan();
@@ -1144,6 +1192,21 @@ export class WebviewController {
           this.appendThought(msg.text);
         }
         break;
+      case "permissionRequest":
+        if (msg.requestId && msg.options) {
+          this.showPermissionModal(
+            msg.requestId,
+            msg.title,
+            msg.rawInput,
+            msg.options
+          );
+        }
+        break;
+      case "permissionRequestExpired":
+        if (msg.requestId) {
+          this.handlePermissionExpired(msg.requestId);
+        }
+        break;
     }
   }
 
@@ -1202,6 +1265,228 @@ export class WebviewController {
   getIsConnected(): boolean {
     return this.isConnected;
   }
+
+  showPermissionModal(
+    requestId: string,
+    title: string | undefined,
+    content: unknown,
+    options: PermissionOption[]
+  ): void {
+    if (this.pendingPermissionRequestId) {
+      this.permissionQueue.push({ requestId, title, content, options });
+      return;
+    }
+    this.presentPermissionModal(requestId, title, content, options);
+  }
+
+  private presentPermissionModal(
+    requestId: string,
+    title: string | undefined,
+    content: unknown,
+    options: PermissionOption[]
+  ): void {
+    this.pendingPermissionRequestId = requestId;
+    this.previouslyFocusedElement = this.doc.activeElement as HTMLElement;
+
+    if (this.permissionKeydownHandler) {
+      this.doc.removeEventListener("keydown", this.permissionKeydownHandler);
+      this.permissionKeydownHandler = null;
+    }
+
+    if (this.permissionUnlockTimer !== null) {
+      this.win.clearTimeout(this.permissionUnlockTimer);
+      this.permissionUnlockTimer = null;
+    }
+    // Every prompt starts locked: a key held down or a double click aimed at
+    // whatever was on screen before must never land on an agent-supplied
+    // option. Denial (Cancel/Escape/backdrop) stays available throughout,
+    // because failing closed is always safe.
+    this.permissionControlsLocked = true;
+
+    const modal = this.elements.permissionModal;
+
+    const titleEl = modal.querySelector(".permission-title") as HTMLElement;
+    const contentEl = modal.querySelector(".permission-content") as HTMLElement;
+    const optionsEl = modal.querySelector(".permission-options") as HTMLElement;
+
+    titleEl.textContent = title || "Permission Required";
+    contentEl.textContent =
+      typeof content === "string"
+        ? content
+        : content
+          ? JSON.stringify(content, null, 2)
+          : "";
+
+    optionsEl.innerHTML = "";
+    options.forEach((opt) => {
+      const btn = this.doc.createElement("button");
+      btn.className = "permission-option-btn";
+      btn.dataset.optionId = opt.id;
+      btn.disabled = true;
+      const label = this.doc.createElement("span");
+      label.className = "option-label";
+      label.textContent = opt.label;
+      btn.appendChild(label);
+      btn.addEventListener("click", () => this.handlePermissionOption(opt.id));
+      optionsEl.appendChild(btn);
+    });
+
+    modal.classList.add("visible");
+
+    this.permissionKeydownHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.cancelPermission();
+        return;
+      }
+      if (e.key === "Tab") {
+        if (this.permissionControlsLocked) {
+          this.setPermissionControlsLocked(false);
+        }
+        this.trapPermissionFocus(e);
+      }
+    };
+    this.doc.addEventListener("keydown", this.permissionKeydownHandler);
+
+    this.permissionUnlockTimer = this.win.setTimeout(() => {
+      if (this.pendingPermissionRequestId === requestId) {
+        this.setPermissionControlsLocked(false);
+      }
+    }, PERMISSION_GUARD_MS);
+
+    modal.focus();
+  }
+
+  private setPermissionControlsLocked(locked: boolean): void {
+    this.elements.permissionModal
+      .querySelectorAll<HTMLButtonElement>(".permission-option-btn")
+      .forEach((button) => {
+        button.disabled = locked;
+      });
+    this.permissionControlsLocked = locked;
+
+    if (!locked && this.permissionUnlockTimer !== null) {
+      this.win.clearTimeout(this.permissionUnlockTimer);
+      this.permissionUnlockTimer = null;
+    }
+  }
+
+  private trapPermissionFocus(e: KeyboardEvent): void {
+    const modal = this.elements.permissionModal;
+    const focusable = Array.from(
+      modal.querySelectorAll<HTMLButtonElement>(
+        ".permission-option-btn, .permission-cancel-btn"
+      )
+    );
+
+    if (focusable.length === 0) {
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = this.doc.activeElement;
+    const activeIndex = focusable.findIndex((element) => element === active);
+
+    if (activeIndex === -1) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    } else if (e.shiftKey && active === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && active === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+
+  hidePermissionModal(): void {
+    this.closePermissionModal(true);
+  }
+
+  private clearPermissionModal(): void {
+    this.permissionQueue = [];
+    this.closePermissionModal(false);
+  }
+
+  private closePermissionModal(showNext: boolean): void {
+    this.elements.permissionModal.classList.remove("visible");
+    this.pendingPermissionRequestId = null;
+
+    if (this.permissionKeydownHandler) {
+      this.doc.removeEventListener("keydown", this.permissionKeydownHandler);
+      this.permissionKeydownHandler = null;
+    }
+
+    if (this.permissionUnlockTimer !== null) {
+      this.win.clearTimeout(this.permissionUnlockTimer);
+      this.permissionUnlockTimer = null;
+    }
+    this.permissionControlsLocked = false;
+
+    if (this.previouslyFocusedElement) {
+      if (this.doc.contains(this.previouslyFocusedElement)) {
+        try {
+          this.previouslyFocusedElement.focus();
+        } catch {
+          // Element may be unfocusable; ignore.
+        }
+      }
+      this.previouslyFocusedElement = null;
+    }
+
+    const next = showNext ? this.permissionQueue.shift() : undefined;
+    if (next) {
+      this.presentPermissionModal(
+        next.requestId,
+        next.title,
+        next.content,
+        next.options
+      );
+    }
+  }
+
+  private handlePermissionExpired(requestId: string): void {
+    if (this.pendingPermissionRequestId === requestId) {
+      this.addMessage("Permission request expired and was denied.", "system");
+      // The backend already resolved this request; close without responding.
+      this.hidePermissionModal();
+      return;
+    }
+
+    const previousQueueLength = this.permissionQueue.length;
+    this.permissionQueue = this.permissionQueue.filter(
+      (req) => req.requestId !== requestId
+    );
+    if (this.permissionQueue.length !== previousQueueLength) {
+      this.addMessage("Permission request expired and was denied.", "system");
+    }
+  }
+
+  private handlePermissionOption(optionId: string): void {
+    if (this.permissionControlsLocked) {
+      return;
+    }
+    if (this.pendingPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        requestId: this.pendingPermissionRequestId,
+        optionId,
+      });
+      this.hidePermissionModal();
+    }
+  }
+
+  cancelPermission(): void {
+    if (this.pendingPermissionRequestId) {
+      this.vscode.postMessage({
+        type: "permissionResponse",
+        requestId: this.pendingPermissionRequestId,
+        cancelled: true,
+      });
+      this.hidePermissionModal();
+    }
+  }
 }
 
 export function initWebview(
@@ -1213,7 +1498,13 @@ export function initWebview(
   return new WebviewController(vscode, elements, doc, win);
 }
 
+declare global {
+  interface Window {
+    webviewController?: WebviewController;
+  }
+}
+
 if (typeof acquireVsCodeApi !== "undefined") {
   const vscode = acquireVsCodeApi();
-  initWebview(vscode, document, window);
+  window.webviewController = initWebview(vscode, document, window);
 }

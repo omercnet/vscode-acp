@@ -65,6 +65,7 @@ suite("ACPClient", () => {
   suite("session metadata", () => {
     test("should return null when no session exists", () => {
       assert.strictEqual(client.getSessionMetadata(), null);
+      assert.strictEqual(client.getCurrentSessionId(), null);
     });
   });
 
@@ -73,6 +74,7 @@ suite("ACPClient", () => {
       client.dispose();
       assert.strictEqual(client.getState(), "disconnected");
       assert.strictEqual(client.isConnected(), false);
+      assert.strictEqual(client.getCurrentSessionId(), null);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
   });
@@ -191,6 +193,7 @@ suite("ACPClient with Mock Server", () => {
 
       assert.ok(response.sessionId);
       assert.ok(response.sessionId.startsWith("mock-session-"));
+      assert.strictEqual(client.getCurrentSessionId(), response.sessionId);
 
       const metadata = client.getSessionMetadata();
       assert.ok(metadata);

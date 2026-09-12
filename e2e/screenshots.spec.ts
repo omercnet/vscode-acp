@@ -1,34 +1,8 @@
-import { test, openACPView } from "./fixtures";
+import { test, openACPView, getWebviewContentFrame } from "./fixtures";
 import { join } from "path";
-import { Page, Frame } from "@playwright/test";
+import { Frame } from "@playwright/test";
 
 const SCREENSHOTS_DIR = join(__dirname, "..", "screenshots");
-
-async function getWebviewContentFrame(window: Page): Promise<Frame> {
-  const allFrames: Frame[] = [];
-
-  function collectFrames(frameList: Frame[]) {
-    for (const f of frameList) {
-      allFrames.push(f);
-      collectFrames(f.childFrames());
-    }
-  }
-  collectFrames(window.frames());
-
-  for (const frame of allFrames) {
-    try {
-      const hasWelcomeView = await frame.locator("#welcome-view").count();
-      if (hasWelcomeView > 0) {
-        console.log("Found webview content frame:", frame.url());
-        return frame;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  throw new Error("Webview content frame not found");
-}
 
 async function injectMockState(frame: Frame, setupFn: string): Promise<void> {
   const result = await frame.evaluate((fn) => {
