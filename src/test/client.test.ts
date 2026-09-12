@@ -314,11 +314,32 @@ suite("ACPClient with Mock Server", () => {
       const firstSession = await client.newSession("/test/dir");
 
       const secondSession = await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.notStrictEqual(secondSession.sessionId, firstSession.sessionId);
       assert.deepStrictEqual(mockProcesses[0].server.getClosedSessionIds(), [
         firstSession.sessionId,
       ]);
+    });
+
+    test("does not wait for an unresponsive session close", async () => {
+      demoMode = "session-close-hangs";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const replacement = client.newSession("/test/dir").then(
+        () => "resolved" as const,
+        () => "rejected" as const
+      );
+      const result = await Promise.race([
+        replacement,
+        new Promise<"pending">((resolve) =>
+          setImmediate(() => resolve("pending"))
+        ),
+      ]);
+
+      assert.strictEqual(result, "resolved");
+      assert.ok(client.getSessionMetadata());
     });
 
     test("restores the current session when its replacement fails", async () => {

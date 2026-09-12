@@ -22,6 +22,7 @@ export type DemoMode =
   | "permission"
   | "replacement-failure"
   | "session-close"
+  | "session-close-hangs"
   | "plan"
   | "default";
 
@@ -145,7 +146,8 @@ export class MockACPServer {
                 : acp.PROTOCOL_VERSION,
             agentCapabilities: {
               loadSession: false,
-              ...(this.demoMode === "session-close"
+              ...(this.demoMode === "session-close" ||
+              this.demoMode === "session-close-hangs"
                 ? { sessionCapabilities: { close: {} } }
                 : {}),
             },
@@ -173,6 +175,9 @@ export class MockACPServer {
         }
         break;
       case "session/close":
+        if (this.demoMode === "session-close-hangs") {
+          break;
+        }
         if (id !== undefined) {
           this.handleCloseSession(id, params);
         }

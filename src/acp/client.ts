@@ -552,13 +552,15 @@ export class ACPClient {
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
       if (replacedSessionId && this.canCloseSessions) {
-        try {
-          await connection.agent.request(acp.methods.agent.session.close, {
+        void connection.agent
+          .request(acp.methods.agent.session.close, {
             sessionId: replacedSessionId,
+          })
+          .catch((error) => {
+            if (!connection.signal.aborted) {
+              console.warn("[ACP] Failed to close replaced session:", error);
+            }
           });
-        } catch (error) {
-          console.warn("[ACP] Failed to close replaced session:", error);
-        }
       }
       this.pendingSessionRequestGeneration = null;
       this.pendingCommandsBySession.clear();
