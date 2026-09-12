@@ -1,6 +1,9 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
+import { tmpdir } from "os";
+import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
+import type { ACPClient } from "../acp/client";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -28,6 +31,33 @@ interface MockACPClient {
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
   dispose: () => void;
+}
+
+interface TestManagedTerminal {
+  id: string;
+  proc: null;
+  output: string;
+  outputByteLimit: number;
+  truncated: boolean;
+  exitCode: null;
+  signal: null;
+  exitPromise: Promise<void>;
+  exitResolve: () => undefined;
+}
+
+interface TestableCapabilityHandlers {
+  handleReadTextFile(params: {
+    sessionId: string;
+    path: string;
+    line?: number;
+    limit?: number;
+  }): Promise<{ content: string }>;
+  appendTerminalOutput(terminal: TestManagedTerminal, text: string): void;
+  handleTerminalOutput(params: {
+    sessionId: string;
+    terminalId: string;
+  }): Promise<{ output: string; truncated: boolean; exitStatus: null }>;
+  terminals: Map<string, TestManagedTerminal>;
 }
 
 class TestMemento implements MockMemento {
@@ -395,11 +425,21 @@ suite("ChatViewProvider", () => {
         memento as any
       );
 
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
       const handleModeChange = (provider as any).handleModeChange;
 
       await handleModeChange.call(provider, "new-mode");
 
       assert.strictEqual(memento.get("vscode-acp.selectedMode"), undefined);
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        commands: null,
+      });
     });
 
     test("should handle model change errors gracefully", async () => {
@@ -417,11 +457,21 @@ suite("ChatViewProvider", () => {
         memento as any
       );
 
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
       const handleModelChange = (provider as any).handleModelChange;
 
       await handleModelChange.call(provider, "new-model");
 
       assert.strictEqual(memento.get("vscode-acp.selectedModel"), undefined);
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        commands: null,
+      });
     });
 
     test("should update memento with new values when changed multiple times", async () => {
@@ -440,6 +490,107 @@ suite("ChatViewProvider", () => {
 
       await handleModeChange.call(provider, "mode-2");
       assert.strictEqual(memento.get("vscode-acp.selectedMode"), "mode-2");
+    });
+  });
+
+  test("restores session metadata when a replacement chat fails", async () => {
+    const metadata = { modes: null, models: null, commands: [] };
+    class FailingReplacementClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async newSession(): Promise<void> {
+        throw new Error("Replacement session failed");
+      }
+
+      getSessionMetadata() {
+        return metadata;
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new FailingReplacementClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const handleNewChat = Reflect.get(provider, "handleNewChat") as (
+      this: ChatViewProvider
+    ) => Promise<void>;
+
+    await handleNewChat.call(provider);
+
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "sessionMetadata",
+      ...metadata,
+    });
+  });
+  suite("Client capability handlers", () => {
+    test("reads files using the protocol's 1-based line offset", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const testProvider = provider as unknown as TestableCapabilityHandlers;
+      const uri = vscode.Uri.file(
+        join(tmpdir(), `vscode-acp-lines-${Date.now()}.txt`)
+      );
+
+      try {
+        await vscode.workspace.fs.writeFile(
+          uri,
+          new TextEncoder().encode("first\nsecond\nthird")
+        );
+        const result = await testProvider.handleReadTextFile({
+          sessionId: "session",
+          path: uri.fsPath,
+          line: 2,
+          limit: 1,
+        });
+
+        assert.deepStrictEqual(result, { content: "second" });
+      } finally {
+        await vscode.workspace.fs.delete(uri);
+      }
+    });
+
+    test("truncates terminal output at a UTF-8 character boundary", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const testProvider = provider as unknown as TestableCapabilityHandlers;
+      const terminal = {
+        id: "terminal",
+        proc: null,
+        output: "",
+        outputByteLimit: 3,
+        truncated: false,
+        exitCode: null,
+        signal: null,
+        exitPromise: Promise.resolve(),
+        exitResolve: () => undefined,
+      };
+      testProvider.terminals.set(terminal.id, terminal);
+
+      testProvider.appendTerminalOutput(terminal, "a€b");
+      const response = await testProvider.handleTerminalOutput({
+        sessionId: "session",
+        terminalId: terminal.id,
+      });
+
+      assert.deepStrictEqual(response, {
+        output: "b",
+        truncated: true,
+        exitStatus: null,
+      });
+      assert.ok(Buffer.byteLength(response.output, "utf8") <= 3);
     });
   });
 });

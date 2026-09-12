@@ -19,8 +19,8 @@ import type {
   TerminalOutputResponse,
   WaitForTerminalExitRequest,
   WaitForTerminalExitResponse,
-  KillTerminalCommandRequest,
-  KillTerminalCommandResponse,
+  KillTerminalRequest,
+  KillTerminalResponse,
   ReleaseTerminalRequest,
   ReleaseTerminalResponse,
 } from "@agentclientprotocol/sdk";
@@ -131,7 +131,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
 
     this.acpClient.setOnKillTerminalCommand(
-      async (params: KillTerminalCommandRequest) => {
+      async (params: KillTerminalRequest) => {
         return this.handleKillTerminalCommand(params);
       }
     );
@@ -271,7 +271,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       if (params.line !== undefined || params.limit !== undefined) {
         const lines = content.split("\n");
-        const startLine = params.line ?? 0;
+        const startLine = Math.max((params.line ?? 1) - 1, 0);
         const lineLimit = params.limit ?? lines.length;
         const selectedLines = lines.slice(startLine, startLine + lineLimit);
         content = selectedLines.join("\n");
@@ -406,8 +406,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const byteLength = Buffer.byteLength(terminal.output, "utf8");
       if (byteLength > terminal.outputByteLimit) {
         const encoded = Buffer.from(terminal.output, "utf8");
-        const sliced = encoded.slice(-terminal.outputByteLimit);
-        terminal.output = sliced.toString("utf8");
+        let start = encoded.length - terminal.outputByteLimit;
+        while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) {
+          start++;
+        }
+        terminal.output = encoded.subarray(start).toString("utf8");
         terminal.truncated = true;
       }
     }
@@ -461,8 +464,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleKillTerminalCommand(
-    params: KillTerminalCommandRequest
-  ): Promise<KillTerminalCommandResponse> {
+    params: KillTerminalRequest
+  ): Promise<KillTerminalResponse> {
     const terminal = this.terminals.get(params.terminalId);
     if (!terminal) {
       throw new Error(`Terminal not found: ${params.terminalId}`);
@@ -543,6 +546,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (update.sessionUpdate === "current_mode_update") {
       this.postMessage({ type: "modeUpdate", modeId: update.currentModeId });
+    } else if (update.sessionUpdate === "config_option_update") {
+      this.sendSessionMetadata();
     } else if (update.sessionUpdate === "available_commands_update") {
       this.postMessage({
         type: "availableCommands",
@@ -639,6 +644,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set mode:", error);
+      this.sendSessionMetadata();
     }
   }
 
@@ -649,6 +655,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sendSessionMetadata();
     } catch (error) {
       console.error("[Chat] Failed to set model:", error);
+      this.sendSessionMetadata();
     }
   }
 
@@ -689,6 +696,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (error) {
       console.error("[Chat] Failed to create new session:", error);
+      this.hasSession = this.acpClient.getSessionMetadata() !== null;
+      this.sendSessionMetadata();
     }
   }
 
@@ -728,10 +737,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let modeRestored = false;
     let modelRestored = false;
 
-    if (
-      savedModeId &&
-      availableModes.some((mode: any) => mode && mode.id === savedModeId)
-    ) {
+    if (savedModeId && availableModes.some((mode) => mode.id === savedModeId)) {
       await this.acpClient.setMode(savedModeId);
       console.log(`[Chat] Restored mode: ${savedModeId}`);
       modeRestored = true;
@@ -739,9 +745,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (
       savedModelId &&
-      availableModels.some(
-        (model: any) => model && model.modelId === savedModelId
-      )
+      availableModels.some((model) => model.modelId === savedModelId)
     ) {
       await this.acpClient.setModel(savedModelId);
       console.log(`[Chat] Restored model: ${savedModelId}`);

@@ -1,11 +1,35 @@
 import { EventEmitter, Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
 
-export type DemoMode = "ansi" | "plan" | "default";
+interface JsonRpcMessage {
+  id?: number;
+  method?: string;
+  params?: Record<string, unknown>;
+  result?: unknown;
+  error?: unknown;
+}
+
+export type DemoMode =
+  | "ansi"
+  | "capabilities"
+  | "deferred-config"
+  | "invalid-config"
+  | "invalid-version"
+  | "late-permission"
+  | "no-initialize"
+  | "session-isolation"
+  | "mode-update"
+  | "permission"
+  | "replacement-failure"
+  | "session-close"
+  | "session-close-hangs"
+  | "plan"
+  | "default";
 
 interface MockSession {
   id: string;
   cwd: string;
+  configOptions: acp.SessionConfigOption[];
   pendingPrompt: AbortController | null;
 }
 
@@ -19,6 +43,26 @@ export class MockACPServer {
   readonly stderr: Readable;
 
   private stdinBuffer = "";
+  private nextClientRequestId = 10_000;
+  private pendingClientRequests = new Map<
+    number,
+    { resolve: (result: unknown) => void; reject: (error: Error) => void }
+  >();
+  private permissionOutcomes: acp.RequestPermissionOutcome[] = [];
+  private initializeRequest: acp.InitializeRequest | null = null;
+  private closedSessionIds: string[] = [];
+
+  getInitializeRequest(): acp.InitializeRequest | null {
+    return this.initializeRequest;
+  }
+
+  getPermissionOutcomes(): readonly acp.RequestPermissionOutcome[] {
+    return this.permissionOutcomes;
+  }
+
+  getClosedSessionIds(): readonly string[] {
+    return this.closedSessionIds;
+  }
 
   constructor(demoMode: DemoMode = "default") {
     this.demoMode = demoMode;
@@ -45,74 +89,225 @@ export class MockACPServer {
     this.stdinBuffer = lines.pop() || "";
 
     for (const line of lines) {
-      if (line.trim()) {
-        try {
-          const request = JSON.parse(line);
-          this.handleRequest(request);
-        } catch {
-          console.error("[MockACP] Failed to parse:", line);
+      if (!line.trim()) {
+        continue;
+      }
+
+      try {
+        const message: JsonRpcMessage = JSON.parse(line);
+        if (message.method !== undefined) {
+          this.handleRequest(message);
+        } else {
+          this.handleClientResponse(message);
         }
+      } catch {
+        console.error("[MockACP] Failed to parse:", line);
       }
     }
   }
 
-  private handleRequest(request: {
-    jsonrpc: "2.0";
-    id: number;
-    method: string;
-    params?: Record<string, unknown>;
-  }): void {
-    switch (request.method) {
+  private handleClientResponse(response: JsonRpcMessage): void {
+    const id = response.id;
+    if (id === undefined) {
+      return;
+    }
+
+    const pendingRequest = this.pendingClientRequests.get(id);
+    if (!pendingRequest) {
+      return;
+    }
+    this.pendingClientRequests.delete(id);
+
+    if (response.error === undefined) {
+      pendingRequest.resolve(response.result);
+    } else {
+      pendingRequest.reject(new Error(JSON.stringify(response.error)));
+    }
+  }
+
+  private handleRequest(request: JsonRpcMessage): void {
+    const id = request.id;
+    const method = request.method;
+    const params = request.params;
+    if (method === undefined) {
+      return;
+    }
+
+    switch (method) {
       case "initialize":
-        this.sendResponse(request.id, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          agentCapabilities: { loadSession: false },
-        });
+        if (params) {
+          this.initializeRequest = params as acp.InitializeRequest;
+        }
+        if (id !== undefined && this.demoMode !== "no-initialize") {
+          this.sendResponse(id, {
+            protocolVersion:
+              this.demoMode === "invalid-version"
+                ? acp.PROTOCOL_VERSION + 1
+                : acp.PROTOCOL_VERSION,
+            agentCapabilities: {
+              loadSession: false,
+              ...(this.demoMode === "session-close" ||
+              this.demoMode === "session-close-hangs"
+                ? { sessionCapabilities: { close: {} } }
+                : {}),
+            },
+          });
+        }
         break;
       case "session/new":
-        this.handleNewSession(request.id, request.params);
+        if (id !== undefined) {
+          this.handleNewSession(id, params);
+        }
         break;
       case "session/prompt":
-        void this.handlePrompt(request.id, request.params);
+        if (id !== undefined) {
+          void this.handlePrompt(id, params);
+        }
         break;
       case "session/set_mode":
-      case "session/set_model":
-        this.sendResponse(request.id, {});
+        if (id !== undefined) {
+          this.sendResponse(id, {});
+        }
+        break;
+      case "session/set_config_option":
+        if (id !== undefined) {
+          this.handleSetConfigOption(id, params);
+        }
+        break;
+      case "session/close":
+        if (this.demoMode === "session-close-hangs") {
+          break;
+        }
+        if (id !== undefined) {
+          this.handleCloseSession(id, params);
+        }
         break;
       case "session/cancel":
-        this.handleCancel(request.id, request.params);
+        this.handleCancel(params);
         break;
       default:
-        this.sendError(request.id, -32601, `Unknown method: ${request.method}`);
+        if (id !== undefined) {
+          this.sendError(id, -32601, `Unknown method: ${method}`);
+        }
     }
   }
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
+    let previousSession: MockSession | undefined;
+    if (this.demoMode === "replacement-failure" && this.sessionCounter === 1) {
+      this.sendError(id, -32000, "Replacement session failed");
+      return;
+    }
+    for (const session of this.sessions.values()) {
+      previousSession = session;
+    }
+
+    if (this.demoMode === "late-permission" && previousSession) {
+      void this.requestClient("session/request_permission", {
+        sessionId: previousSession.id,
+        toolCall: {
+          toolCallId: "late-tool",
+          title: "Late permission",
+          kind: "edit",
+        },
+        options: [{ optionId: "once", name: "Allow once", kind: "allow_once" }],
+      })
+        .then((response) => {
+          const permission = response as acp.RequestPermissionResponse;
+          this.permissionOutcomes.push(permission.outcome);
+        })
+        .catch(() => {});
+    }
+
     const sessionId = `mock-session-${++this.sessionCounter}`;
-    const cwd = (params?.cwd as string) || process.cwd();
+    const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
+    const isolatedModel = `session-${this.sessionCounter}-model`;
+    const configOptions: acp.SessionConfigOption[] =
+      this.demoMode === "deferred-config"
+        ? [
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue: "claude-3-opus",
+              options: [
+                {
+                  group: "anthropic",
+                  name: "Anthropic",
+                  options: [
+                    { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+                    { value: "claude-3-opus", name: "Claude 3 Opus" },
+                  ],
+                },
+              ],
+            },
+          ]
+        : [
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue:
+                this.demoMode === "invalid-config"
+                  ? "missing-model"
+                  : this.demoMode === "session-isolation"
+                    ? isolatedModel
+                    : "claude-3-sonnet",
+              options:
+                this.demoMode === "session-isolation"
+                  ? [{ value: isolatedModel, name: isolatedModel }]
+                  : [
+                      {
+                        value: "claude-3-sonnet",
+                        name: "Claude 3 Sonnet",
+                      },
+                      { value: "claude-3-opus", name: "Claude 3 Opus" },
+                    ],
+            },
+          ];
 
     this.sessions.set(sessionId, {
       id: sessionId,
       cwd,
+      configOptions,
       pendingPrompt: null,
     });
 
     this.sendSessionUpdate(sessionId, {
       sessionUpdate: "available_commands_update",
-      availableCommands: [
-        {
-          name: "web",
-          description: "Search the web",
-          input: { hint: "query" },
-        },
-        { name: "test", description: "Run tests" },
-        {
-          name: "plan",
-          description: "Create a plan",
-          input: { hint: "description" },
-        },
-      ],
+      availableCommands:
+        this.demoMode === "session-isolation"
+          ? [
+              {
+                name: `session-${this.sessionCounter}`,
+                description: `Commands for ${sessionId}`,
+              },
+            ]
+          : [
+              {
+                name: "web",
+                description: "Search the web",
+                input: { hint: "query" },
+              },
+              { name: "test", description: "Run tests" },
+              {
+                name: "plan",
+                description: "Create a plan",
+                input: { hint: "description" },
+              },
+            ],
     });
+
+    if (this.demoMode === "deferred-config") {
+      // Config options streamed before the session/new response, which then
+      // omits them entirely.
+      this.sendSessionUpdate(sessionId, {
+        sessionUpdate: "config_option_update",
+        configOptions,
+      });
+    }
 
     const response: acp.NewSessionResponse = {
       sessionId,
@@ -123,23 +318,73 @@ export class MockACPServer {
         ],
         currentModeId: "code",
       },
-      models: {
-        availableModels: [
-          { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-          { modelId: "claude-3-opus", name: "Claude 3 Opus" },
-        ],
-        currentModelId: "claude-3-sonnet",
-      },
+      ...(this.demoMode === "deferred-config" ? {} : { configOptions }),
     };
 
     this.sendResponse(id, response);
+
+    if (this.demoMode === "mode-update") {
+      setImmediate(() => {
+        this.sendSessionUpdate(sessionId, {
+          sessionUpdate: "current_mode_update",
+          currentModeId: "architect",
+        });
+      });
+    }
+
+    if (this.demoMode === "session-isolation" && previousSession) {
+      setImmediate(() => {
+        this.sendSessionUpdate(previousSession.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: previousSession.configOptions,
+        });
+        this.sendSessionUpdate(previousSession.id, {
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "stale", description: "Stale session command" },
+          ],
+        });
+        void this.requestClient("fs/read_text_file", {
+          sessionId: previousSession.id,
+          path: "/workspace/stale.ts",
+        }).catch(() => {});
+      });
+    }
+  }
+
+  private handleSetConfigOption(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : null;
+    const configId =
+      typeof params?.configId === "string" ? params.configId : null;
+    const value = typeof params?.value === "string" ? params.value : null;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    const configOption = session?.configOptions.find(
+      (option) => option.id === configId && option.type === "select"
+    );
+
+    if (!session || !configOption || !value) {
+      this.sendError(id, -32602, "Invalid session configuration option");
+      return;
+    }
+
+    configOption.currentValue = value;
+    this.sendResponse(id, { configOptions: session.configOptions });
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "config_option_update",
+      configOptions: session.configOptions,
+    });
   }
 
   private async handlePrompt(
     id: number,
     params?: Record<string, unknown>
   ): Promise<void> {
-    const sessionId = params?.sessionId as string | undefined;
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
     const session = sessionId ? this.sessions.get(sessionId) : null;
 
     if (!session) {
@@ -155,11 +400,22 @@ export class MockACPServer {
         case "ansi":
           await this.demoAnsiOutput(session.id);
           break;
+        case "capabilities":
+          await this.demoCapabilities(session.id);
+          break;
+        case "permission":
+          await this.demoPermission(session.id);
+          break;
         case "plan":
           await this.demoPlanDisplay(session.id);
           break;
         default:
           await this.demoDefault(session.id);
+      }
+
+      if (session.pendingPrompt?.signal.aborted) {
+        this.sendResponse(id, { stopReason: "cancelled" });
+        return;
       }
     } catch (error) {
       if (session.pendingPrompt?.signal.aborted) {
@@ -172,6 +428,71 @@ export class MockACPServer {
 
     session.pendingPrompt = null;
     this.sendResponse(id, { stopReason: "end_turn" });
+  }
+
+  private requestClient(
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<unknown> {
+    const id = this.nextClientRequestId++;
+    return new Promise<unknown>((resolve, reject) => {
+      this.pendingClientRequests.set(id, { resolve, reject });
+      this.stdout.push(
+        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`
+      );
+    });
+  }
+
+  private async demoPermission(sessionId: string): Promise<void> {
+    const permission = (await this.requestClient("session/request_permission", {
+      sessionId,
+      toolCall: { toolCallId: "tool-1", title: "Write file", kind: "edit" },
+      options: [
+        { optionId: "always", name: "Always allow", kind: "allow_always" },
+        { optionId: "once", name: "Allow once", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    })) as acp.RequestPermissionResponse;
+    const outcome = permission.outcome;
+    this.permissionOutcomes.push(outcome);
+    this.sendSessionUpdate(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "text",
+        text: `permission:${
+          outcome.outcome === "selected" ? outcome.optionId : outcome.outcome
+        }`,
+      },
+    });
+  }
+
+  private async demoCapabilities(sessionId: string): Promise<void> {
+    const terminalId = "mock-terminal";
+    await this.demoPermission(sessionId);
+    await this.requestClient("fs/read_text_file", {
+      sessionId,
+      path: "/workspace/input.ts",
+    });
+    await this.requestClient("fs/write_text_file", {
+      sessionId,
+      path: "/workspace/output.ts",
+      content: "export {};\n",
+    });
+    await this.requestClient("terminal/create", {
+      sessionId,
+      command: "echo",
+      args: ["capability"],
+      cwd: "/workspace",
+      outputByteLimit: 1024,
+    });
+    await this.requestClient("terminal/output", { sessionId, terminalId });
+    await this.requestClient("terminal/wait_for_exit", {
+      sessionId,
+      terminalId,
+    });
+    await this.requestClient("terminal/kill", { sessionId, terminalId });
+    await this.requestClient("terminal/release", { sessionId, terminalId });
+    await this.demoDefault(sessionId);
   }
 
   private async demoDefault(sessionId: string): Promise<void> {
@@ -296,12 +617,30 @@ export class MockACPServer {
     });
   }
 
-  private handleCancel(id: number, params?: Record<string, unknown>): void {
-    const sessionId = params?.sessionId as string | undefined;
+  private handleCloseSession(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!sessionId || !session) {
+      this.sendError(id, -32000, "Session not found");
+      return;
+    }
+
+    session.pendingPrompt?.abort();
+    this.sessions.delete(sessionId);
+    this.closedSessionIds.push(sessionId);
+    this.sendResponse(id, {});
+  }
+
+  private handleCancel(params?: Record<string, unknown>): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
     if (sessionId) {
       this.sessions.get(sessionId)?.pendingPrompt?.abort();
     }
-    this.sendResponse(id, {});
   }
 
   private delay(ms: number): Promise<void> {
@@ -343,6 +682,7 @@ export interface MockChildProcess extends EventEmitter {
   pid: number;
   killed: boolean;
   kill: () => boolean;
+  server: MockACPServer;
 }
 
 export function createMockProcess(
@@ -363,6 +703,10 @@ export function createMockProcess(
     value: server.stderr,
     writable: false,
   });
+  Object.defineProperty(mockProcess, "server", {
+    value: server,
+    writable: false,
+  });
   Object.defineProperty(mockProcess, "pid", { value: 99999, writable: false });
 
   let killed = false;
@@ -371,7 +715,8 @@ export function createMockProcess(
   mockProcess.kill = () => {
     server.kill();
     killed = true;
-    mockProcess.emit("exit", 0);
+    // Real child processes report exit on a later turn of the event loop.
+    setImmediate(() => mockProcess.emit("exit", 0));
     return true;
   };
 

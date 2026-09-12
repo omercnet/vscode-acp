@@ -2,16 +2,12 @@ import * as assert from "assert";
 import { ChildProcess } from "child_process";
 import { ACPClient, type SpawnFunction } from "../acp/client";
 import { getAgent } from "../acp/agents";
-import { createMockProcess } from "./mocks/acp-server";
-import type {
-  ReadTextFileRequest,
-  WriteTextFileRequest,
-  CreateTerminalRequest,
-  TerminalOutputRequest,
-  WaitForTerminalExitRequest,
-  KillTerminalCommandRequest,
-  ReleaseTerminalRequest,
-} from "@agentclientprotocol/sdk";
+import type { RequestPermissionResponse } from "@agentclientprotocol/sdk";
+import {
+  createMockProcess,
+  type DemoMode,
+  type MockChildProcess,
+} from "./mocks/acp-server";
 
 suite("ACPClient", () => {
   let client: ACPClient;
@@ -85,14 +81,20 @@ suite("ACPClient", () => {
 suite("ACPClient with Mock Server", () => {
   let client: ACPClient;
   let mockSpawn: SpawnFunction;
+  let demoMode: DemoMode;
+  let mockProcesses: MockChildProcess[];
 
   setup(() => {
+    demoMode = "default";
+    mockProcesses = [];
     mockSpawn = (
       _command: string,
       _args: string[],
       _options: unknown
     ): ChildProcess => {
-      return createMockProcess() as unknown as ChildProcess;
+      const process = createMockProcess(demoMode);
+      mockProcesses.push(process);
+      return process as unknown as ChildProcess;
     };
 
     client = new ACPClient({
@@ -160,6 +162,26 @@ suite("ACPClient with Mock Server", () => {
         await client.connect();
       }, /Already connected or connecting/);
     });
+
+    test("advertises only client capabilities backed by handlers", async () => {
+      await client.connect();
+
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getInitializeRequest()?.clientCapabilities,
+        {}
+      );
+    });
+
+    test("rejects an unsupported negotiated protocol version", async () => {
+      demoMode = "invalid-version";
+
+      await assert.rejects(
+        () => client.connect(),
+        /Unsupported ACP protocol version/
+      );
+      assert.strictEqual(client.getState(), "error");
+      assert.strictEqual(mockProcesses[0].killed, true);
+    });
   });
 
   suite("newSession", () => {
@@ -193,6 +215,162 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(metadata.commands?.[0].input?.hint, "query");
       assert.strictEqual(metadata.commands?.[1].name, "test");
       assert.strictEqual(metadata.commands?.[2].name, "plan");
+    });
+
+    test("applies grouped config options streamed before the session response", async () => {
+      demoMode = "deferred-config";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const models = client.getSessionMetadata()?.models;
+      assert.deepStrictEqual(models?.availableModels, [
+        { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+        { modelId: "claude-3-opus", name: "Claude 3 Opus" },
+      ]);
+      assert.strictEqual(models?.currentModelId, "claude-3-opus");
+    });
+
+    test("does not expose a model selector with an invalid current value", async () => {
+      demoMode = "invalid-config";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      assert.strictEqual(client.getSessionMetadata()?.models, null);
+    });
+
+    test("tracks current mode updates in session metadata", async () => {
+      demoMode = "mode-update";
+      await client.connect();
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(
+        client.getSessionMetadata()?.modes?.currentModeId,
+        "architect"
+      );
+    });
+
+    test("keeps pre-response metadata scoped to its session", async () => {
+      demoMode = "session-isolation";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      let staleReadCount = 0;
+      client.setOnReadTextFile(async () => {
+        staleReadCount++;
+        return { content: "stale" };
+      });
+      const observedSessionIds: string[] = [];
+      client.setOnSessionUpdate((notification) => {
+        observedSessionIds.push(notification.sessionId);
+      });
+
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const metadata = client.getSessionMetadata();
+      assert.strictEqual(metadata?.models?.currentModelId, "session-2-model");
+      assert.strictEqual(metadata?.commands?.[0]?.name, "session-2");
+      assert.deepStrictEqual(observedSessionIds, []);
+      assert.strictEqual(staleReadCount, 0);
+    });
+
+    test("cancels work in the replaced session", async () => {
+      demoMode = "ansi";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const prompt = client.sendMessage("Hello");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.newSession("/test/dir");
+
+      assert.strictEqual((await prompt).stopReason, "cancelled");
+    });
+
+    test("cancels permission requests arriving after replacement starts", async () => {
+      demoMode = "late-permission";
+      let permissionHandlerCalls = 0;
+      client.setOnRequestPermission(async () => {
+        permissionHandlerCalls++;
+        return { outcome: { outcome: "selected", optionId: "once" } };
+      });
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(permissionHandlerCalls, 0);
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getPermissionOutcomes().at(-1),
+        { outcome: "cancelled" }
+      );
+    });
+
+    test("closes a replaced session when the agent advertises support", async () => {
+      demoMode = "session-close";
+      await client.connect();
+      const firstSession = await client.newSession("/test/dir");
+
+      const secondSession = await client.newSession("/test/dir");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.notStrictEqual(secondSession.sessionId, firstSession.sessionId);
+      assert.deepStrictEqual(mockProcesses[0].server.getClosedSessionIds(), [
+        firstSession.sessionId,
+      ]);
+    });
+
+    test("does not wait for an unresponsive session close", async () => {
+      demoMode = "session-close-hangs";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const replacement = client.newSession("/test/dir").then(
+        () => "resolved" as const,
+        () => "rejected" as const
+      );
+      const result = await Promise.race([
+        replacement,
+        new Promise<"pending">((resolve) =>
+          setImmediate(() => resolve("pending"))
+        ),
+      ]);
+
+      assert.strictEqual(result, "resolved");
+      assert.ok(client.getSessionMetadata());
+    });
+
+    test("restores the current session when its replacement fails", async () => {
+      demoMode = "replacement-failure";
+      await client.connect();
+      await client.newSession("/test/dir");
+      const previousMetadata = client.getSessionMetadata();
+
+      await assert.rejects(
+        () => client.newSession("/test/dir"),
+        /Replacement session failed/
+      );
+
+      assert.deepStrictEqual(client.getSessionMetadata(), previousMetadata);
+      assert.strictEqual(
+        (await client.sendMessage("Still active")).stopReason,
+        "end_turn"
+      );
+    });
+
+    test("rejects overlapping session creation", async () => {
+      await client.connect();
+
+      const firstSession = client.newSession("/test/dir");
+      await assert.rejects(
+        () => client.newSession("/test/dir"),
+        /Session creation already in progress/
+      );
+
+      assert.ok((await firstSession).sessionId);
+      assert.ok(client.getSessionMetadata());
     });
 
     test("should throw if not connected", async () => {
@@ -230,6 +408,53 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(updates1.length, updates2.length);
     });
 
+    test("cancels permission requests without a user decision handler", async () => {
+      demoMode = "permission";
+      const streamed: string[] = [];
+      client.setOnSessionUpdate((notification) => {
+        if (
+          notification.update.sessionUpdate === "agent_message_chunk" &&
+          notification.update.content.type === "text"
+        ) {
+          streamed.push(notification.update.content.text);
+        }
+      });
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.sendMessage("Request permission");
+
+      assert.deepStrictEqual(streamed, ["permission:cancelled"]);
+    });
+
+    test("cancels a permission choice after its session is replaced", async () => {
+      demoMode = "permission";
+      let resolvePermission:
+        ((response: RequestPermissionResponse) => void) | undefined;
+      client.setOnRequestPermission(
+        () =>
+          new Promise<RequestPermissionResponse>((resolve) => {
+            resolvePermission = resolve;
+          })
+      );
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const prompt = client.sendMessage("Request permission");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await client.newSession("/test/dir");
+      assert.ok(resolvePermission);
+      resolvePermission({
+        outcome: { outcome: "selected", optionId: "always" },
+      });
+
+      assert.strictEqual((await prompt).stopReason, "cancelled");
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getPermissionOutcomes().at(-1),
+        { outcome: "cancelled" }
+      );
+    });
+
     test("should throw if no session", async () => {
       await client.connect();
 
@@ -248,6 +473,20 @@ suite("ACPClient with Mock Server", () => {
 
       const metadata = client.getSessionMetadata();
       assert.strictEqual(metadata?.modes?.currentModeId, "architect");
+    });
+
+    test("rejects a mode that the agent did not offer", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.setMode("missing-mode"),
+        /Mode is not available: missing-mode/
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.modes?.currentModeId,
+        "code"
+      );
     });
 
     test("should throw if no session", async () => {
@@ -270,6 +509,20 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(metadata?.models?.currentModelId, "claude-3-opus");
     });
 
+    test("rejects a model value that the agent did not offer", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.setModel("missing-model"),
+        /Model is not available: missing-model/
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.models?.currentModelId,
+        "claude-3-sonnet"
+      );
+    });
+
     test("should throw if no session", async () => {
       await client.connect();
 
@@ -280,11 +533,17 @@ suite("ACPClient with Mock Server", () => {
   });
 
   suite("cancel", () => {
-    test("should not throw when cancelling", async () => {
+    test("cancels an active prompt through the protocol notification", async () => {
+      demoMode = "ansi";
       await client.connect();
       await client.newSession("/test/dir");
 
+      const prompt = client.sendMessage("Hello");
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await client.cancel();
+
+      const response = await prompt;
+      assert.strictEqual(response.stopReason, "cancelled");
     });
 
     test("should not throw if no session", async () => {
@@ -303,76 +562,38 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.isConnected(), false);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
-  });
 
-  suite("file system handlers", () => {
-    test("should register readTextFile handler", () => {
-      let handlerCalled = false;
-      client.setOnReadTextFile(async (_params: ReadTextFileRequest) => {
-        handlerCalled = true;
-        return { content: "test content" };
-      });
-      assert.strictEqual(handlerCalled, false);
+    test("keeps the new connection usable when reconnecting right after dispose", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      client.dispose();
+      await client.connect();
+      // Let the killed process deliver its exit event.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(client.getState(), "connected");
+      const session = await client.newSession("/test/dir");
+      assert.ok(session.sessionId);
     });
 
-    test("should register writeTextFile handler", () => {
-      let handlerCalled = false;
-      client.setOnWriteTextFile(async (_params: WriteTextFileRequest) => {
-        handlerCalled = true;
-        return {};
-      });
-      assert.strictEqual(handlerCalled, false);
-    });
-  });
-
-  suite("terminal handlers", () => {
-    test("should register createTerminal handler", () => {
-      let handlerCalled = false;
-      client.setOnCreateTerminal(async (_params: CreateTerminalRequest) => {
-        handlerCalled = true;
-        return { terminalId: "test-id" };
-      });
-      assert.strictEqual(handlerCalled, false);
-    });
-
-    test("should register terminalOutput handler", () => {
-      let handlerCalled = false;
-      client.setOnTerminalOutput(async (_params: TerminalOutputRequest) => {
-        handlerCalled = true;
-        return { output: "", truncated: false };
-      });
-      assert.strictEqual(handlerCalled, false);
-    });
-
-    test("should register waitForTerminalExit handler", () => {
-      let handlerCalled = false;
-      client.setOnWaitForTerminalExit(
-        async (_params: WaitForTerminalExitRequest) => {
-          handlerCalled = true;
-          return { exitCode: 0 };
-        }
+    test("does not let a disposed connection attempt tear down its replacement", async () => {
+      demoMode = "no-initialize";
+      const firstConnect = client.connect();
+      const firstResult = firstConnect.then(
+        () => null,
+        (error: unknown) => error
       );
-      assert.strictEqual(handlerCalled, false);
-    });
 
-    test("should register killTerminalCommand handler", () => {
-      let handlerCalled = false;
-      client.setOnKillTerminalCommand(
-        async (_params: KillTerminalCommandRequest) => {
-          handlerCalled = true;
-          return {};
-        }
-      );
-      assert.strictEqual(handlerCalled, false);
-    });
+      client.dispose();
+      demoMode = "default";
+      const replacementConnect = client.connect();
 
-    test("should register releaseTerminal handler", () => {
-      let handlerCalled = false;
-      client.setOnReleaseTerminal(async (_params: ReleaseTerminalRequest) => {
-        handlerCalled = true;
-        return {};
-      });
-      assert.strictEqual(handlerCalled, false);
+      assert.ok((await firstResult) instanceof Error);
+      await replacementConnect;
+      assert.strictEqual(client.getState(), "connected");
+      assert.ok((await client.newSession("/test/dir")).sessionId);
     });
   });
 });
