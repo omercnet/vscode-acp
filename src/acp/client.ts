@@ -92,6 +92,7 @@ export class ACPClient {
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
   private pendingCommands: acp.AvailableCommand[] | null = null;
+  private pendingConfigOptions: acp.SessionConfigOption[] | null = null;
   private stateChangeListeners: Set<StateChangeCallback> = new Set();
   private sessionUpdateListeners: Set<SessionUpdateCallback> = new Set();
   private stderrListeners: Set<StderrCallback> = new Set();
@@ -366,11 +367,12 @@ export class ACPClient {
       }
       console.log("[ACP] Commands updated:", update.availableCommands.length);
     }
-    if (
-      update.sessionUpdate === "config_option_update" &&
-      this.sessionMetadata
-    ) {
-      this.sessionMetadata.models = getModelState(update.configOptions);
+    if (update.sessionUpdate === "config_option_update") {
+      if (this.sessionMetadata) {
+        this.sessionMetadata.models = getModelState(update.configOptions);
+      } else {
+        this.pendingConfigOptions = update.configOptions;
+      }
     }
     try {
       this.sessionUpdateListeners.forEach((callback) => callback(params));
@@ -395,10 +397,13 @@ export class ACPClient {
     this.currentSessionId = response.sessionId;
     this.sessionMetadata = {
       modes: response.modes ?? null,
-      models: getModelState(response.configOptions),
+      models: getModelState(
+        response.configOptions ?? this.pendingConfigOptions
+      ),
       commands: this.pendingCommands,
     };
     this.pendingCommands = null;
+    this.pendingConfigOptions = null;
 
     return response;
   }
@@ -490,6 +495,7 @@ export class ACPClient {
     this.currentSessionId = null;
     this.sessionMetadata = null;
     this.pendingCommands = null;
+    this.pendingConfigOptions = null;
     this.setState("disconnected");
   }
 

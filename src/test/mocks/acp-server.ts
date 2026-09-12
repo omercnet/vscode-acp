@@ -9,7 +9,8 @@ interface JsonRpcMessage {
   error?: unknown;
 }
 
-export type DemoMode = "ansi" | "capabilities" | "plan" | "default";
+export type DemoMode =
+  "ansi" | "capabilities" | "deferred-config" | "plan" | "default";
 
 interface MockSession {
   id: string;
@@ -145,19 +146,40 @@ export class MockACPServer {
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
     const sessionId = `mock-session-${++this.sessionCounter}`;
     const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
-    const configOptions: acp.SessionConfigOption[] = [
-      {
-        id: "model",
-        type: "select",
-        name: "Model",
-        category: "model",
-        currentValue: "claude-3-sonnet",
-        options: [
-          { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-          { value: "claude-3-opus", name: "Claude 3 Opus" },
-        ],
-      },
-    ];
+    const configOptions: acp.SessionConfigOption[] =
+      this.demoMode === "deferred-config"
+        ? [
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue: "claude-3-opus",
+              options: [
+                {
+                  group: "anthropic",
+                  name: "Anthropic",
+                  options: [
+                    { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+                    { value: "claude-3-opus", name: "Claude 3 Opus" },
+                  ],
+                },
+              ],
+            },
+          ]
+        : [
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue: "claude-3-sonnet",
+              options: [
+                { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+                { value: "claude-3-opus", name: "Claude 3 Opus" },
+              ],
+            },
+          ];
 
     this.sessions.set(sessionId, {
       id: sessionId,
@@ -183,6 +205,15 @@ export class MockACPServer {
       ],
     });
 
+    if (this.demoMode === "deferred-config") {
+      // Config options streamed before the session/new response, which then
+      // omits them entirely.
+      this.sendSessionUpdate(sessionId, {
+        sessionUpdate: "config_option_update",
+        configOptions,
+      });
+    }
+
     const response: acp.NewSessionResponse = {
       sessionId,
       modes: {
@@ -192,7 +223,7 @@ export class MockACPServer {
         ],
         currentModeId: "code",
       },
-      configOptions,
+      ...(this.demoMode === "deferred-config" ? {} : { configOptions }),
     };
 
     this.sendResponse(id, response);

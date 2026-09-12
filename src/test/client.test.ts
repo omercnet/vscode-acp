@@ -188,6 +188,19 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(metadata.commands?.[2].name, "plan");
     });
 
+    test("applies grouped config options streamed before the session response", async () => {
+      demoMode = "deferred-config";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      const models = client.getSessionMetadata()?.models;
+      assert.deepStrictEqual(models?.availableModels, [
+        { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+        { modelId: "claude-3-opus", name: "Claude 3 Opus" },
+      ]);
+      assert.strictEqual(models?.currentModelId, "claude-3-opus");
+    });
+
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
         await client.newSession("/test/dir");
