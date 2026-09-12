@@ -9,7 +9,36 @@ interface JsonRpcMessage {
   error?: unknown;
 }
 
+export type ProtocolErrorDemoMode =
+  | "error-parse"
+  | "error-invalid-request"
+  | "error-method-not-found"
+  | "error-invalid-params"
+  | "error-internal"
+  | "error-auth-required"
+  | "error-resource-not-found";
+
+const PROTOCOL_ERRORS: Record<
+  ProtocolErrorDemoMode,
+  { code: number; message: string }
+> = {
+  "error-parse": { code: -32700, message: "Malformed agent response" },
+  "error-invalid-request": { code: -32600, message: "Request shape rejected" },
+  "error-method-not-found": { code: -32601, message: "Prompt is unavailable" },
+  "error-invalid-params": {
+    code: -32602,
+    message: "Prompt parameters rejected",
+  },
+  "error-internal": { code: -32603, message: "Agent execution failed" },
+  "error-auth-required": { code: -32000, message: "Sign in to continue" },
+  "error-resource-not-found": {
+    code: -32002,
+    message: "Workspace file missing",
+  },
+};
+
 export type DemoMode =
+  | ProtocolErrorDemoMode
   | "ansi"
   | "capabilities"
   | "deferred-config"
@@ -389,6 +418,13 @@ export class MockACPServer {
 
     if (!session) {
       this.sendError(id, -32000, "Session not found");
+      return;
+    }
+
+    const protocolError =
+      PROTOCOL_ERRORS[this.demoMode as ProtocolErrorDemoMode];
+    if (protocolError) {
+      this.sendError(id, protocolError.code, protocolError.message);
       return;
     }
 

@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ACPClient } from "./acp/client";
+import { ACPClient, formatACPError } from "./acp/client";
 import { ChatViewProvider } from "./views/chat";
 
 let acpClient: ACPClient | undefined;
@@ -59,7 +59,8 @@ export function activate(context: vscode.ExtensionContext) {
           await acpClient?.connect();
           vscode.window.showInformationMessage("VSCode ACP connected");
         } catch (error) {
-          vscode.window.showErrorMessage(`Failed to connect: ${error}`);
+          console.error("[ACP] Failed to connect:", error);
+          vscode.window.showErrorMessage(formatACPError(error));
         }
       }
     })

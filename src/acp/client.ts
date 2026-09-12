@@ -54,6 +54,79 @@ export interface SessionMetadata {
 export type ACPConnectionState =
   "disconnected" | "connecting" | "connected" | "error";
 
+export type ACPErrorKind =
+  | "protocol"
+  | "invalid-request"
+  | "unsupported-operation"
+  | "invalid-parameters"
+  | "agent"
+  | "authentication-required"
+  | "resource-not-found"
+  | "unknown";
+
+export interface ACPErrorPresentation {
+  kind: ACPErrorKind;
+  code?: number;
+  summary: string;
+  diagnostic: string;
+}
+
+const ERROR_PRESENTATIONS: Record<
+  number,
+  Pick<ACPErrorPresentation, "kind" | "summary">
+> = {
+  [-32700]: { kind: "protocol", summary: "Protocol error" },
+  [-32600]: { kind: "invalid-request", summary: "Invalid request" },
+  [-32601]: {
+    kind: "unsupported-operation",
+    summary: "Unsupported operation",
+  },
+  [-32602]: { kind: "invalid-parameters", summary: "Invalid parameters" },
+  [-32603]: { kind: "agent", summary: "Agent error" },
+  [-32000]: {
+    kind: "authentication-required",
+    summary: "Authentication required",
+  },
+  [-32002]: { kind: "resource-not-found", summary: "File not found" },
+};
+
+/**
+ * Classifies structured JSON-RPC errors exposed by ACP SDK 1.4.
+ *
+ * Only {@link acp.RequestError} instances carry a transport-verified RPC code;
+ * other errors remain unclassified and retain their diagnostic text.
+ */
+export function describeACPError(error: unknown): ACPErrorPresentation {
+  if (error instanceof acp.RequestError) {
+    const presentation = ERROR_PRESENTATIONS[error.code];
+    if (presentation) {
+      return {
+        ...presentation,
+        code: error.code,
+        diagnostic: error.message,
+      };
+    }
+
+    return {
+      kind: "unknown",
+      code: error.code,
+      summary: "ACP request failed",
+      diagnostic: error.message,
+    };
+  }
+
+  return {
+    kind: "unknown",
+    summary: "Error",
+    diagnostic: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export function formatACPError(error: unknown): string {
+  const { summary, diagnostic } = describeACPError(error);
+  return diagnostic ? `${summary}: ${diagnostic}` : summary;
+}
+
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: acp.SessionNotification) => void;
 type StderrCallback = (data: string) => void;
