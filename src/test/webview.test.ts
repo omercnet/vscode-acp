@@ -76,12 +76,12 @@ function createWebviewHTML(): string {
     <select id="model-selector" style="display: none;"></select>
   </div>
   
-  <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" tabindex="-1">
+  <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-content" tabindex="-1">
     <div class="permission-modal-content">
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
-      <pre class="permission-content"></pre>
-      <div class="permission-options"></div>
-      <button class="permission-cancel-btn">Cancel</button>
+      <pre class="permission-content" id="permission-content"></pre>
+      <div class="permission-options" role="group" aria-label="Permission options"></div>
+      <button class="permission-cancel-btn" type="button">Cancel</button>
     </div>
   </div>
 </body>

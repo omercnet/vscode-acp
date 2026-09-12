@@ -85,7 +85,12 @@ export interface ExtensionMessage {
   title?: string;
   kind?: ToolKind;
   content?: ToolCallContentItem[];
-  rawInput?: { command?: string; description?: string };
+  // Arbitrary agent-supplied tool input; `command`/`description` are the only
+  // fields this UI reads directly.
+  rawInput?: { command?: string; description?: string } & Record<
+    string,
+    unknown
+  >;
   rawOutput?: { output?: string };
   status?: string;
   terminalOutput?: string;
