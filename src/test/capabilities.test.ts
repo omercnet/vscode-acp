@@ -3,17 +3,16 @@ import { ChildProcess } from "child_process";
 import { ACPClient, type SpawnFunction } from "../acp/client";
 import { createMockProcess } from "./mocks/acp-server";
 
-suite("Client Capabilities - File System", () => {
+suite("Client capabilities", () => {
   let client: ACPClient;
-  let mockSpawn: SpawnFunction;
 
   setup(() => {
-    mockSpawn = (
+    const mockSpawn: SpawnFunction = (
       _command: string,
       _args: string[],
       _options: unknown
     ): ChildProcess => {
-      return createMockProcess() as unknown as ChildProcess;
+      return createMockProcess("capabilities") as unknown as ChildProcess;
     };
 
     client = new ACPClient({
@@ -32,39 +31,63 @@ suite("Client Capabilities - File System", () => {
     client.dispose();
   });
 
-  suite("fs/read_text_file", () => {
-    test("should read file content successfully", async () => {
-      await client.connect();
-      await client.newSession("/test/dir");
+  test("routes filesystem and terminal requests through registered handlers", async () => {
+    const calls: string[] = [];
 
-      // This test will fail until we implement the capability
-      // The mock server needs to call readTextFile on the client
-      // For now, this is a placeholder that will fail
-      assert.ok(true, "Test not yet implemented");
+    client.setOnReadTextFile(async (params) => {
+      calls.push("read");
+      assert.strictEqual(params.path, "/workspace/input.ts");
+      return { content: "export const source = 1;\n" };
+    });
+    client.setOnWriteTextFile(async (params) => {
+      calls.push("write");
+      assert.deepStrictEqual(params, {
+        sessionId: "mock-session-1",
+        path: "/workspace/output.ts",
+        content: "export {};\n",
+      });
+      return {};
+    });
+    client.setOnCreateTerminal(async (params) => {
+      calls.push("create");
+      assert.strictEqual(params.command, "echo");
+      assert.deepStrictEqual(params.args, ["capability"]);
+      return { terminalId: "mock-terminal" };
+    });
+    client.setOnTerminalOutput(async (params) => {
+      calls.push("output");
+      assert.strictEqual(params.terminalId, "mock-terminal");
+      return { output: "capability\n", truncated: false, exitStatus: null };
+    });
+    client.setOnWaitForTerminalExit(async (params) => {
+      calls.push("wait");
+      assert.strictEqual(params.terminalId, "mock-terminal");
+      return { exitCode: 0 };
+    });
+    client.setOnKillTerminalCommand(async (params) => {
+      calls.push("kill");
+      assert.strictEqual(params.terminalId, "mock-terminal");
+      return {};
+    });
+    client.setOnReleaseTerminal(async (params) => {
+      calls.push("release");
+      assert.strictEqual(params.terminalId, "mock-terminal");
+      return {};
     });
 
-    test("should read unsaved editor buffer content", async () => {
-      await client.connect();
-      await client.newSession("/test/dir");
+    await client.connect();
+    await client.newSession("/workspace");
+    const response = await client.sendMessage("Exercise capabilities");
 
-      // Test that readTextFile checks workspace.textDocuments first
-      assert.ok(true, "Test not yet implemented");
-    });
-
-    test("should return error for non-existent file", async () => {
-      await client.connect();
-      await client.newSession("/test/dir");
-
-      // Test error handling for missing files
-      assert.ok(true, "Test not yet implemented");
-    });
-
-    test("should respect line and limit parameters", async () => {
-      await client.connect();
-      await client.newSession("/test/dir");
-
-      // Test that line offset and limit work correctly
-      assert.ok(true, "Test not yet implemented");
-    });
+    assert.strictEqual(response.stopReason, "end_turn");
+    assert.deepStrictEqual(calls, [
+      "read",
+      "write",
+      "create",
+      "output",
+      "wait",
+      "kill",
+      "release",
+    ]);
   });
 });

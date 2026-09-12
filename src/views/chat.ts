@@ -19,8 +19,8 @@ import type {
   TerminalOutputResponse,
   WaitForTerminalExitRequest,
   WaitForTerminalExitResponse,
-  KillTerminalCommandRequest,
-  KillTerminalCommandResponse,
+  KillTerminalRequest,
+  KillTerminalResponse,
   ReleaseTerminalRequest,
   ReleaseTerminalResponse,
 } from "@agentclientprotocol/sdk";
@@ -131,7 +131,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
 
     this.acpClient.setOnKillTerminalCommand(
-      async (params: KillTerminalCommandRequest) => {
+      async (params: KillTerminalRequest) => {
         return this.handleKillTerminalCommand(params);
       }
     );
@@ -461,8 +461,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleKillTerminalCommand(
-    params: KillTerminalCommandRequest
-  ): Promise<KillTerminalCommandResponse> {
+    params: KillTerminalRequest
+  ): Promise<KillTerminalResponse> {
     const terminal = this.terminals.get(params.terminalId);
     if (!terminal) {
       throw new Error(`Terminal not found: ${params.terminalId}`);
@@ -543,6 +543,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (update.sessionUpdate === "current_mode_update") {
       this.postMessage({ type: "modeUpdate", modeId: update.currentModeId });
+    } else if (update.sessionUpdate === "config_option_update") {
+      this.sendSessionMetadata();
     } else if (update.sessionUpdate === "available_commands_update") {
       this.postMessage({
         type: "availableCommands",
@@ -728,10 +730,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let modeRestored = false;
     let modelRestored = false;
 
-    if (
-      savedModeId &&
-      availableModes.some((mode: any) => mode && mode.id === savedModeId)
-    ) {
+    if (savedModeId && availableModes.some((mode) => mode.id === savedModeId)) {
       await this.acpClient.setMode(savedModeId);
       console.log(`[Chat] Restored mode: ${savedModeId}`);
       modeRestored = true;
@@ -739,9 +738,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (
       savedModelId &&
-      availableModels.some(
-        (model: any) => model && model.modelId === savedModelId
-      )
+      availableModels.some((model) => model.modelId === savedModelId)
     ) {
       await this.acpClient.setModel(savedModelId);
       console.log(`[Chat] Restored model: ${savedModelId}`);

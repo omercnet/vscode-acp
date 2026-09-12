@@ -1,11 +1,20 @@
 import { EventEmitter, Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
 
-export type DemoMode = "ansi" | "plan" | "default";
+interface JsonRpcMessage {
+  id?: number;
+  method?: string;
+  params?: Record<string, unknown>;
+  result?: unknown;
+  error?: unknown;
+}
+
+export type DemoMode = "ansi" | "capabilities" | "plan" | "default";
 
 interface MockSession {
   id: string;
   cwd: string;
+  configOptions: acp.SessionConfigOption[];
   pendingPrompt: AbortController | null;
 }
 
@@ -19,6 +28,11 @@ export class MockACPServer {
   readonly stderr: Readable;
 
   private stdinBuffer = "";
+  private nextClientRequestId = 10_000;
+  private pendingClientRequests = new Map<
+    number,
+    { resolve: () => void; reject: (error: Error) => void }
+  >();
 
   constructor(demoMode: DemoMode = "default") {
     this.demoMode = demoMode;
@@ -45,55 +59,110 @@ export class MockACPServer {
     this.stdinBuffer = lines.pop() || "";
 
     for (const line of lines) {
-      if (line.trim()) {
-        try {
-          const request = JSON.parse(line);
-          this.handleRequest(request);
-        } catch {
-          console.error("[MockACP] Failed to parse:", line);
+      if (!line.trim()) {
+        continue;
+      }
+
+      try {
+        const message: JsonRpcMessage = JSON.parse(line);
+        if (message.method !== undefined) {
+          this.handleRequest(message);
+        } else {
+          this.handleClientResponse(message);
         }
+      } catch {
+        console.error("[MockACP] Failed to parse:", line);
       }
     }
   }
 
-  private handleRequest(request: {
-    jsonrpc: "2.0";
-    id: number;
-    method: string;
-    params?: Record<string, unknown>;
-  }): void {
-    switch (request.method) {
+  private handleClientResponse(response: JsonRpcMessage): void {
+    const id = response.id;
+    if (id === undefined) {
+      return;
+    }
+
+    const pendingRequest = this.pendingClientRequests.get(id);
+    if (!pendingRequest) {
+      return;
+    }
+    this.pendingClientRequests.delete(id);
+
+    if (response.error === undefined) {
+      pendingRequest.resolve();
+    } else {
+      pendingRequest.reject(new Error(JSON.stringify(response.error)));
+    }
+  }
+
+  private handleRequest(request: JsonRpcMessage): void {
+    const id = request.id;
+    const method = request.method;
+    const params = request.params;
+    if (method === undefined) {
+      return;
+    }
+
+    switch (method) {
       case "initialize":
-        this.sendResponse(request.id, {
-          protocolVersion: acp.PROTOCOL_VERSION,
-          agentCapabilities: { loadSession: false },
-        });
+        if (id !== undefined) {
+          this.sendResponse(id, {
+            protocolVersion: acp.PROTOCOL_VERSION,
+            agentCapabilities: { loadSession: false },
+          });
+        }
         break;
       case "session/new":
-        this.handleNewSession(request.id, request.params);
+        if (id !== undefined) {
+          this.handleNewSession(id, params);
+        }
         break;
       case "session/prompt":
-        void this.handlePrompt(request.id, request.params);
+        if (id !== undefined) {
+          void this.handlePrompt(id, params);
+        }
         break;
       case "session/set_mode":
-      case "session/set_model":
-        this.sendResponse(request.id, {});
+        if (id !== undefined) {
+          this.sendResponse(id, {});
+        }
+        break;
+      case "session/set_config_option":
+        if (id !== undefined) {
+          this.handleSetConfigOption(id, params);
+        }
         break;
       case "session/cancel":
-        this.handleCancel(request.id, request.params);
+        this.handleCancel(params);
         break;
       default:
-        this.sendError(request.id, -32601, `Unknown method: ${request.method}`);
+        if (id !== undefined) {
+          this.sendError(id, -32601, `Unknown method: ${method}`);
+        }
     }
   }
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
     const sessionId = `mock-session-${++this.sessionCounter}`;
-    const cwd = (params?.cwd as string) || process.cwd();
+    const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
+    const configOptions: acp.SessionConfigOption[] = [
+      {
+        id: "model",
+        type: "select",
+        name: "Model",
+        category: "model",
+        currentValue: "claude-3-sonnet",
+        options: [
+          { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+          { value: "claude-3-opus", name: "Claude 3 Opus" },
+        ],
+      },
+    ];
 
     this.sessions.set(sessionId, {
       id: sessionId,
       cwd,
+      configOptions,
       pendingPrompt: null,
     });
 
@@ -123,23 +192,45 @@ export class MockACPServer {
         ],
         currentModeId: "code",
       },
-      models: {
-        availableModels: [
-          { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-          { modelId: "claude-3-opus", name: "Claude 3 Opus" },
-        ],
-        currentModelId: "claude-3-sonnet",
-      },
+      configOptions,
     };
 
     this.sendResponse(id, response);
+  }
+
+  private handleSetConfigOption(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : null;
+    const configId =
+      typeof params?.configId === "string" ? params.configId : null;
+    const value = typeof params?.value === "string" ? params.value : null;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    const configOption = session?.configOptions.find(
+      (option) => option.id === configId && option.type === "select"
+    );
+
+    if (!session || !configOption || !value) {
+      this.sendError(id, -32602, "Invalid session configuration option");
+      return;
+    }
+
+    configOption.currentValue = value;
+    this.sendResponse(id, { configOptions: session.configOptions });
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "config_option_update",
+      configOptions: session.configOptions,
+    });
   }
 
   private async handlePrompt(
     id: number,
     params?: Record<string, unknown>
   ): Promise<void> {
-    const sessionId = params?.sessionId as string | undefined;
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
     const session = sessionId ? this.sessions.get(sessionId) : null;
 
     if (!session) {
@@ -155,11 +246,19 @@ export class MockACPServer {
         case "ansi":
           await this.demoAnsiOutput(session.id);
           break;
+        case "capabilities":
+          await this.demoCapabilities(session.id);
+          break;
         case "plan":
           await this.demoPlanDisplay(session.id);
           break;
         default:
           await this.demoDefault(session.id);
+      }
+
+      if (session.pendingPrompt?.signal.aborted) {
+        this.sendResponse(id, { stopReason: "cancelled" });
+        return;
       }
     } catch (error) {
       if (session.pendingPrompt?.signal.aborted) {
@@ -172,6 +271,47 @@ export class MockACPServer {
 
     session.pendingPrompt = null;
     this.sendResponse(id, { stopReason: "end_turn" });
+  }
+
+  private requestClient(
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<void> {
+    const id = this.nextClientRequestId++;
+    return new Promise<void>((resolve, reject) => {
+      this.pendingClientRequests.set(id, { resolve, reject });
+      this.stdout.push(
+        `${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`
+      );
+    });
+  }
+
+  private async demoCapabilities(sessionId: string): Promise<void> {
+    const terminalId = "mock-terminal";
+    await this.requestClient("fs/read_text_file", {
+      sessionId,
+      path: "/workspace/input.ts",
+    });
+    await this.requestClient("fs/write_text_file", {
+      sessionId,
+      path: "/workspace/output.ts",
+      content: "export {};\n",
+    });
+    await this.requestClient("terminal/create", {
+      sessionId,
+      command: "echo",
+      args: ["capability"],
+      cwd: "/workspace",
+      outputByteLimit: 1024,
+    });
+    await this.requestClient("terminal/output", { sessionId, terminalId });
+    await this.requestClient("terminal/wait_for_exit", {
+      sessionId,
+      terminalId,
+    });
+    await this.requestClient("terminal/kill", { sessionId, terminalId });
+    await this.requestClient("terminal/release", { sessionId, terminalId });
+    await this.demoDefault(sessionId);
   }
 
   private async demoDefault(sessionId: string): Promise<void> {
@@ -296,12 +436,12 @@ export class MockACPServer {
     });
   }
 
-  private handleCancel(id: number, params?: Record<string, unknown>): void {
-    const sessionId = params?.sessionId as string | undefined;
+  private handleCancel(params?: Record<string, unknown>): void {
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
     if (sessionId) {
       this.sessions.get(sessionId)?.pendingPrompt?.abort();
     }
-    this.sendResponse(id, {});
   }
 
   private delay(ms: number): Promise<void> {
