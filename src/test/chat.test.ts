@@ -99,6 +99,7 @@ class TestACPClient implements MockACPClient {
     | null = null;
   private sessionUpdateCallback:
     ((update: SessionNotification) => void) | null = null;
+  private stderrCallback: ((text: string) => void) | null = null;
   public lastSetModeId: string | null = null;
   public lastSetModelId: string | null = null;
   public currentSessionId: string | null = "test-session";
@@ -132,8 +133,13 @@ class TestACPClient implements MockACPClient {
       }
     };
   }
-  setOnStderr(): () => void {
-    return () => {};
+  setOnStderr(callback: (text: string) => void): () => void {
+    this.stderrCallback = callback;
+    return () => {
+      if (this.stderrCallback === callback) {
+        this.stderrCallback = null;
+      }
+    };
   }
   setOnReadTextFile(): void {}
   setOnWriteTextFile(): void {}
@@ -203,6 +209,10 @@ class TestACPClient implements MockACPClient {
 
   emitSessionUpdate(update: SessionNotification): void {
     this.sessionUpdateCallback?.(update);
+  }
+
+  emitStderr(text: string): void {
+    this.stderrCallback?.(text);
   }
 }
 
@@ -716,6 +726,28 @@ suite("ChatViewProvider", () => {
     });
   });
 
+  test("forwards agent stderr diagnostics to the chat", () => {
+    const client = new TestACPClient();
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      client as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+
+    client.emitStderr(
+      'ModelNotFoundError:\ndata: {providerID: "openai", modelID: "missing"}'
+    );
+
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "agentError",
+      text: "Model not found: openai/missing",
+    });
+  });
+
   suite("Session history", () => {
     test("persists active session metadata in workspace state", async () => {
       const workspaceState = new TestMemento();
@@ -746,6 +778,86 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(history?.[0].cwd, process.cwd());
       assert.strictEqual(history?.[0].preview, "Describe the migration plan");
       assert.strictEqual(history?.[0].messageCount, 1);
+    });
+
+    test("keeps identical session ids isolated by agent", async () => {
+      class SecondAgentClient extends TestACPClient {
+        getAgentId(): string {
+          return "agent-b";
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      await workspaceState.update("vscode-acp.sessionHistory", [
+        {
+          sessionId: "shared-session",
+          agentId: "agent-a",
+          cwd: "/agent-a",
+          createdAt: 1,
+          lastUsedAt: 1,
+          preview: "Agent A conversation",
+          messageCount: 1,
+        },
+      ]);
+      const client = new SecondAgentClient();
+      client.currentSessionId = "shared-session";
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        saveCurrentSession(preview?: string): Promise<void>;
+        handleDeleteStoredSession(sessionId: string): Promise<void>;
+      };
+
+      await sessionProvider.saveCurrentSession("Agent B conversation");
+      let history = workspaceState.get<
+        Array<{ sessionId: string; agentId: string; preview: string }>
+      >("vscode-acp.sessionHistory");
+      assert.deepStrictEqual(
+        history?.map(({ agentId, preview }) => ({ agentId, preview })),
+        [
+          { agentId: "agent-b", preview: "Agent B conversation" },
+          { agentId: "agent-a", preview: "Agent A conversation" },
+        ]
+      );
+
+      await sessionProvider.handleDeleteStoredSession("shared-session");
+      history = workspaceState.get("vscode-acp.sessionHistory");
+      assert.deepStrictEqual(
+        history?.map(({ agentId }) => agentId),
+        ["agent-a"]
+      );
+    });
+
+    test("does not persist sessions before a turn completes", async () => {
+      class ConnectedClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ConnectedClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        ensureSession(): Promise<void>;
+        handleNewChat(): Promise<void>;
+      };
+
+      await sessionProvider.ensureSession();
+      await sessionProvider.handleNewChat();
+
+      assert.deepStrictEqual(
+        workspaceState.get("vscode-acp.sessionHistory") ?? [],
+        []
+      );
     });
 
     test("rebuilds replayed messages without duplicating chunks", async () => {
@@ -834,6 +946,150 @@ suite("ChatViewProvider", () => {
         { role: "user", text: "First question" },
         { role: "assistant", text: "First answer" },
       ]);
+    });
+
+    test("escapes agent-provided HTML when replaying markdown", async () => {
+      class LoadingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = sessionId;
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "agent-1",
+              content: {
+                type: "text",
+                text: '<button class="permission-modal">Allow</button>',
+              },
+            },
+          } satisfies SessionNotification);
+        }
+      }
+
+      const client = new LoadingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const sessionProvider = provider as unknown as {
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+
+      await sessionProvider.loadStoredSession({
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Unsafe response",
+        messageCount: 1,
+      });
+
+      const completed = messages.find(
+        (message) => message.type === "replayComplete"
+      );
+      const replayed = completed?.messages as Array<{ html?: string }>;
+      assert.ok(replayed[0].html?.includes("&lt;button"));
+      assert.ok(!replayed[0].html?.includes("<button"));
+    });
+
+    test("does not save a late prompt into a loaded session", async () => {
+      let finishPrompt!: () => void;
+      let markPromptStarted!: () => void;
+      const promptStarted = new Promise<void>((resolve) => {
+        markPromptStarted = resolve;
+      });
+      class InterleavedClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          markPromptStarted();
+          await new Promise<void>((resolve) => {
+            finishPrompt = resolve;
+          });
+          return { stopReason: "end_turn" };
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = sessionId;
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      await workspaceState.update("vscode-acp.sessionHistory", [
+        {
+          sessionId: "restored-session",
+          agentId: "test-agent",
+          cwd: process.cwd(),
+          createdAt: 1,
+          lastUsedAt: 1,
+          preview: "Original preview",
+          messageCount: 2,
+        },
+      ]);
+      const client = new InterleavedClient();
+      client.currentSessionId = "old-session";
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        hasSession: boolean;
+        handleUserMessage(text: string): Promise<void>;
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+      sessionProvider.hasSession = true;
+
+      const prompt = sessionProvider.handleUserMessage("Late prompt");
+      await promptStarted;
+      await sessionProvider.loadStoredSession({
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Original preview",
+        messageCount: 2,
+      });
+      finishPrompt();
+      await prompt;
+
+      const restored = workspaceState
+        .get<
+          Array<{ sessionId: string; preview: string; messageCount: number }>
+        >("vscode-acp.sessionHistory")
+        ?.find((entry) => entry.sessionId === "restored-session");
+      assert.strictEqual(restored?.preview, "Original preview");
+      assert.strictEqual(restored?.messageCount, 2);
     });
 
     test("keeps the visible session state when loading fails", async () => {

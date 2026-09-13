@@ -26,6 +26,7 @@ import type {
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 
+
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
@@ -99,6 +100,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private replayMessages: ReplayMessage[] = [];
   private connectionStart: Promise<void> | null = null;
   private sessionStart: Promise<void> | null = null;
+  private conversationGeneration = 0;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
   private permissionRequests: Map<
@@ -142,6 +144,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnSessionUpdate((update) => {
       this.handleSessionUpdate(update);
+    });
+    this.acpClient.setOnStderr((text) => {
+      this.handleStderr(text);
     });
 
     this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
@@ -365,7 +370,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.workspaceState.update(
         SESSION_HISTORY_KEY,
         this.getStoredSessions().filter(
-          (entry) => entry.sessionId !== session.sessionId
+          (entry) =>
+            entry.sessionId !== session.sessionId ||
+            entry.agentId !== session.agentId
         )
       );
       this.postMessage({ type: "sessionDeleted", sessionId });
@@ -419,7 +426,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     const cwd = workspaceFolder?.uri.fsPath || process.cwd();
     const history = this.getStoredSessions();
-    const existing = history.find((session) => session.sessionId === sessionId);
+    const existing = history.find(
+      (session) =>
+        session.sessionId === sessionId &&
+        session.agentId === this.acpClient.getAgentId()
+    );
     const normalizedPreview = preview
       ?.replace(/\s+/g, " ")
       .trim()
@@ -436,7 +447,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     };
     const updatedHistory = [
       entry,
-      ...history.filter((session) => session.sessionId !== sessionId),
+      ...history.filter(
+        (session) =>
+          session.sessionId !== sessionId ||
+          session.agentId !== this.acpClient.getAgentId()
+      ),
     ]
       .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
       .slice(0, limit);
@@ -447,6 +462,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async loadStoredSession(session: StoredSession): Promise<void> {
     const hadSession = this.hasSession;
     const hadRestoredModeModel = this.hasRestoredModeModel;
+    this.conversationGeneration++;
     this.isReplaying = true;
     this.replayMessages = [];
     this.postMessage({ type: "replayStart" });
@@ -456,7 +472,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.hasSession = true;
       this.hasRestoredModeModel = false;
       const history = this.getStoredSessions().map((entry) =>
-        entry.sessionId === session.sessionId
+        entry.sessionId === session.sessionId &&
+        entry.agentId === session.agentId
           ? { ...entry, lastUsedAt: Date.now() }
           : entry
       );
@@ -1029,9 +1046,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         .then(() => {
           this.hasSession = true;
           this.sendSessionMetadata();
-          void this.saveCurrentSession().catch((error) =>
-            console.warn("[Chat] Failed to save session metadata:", error)
-          );
         })
         .finally(() => {
           this.sessionStart = null;
@@ -1045,6 +1059,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     try {
       await this.ensureSession();
+      const promptGeneration = this.conversationGeneration;
+      const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
       this.stderrBuffer = "";
       this.postMessage({ type: "streamStart" });
@@ -1070,9 +1086,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
         });
       }
-      void this.saveCurrentSession(text).catch((error) =>
-        console.warn("[Chat] Failed to save session metadata:", error)
-      );
+      if (
+        promptGeneration === this.conversationGeneration &&
+        promptSessionId === this.acpClient.getCurrentSessionId()
+      ) {
+        void this.saveCurrentSession(text).catch((error) =>
+          console.warn("[Chat] Failed to save session metadata:", error)
+        );
+      }
       this.streamingText = "";
     } catch (error) {
       const { kind } = describeACPError(error);
@@ -1096,6 +1117,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (agent) {
       this.expirePermissionRequests();
       this.acpClient.setAgent(agent);
+      this.conversationGeneration++;
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
       this.postMessage({ type: "agentChanged", agentId });
@@ -1136,6 +1158,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleNewChat(): Promise<void> {
     this.expirePermissionRequests();
+    this.conversationGeneration++;
     const hadSession = this.hasSession;
     const hadRestoredModeModel = this.hasRestoredModeModel;
     this.streamingText = "";
@@ -1155,9 +1178,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.hasSession = true;
       this.hasRestoredModeModel = false;
       this.postMessage({ type: "chatCleared" });
-      void this.saveCurrentSession().catch((error) =>
-        console.warn("[Chat] Failed to save session metadata:", error)
-      );
       this.sendSessionMetadata();
     } catch (error) {
       this.hasSession = hadSession;
