@@ -69,6 +69,7 @@ export type DemoMode =
   | "invalid-version"
   | "late-permission"
   | "load"
+  | "mcp-transports"
   | "load-failure"
   | "no-initialize"
   | "session-isolation"
@@ -108,6 +109,8 @@ export class MockACPServer {
   private authenticated = false;
   private authenticationRequests: string[] = [];
   private newSessionRequestCount = 0;
+  private newSessionRequests: acp.NewSessionRequest[] = [];
+  private loadSessionRequests: acp.LoadSessionRequest[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -119,6 +122,13 @@ export class MockACPServer {
 
   getClosedSessionIds(): readonly string[] {
     return this.closedSessionIds;
+  }
+  getNewSessionRequests(): readonly acp.NewSessionRequest[] {
+    return this.newSessionRequests;
+  }
+
+  getLoadSessionRequests(): readonly acp.LoadSessionRequest[] {
+    return this.loadSessionRequests;
   }
 
   getAuthenticationRequests(): readonly string[] {
@@ -213,6 +223,9 @@ export class MockACPServer {
             agentCapabilities: {
               loadSession:
                 this.demoMode === "load" || this.demoMode === "load-failure",
+              ...(this.demoMode === "mcp-transports"
+                ? { mcpCapabilities: { http: true, sse: true } }
+                : {}),
               ...(this.demoMode === "session-close" ||
               this.demoMode === "session-close-hangs"
                 ? { sessionCapabilities: { close: {} } }
@@ -291,6 +304,9 @@ export class MockACPServer {
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
     this.newSessionRequestCount++;
+    if (params) {
+      this.newSessionRequests.push(params as acp.NewSessionRequest);
+    }
     if (
       (this.demoMode === "authentication" ||
         this.demoMode === "authentication-failure") &&
@@ -462,6 +478,9 @@ export class MockACPServer {
     id: number,
     params?: Record<string, unknown>
   ): void {
+    if (params) {
+      this.loadSessionRequests.push(params as acp.LoadSessionRequest);
+    }
     if (this.demoMode === "load-failure") {
       this.sendError(id, -32000, "Session load failed");
       return;

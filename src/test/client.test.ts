@@ -10,6 +10,7 @@ import {
 import { getAgent } from "../acp/agents";
 import {
   RequestError,
+  type McpServer,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import {
@@ -389,6 +390,15 @@ suite("ACPClient with Mock Server", () => {
         {}
       );
     });
+    test("exposes negotiated MCP transport capabilities", async () => {
+      demoMode = "mcp-transports";
+      await client.connect();
+
+      assert.deepStrictEqual(client.getMcpCapabilities(), {
+        http: true,
+        sse: true,
+      });
+    });
 
     test("rejects an unsupported negotiated protocol version", async () => {
       demoMode = "invalid-version";
@@ -536,7 +546,10 @@ suite("ACPClient with Mock Server", () => {
   suite("newSession", () => {
     test("should create a new session", async () => {
       await client.connect();
-      const response = await client.newSession("/test/dir");
+      const response = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
 
       assert.ok(response.sessionId);
       assert.ok(response.sessionId.startsWith("mock-session-"));
@@ -552,7 +565,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("should receive available commands update", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -570,7 +583,7 @@ suite("ACPClient with Mock Server", () => {
     test("applies grouped config options streamed before the session response", async () => {
       demoMode = "deferred-config";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const models = client.getSessionMetadata()?.models;
       assert.deepStrictEqual(models?.availableModels, [
@@ -583,7 +596,7 @@ suite("ACPClient with Mock Server", () => {
     test("does not expose a model selector with an invalid current value", async () => {
       demoMode = "invalid-config";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       assert.strictEqual(client.getSessionMetadata()?.models, null);
     });
@@ -591,7 +604,7 @@ suite("ACPClient with Mock Server", () => {
     test("tracks current mode updates in session metadata", async () => {
       demoMode = "mode-update";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.strictEqual(
@@ -603,7 +616,7 @@ suite("ACPClient with Mock Server", () => {
     test("keeps pre-response metadata scoped to its session", async () => {
       demoMode = "session-isolation";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       let staleReadCount = 0;
       client.setOnReadTextFile(async () => {
@@ -615,7 +628,7 @@ suite("ACPClient with Mock Server", () => {
         observedSessionIds.push(notification.sessionId);
       });
 
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       await new Promise<void>((resolve) => setImmediate(resolve));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -629,11 +642,11 @@ suite("ACPClient with Mock Server", () => {
     test("cancels work in the replaced session", async () => {
       demoMode = "ansi";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const prompt = client.sendMessage("Hello");
       await new Promise<void>((resolve) => setImmediate(resolve));
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       assert.strictEqual((await prompt).stopReason, "cancelled");
     });
@@ -646,9 +659,9 @@ suite("ACPClient with Mock Server", () => {
         return { outcome: { outcome: "selected", optionId: "once" } };
       });
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.strictEqual(permissionHandlerCalls, 0);
@@ -661,9 +674,15 @@ suite("ACPClient with Mock Server", () => {
     test("closes a replaced session when the agent advertises support", async () => {
       demoMode = "session-close";
       await client.connect();
-      const firstSession = await client.newSession("/test/dir");
+      const firstSession = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
 
-      const secondSession = await client.newSession("/test/dir");
+      const secondSession = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.notStrictEqual(secondSession.sessionId, firstSession.sessionId);
@@ -675,12 +694,14 @@ suite("ACPClient with Mock Server", () => {
     test("does not wait for an unresponsive session close", async () => {
       demoMode = "session-close-hangs";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      const replacement = client.newSession("/test/dir").then(
-        () => "resolved" as const,
-        () => "rejected" as const
-      );
+      const replacement = client
+        .newSession({ cwd: "/test/dir", mcpServers: [] })
+        .then(
+          () => "resolved" as const,
+          () => "rejected" as const
+        );
       const result = await Promise.race([
         replacement,
         new Promise<"pending">((resolve) =>
@@ -695,11 +716,11 @@ suite("ACPClient with Mock Server", () => {
     test("restores the current session when its replacement fails", async () => {
       demoMode = "replacement-failure";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       const previousMetadata = client.getSessionMetadata();
 
       await assert.rejects(
-        () => client.newSession("/test/dir"),
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
         /Replacement session failed/
       );
 
@@ -713,9 +734,12 @@ suite("ACPClient with Mock Server", () => {
     test("rejects overlapping session creation", async () => {
       await client.connect();
 
-      const firstSession = client.newSession("/test/dir");
+      const firstSession = client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
       await assert.rejects(
-        () => client.newSession("/test/dir"),
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
         /Session creation already in progress/
       );
 
@@ -725,7 +749,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("should throw if not connected", async () => {
       await assert.rejects(async () => {
-        await client.newSession("/test/dir");
+        await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       }, /Not connected/);
     });
   });
@@ -736,7 +760,12 @@ suite("ACPClient with Mock Server", () => {
 
       assert.strictEqual(client.supportsSessionLoad(), false);
       await assert.rejects(
-        () => client.loadSession("missing-session", "/test/dir"),
+        () =>
+          client.loadSession({
+            sessionId: "missing-session",
+            cwd: "/test/dir",
+            mcpServers: [],
+          }),
         /does not support session loading/
       );
     });
@@ -744,7 +773,10 @@ suite("ACPClient with Mock Server", () => {
     test("replays message chunks while restoring the selected session", async () => {
       demoMode = "load";
       await client.connect();
-      const created = await client.newSession("/test/dir");
+      const created = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
       const updates: Array<{ sessionUpdate: string; text: string }> = [];
       client.setOnSessionUpdate((notification) => {
         const update = notification.update;
@@ -760,7 +792,11 @@ suite("ACPClient with Mock Server", () => {
         }
       });
 
-      await client.loadSession(created.sessionId, "/test/dir");
+      await client.loadSession({
+        sessionId: created.sessionId,
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
 
       assert.strictEqual(client.supportsSessionLoad(), true);
       assert.strictEqual(client.getCurrentSessionId(), created.sessionId);
@@ -771,14 +807,53 @@ suite("ACPClient with Mock Server", () => {
         { sessionUpdate: "agent_message_chunk", text: "answer" },
       ]);
     });
+    test("passes the same MCP servers to session/new and session/load", async () => {
+      demoMode = "load";
+      await client.connect();
+      const mcpServers: McpServer[] = [
+        {
+          name: "filesystem",
+          command: process.execPath,
+          args: ["server.js"],
+          env: [{ name: "TOKEN", value: "resolved-value" }],
+        },
+      ];
+
+      const created = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers,
+      });
+      await client.loadSession({
+        sessionId: created.sessionId,
+        cwd: "/test/dir",
+        mcpServers,
+      });
+
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getNewSessionRequests()[0].mcpServers,
+        mcpServers
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getLoadSessionRequests()[0].mcpServers,
+        mcpServers
+      );
+    });
 
     test("keeps the active session when loading fails", async () => {
       demoMode = "load-failure";
       await client.connect();
-      const active = await client.newSession("/test/dir");
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
 
       await assert.rejects(
-        () => client.loadSession(active.sessionId, "/test/dir"),
+        () =>
+          client.loadSession({
+            sessionId: active.sessionId,
+            cwd: "/test/dir",
+            mcpServers: [],
+          }),
         /Session load failed/
       );
 
@@ -793,7 +868,7 @@ suite("ACPClient with Mock Server", () => {
   suite("sendMessage", () => {
     test("should send message and receive response", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const updates: unknown[] = [];
       client.setOnSessionUpdate((update) => updates.push(update));
@@ -806,7 +881,7 @@ suite("ACPClient with Mock Server", () => {
     test("keeps the connection and session available after an RPC error", async () => {
       demoMode = "error-internal";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await assert.rejects(
         () => client.sendMessage("Hello"),
@@ -820,12 +895,15 @@ suite("ACPClient with Mock Server", () => {
 
       assert.strictEqual(client.getState(), "connected");
       assert.ok(client.getSessionMetadata());
-      assert.ok((await client.newSession("/test/dir")).sessionId);
+      assert.ok(
+        (await client.newSession({ cwd: "/test/dir", mcpServers: [] }))
+          .sessionId
+      );
     });
 
     test("should notify multiple session update listeners", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const updates1: unknown[] = [];
       const updates2: unknown[] = [];
@@ -850,7 +928,7 @@ suite("ACPClient with Mock Server", () => {
         }
       });
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await client.sendMessage("Request permission");
 
@@ -868,11 +946,11 @@ suite("ACPClient with Mock Server", () => {
           })
       );
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const prompt = client.sendMessage("Request permission");
       await new Promise<void>((resolve) => setImmediate(resolve));
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
       assert.ok(resolvePermission);
       resolvePermission({
         outcome: { outcome: "selected", optionId: "always" },
@@ -897,7 +975,7 @@ suite("ACPClient with Mock Server", () => {
   suite("setMode", () => {
     test("should change mode", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await client.setMode("architect");
 
@@ -907,7 +985,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("rejects a mode that the agent did not offer", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await assert.rejects(
         () => client.setMode("missing-mode"),
@@ -931,7 +1009,7 @@ suite("ACPClient with Mock Server", () => {
   suite("setModel", () => {
     test("should change model", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await client.setModel("claude-3-opus");
 
@@ -941,7 +1019,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("rejects a model value that the agent did not offer", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await assert.rejects(
         () => client.setModel("missing-model"),
@@ -966,7 +1044,7 @@ suite("ACPClient with Mock Server", () => {
     test("cancels an active prompt through the protocol notification", async () => {
       demoMode = "ansi";
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       const prompt = client.sendMessage("Hello");
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -984,7 +1062,7 @@ suite("ACPClient with Mock Server", () => {
   suite("dispose", () => {
     test("should disconnect and clean up", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       client.dispose();
 
@@ -995,7 +1073,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("keeps the new connection usable when reconnecting right after dispose", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       client.dispose();
       await client.connect();
@@ -1004,7 +1082,10 @@ suite("ACPClient with Mock Server", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.strictEqual(client.getState(), "connected");
-      const session = await client.newSession("/test/dir");
+      const session = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
       assert.ok(session.sessionId);
     });
 
@@ -1023,7 +1104,10 @@ suite("ACPClient with Mock Server", () => {
       assert.ok((await firstResult) instanceof Error);
       await replacementConnect;
       assert.strictEqual(client.getState(), "connected");
-      assert.ok((await client.newSession("/test/dir")).sessionId);
+      assert.ok(
+        (await client.newSession({ cwd: "/test/dir", mcpServers: [] }))
+          .sessionId
+      );
     });
   });
 });

@@ -258,6 +258,7 @@ export class ACPClient {
   private canCloseSessions = false;
   private supportsSessionLoading = false;
   private loadingSessionId: acp.SessionId | null = null;
+  private mcpCapabilities: acp.McpCapabilities = {};
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -329,6 +330,9 @@ export class ACPClient {
 
   supportsSessionLoad(): boolean {
     return this.supportsSessionLoading;
+  }
+  getMcpCapabilities(): acp.McpCapabilities {
+    return { ...this.mcpCapabilities };
   }
 
   setOnStateChange(callback: StateChangeCallback): () => void {
@@ -405,6 +409,7 @@ export class ACPClient {
     let connection: acp.ClientConnection | null = null;
     this.authenticationMethods = [];
     this.canCloseSessions = false;
+    this.mcpCapabilities = {};
     this.setState("connecting");
 
     try {
@@ -431,7 +436,6 @@ export class ACPClient {
           return;
         }
         const text = data.toString();
-        console.error("[ACP stderr]", text);
         this.stderrListeners.forEach((callback) => callback(text));
       });
 
@@ -466,6 +470,7 @@ export class ACPClient {
         this.supportsSessionLoading = false;
         this.authenticationMethods = [];
         this.loadingSessionId = null;
+        this.mcpCapabilities = {};
         this.setState("disconnected");
       });
 
@@ -482,10 +487,7 @@ export class ACPClient {
             if (!this.isActiveSession(params.sessionId)) {
               return { outcome: { outcome: "cancelled" as const } };
             }
-            console.log(
-              "[ACP] Permission request:",
-              JSON.stringify(params, null, 2)
-            );
+            console.log("[ACP] Permission request received");
             if (this.requestPermissionHandler) {
               const response = await this.requestPermissionHandler(params);
               return this.isActiveSession(params.sessionId)
@@ -501,7 +503,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.fs.readTextFile, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Read text file request:", params.path);
           if (this.readTextFileHandler) {
             return this.readTextFileHandler(params);
           }
@@ -509,7 +510,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.fs.writeTextFile, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Write text file request:", params.path);
           if (this.writeTextFileHandler) {
             return this.writeTextFileHandler(params);
           }
@@ -517,7 +517,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.terminal.create, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Create terminal request:", params.command);
           if (this.createTerminalHandler) {
             return this.createTerminalHandler(params);
           }
@@ -525,7 +524,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.terminal.output, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Terminal output request:", params.terminalId);
           if (this.terminalOutputHandler) {
             return this.terminalOutputHandler(params);
           }
@@ -533,7 +531,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.terminal.waitForExit, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Wait for terminal exit:", params.terminalId);
           if (this.waitForTerminalExitHandler) {
             return this.waitForTerminalExitHandler(params);
           }
@@ -541,7 +538,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.terminal.kill, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Kill terminal:", params.terminalId);
           if (this.killTerminalCommandHandler) {
             return this.killTerminalCommandHandler(params);
           }
@@ -549,7 +545,6 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.terminal.release, ({ params }) => {
           this.requireActiveSession(params.sessionId);
-          console.log("[ACP] Release terminal:", params.terminalId);
           if (this.releaseTerminalHandler) {
             return this.releaseTerminalHandler(params);
           }
@@ -607,6 +602,9 @@ export class ACPClient {
       this.authenticationMethods = Array.isArray(advertisedAuthMethods)
         ? advertisedAuthMethods.filter(isAgentAuthMethod)
         : [];
+      this.mcpCapabilities = {
+        ...initResponse.agentCapabilities?.mcpCapabilities,
+      };
 
       this.setState("connected");
       return initResponse;
@@ -629,6 +627,7 @@ export class ACPClient {
         this.supportsSessionLoading = false;
         this.loadingSessionId = null;
         this.authenticationMethods = [];
+        this.mcpCapabilities = {};
         this.setState("error");
       }
       throw error;
@@ -670,17 +669,16 @@ export class ACPClient {
     if (!isCurrentSession && params.sessionId !== this.loadingSessionId) {
       return;
     }
-    if (update.sessionUpdate === "agent_message_chunk") {
-      console.log("[ACP] CHUNK:", JSON.stringify(update));
-    }
     try {
       this.sessionUpdateListeners.forEach((callback) => callback(params));
-    } catch (error) {
-      console.error("[ACP] Error in session update listener:", error);
+    } catch {
+      console.error("[ACP] Session update listener failed");
     }
   }
 
-  async newSession(workingDirectory: string): Promise<acp.NewSessionResponse> {
+  async newSession(
+    params: acp.NewSessionRequest
+  ): Promise<acp.NewSessionResponse> {
     const connection = this.connection;
     if (!connection) {
       throw new Error("Not connected");
@@ -710,10 +708,7 @@ export class ACPClient {
 
       const response = await connection.agent.request(
         acp.methods.agent.session.new,
-        {
-          cwd: workingDirectory,
-          mcpServers: [],
-        }
+        params
       );
 
       if (
@@ -750,9 +745,9 @@ export class ACPClient {
           .request(acp.methods.agent.session.close, {
             sessionId: replacedSessionId,
           })
-          .catch((error) => {
+          .catch(() => {
             if (!connection.signal.aborted) {
-              console.warn("[ACP] Failed to close replaced session:", error);
+              console.warn("[ACP] Failed to close replaced session");
             }
           });
       }
@@ -799,9 +794,9 @@ export class ACPClient {
     }
   }
   async loadSession(
-    sessionId: acp.SessionId,
-    workingDirectory: string
+    params: acp.LoadSessionRequest
   ): Promise<acp.LoadSessionResponse> {
+    const sessionId = params.sessionId;
     const connection = this.connection;
     if (!connection) {
       throw new Error("Not connected");
@@ -834,11 +829,7 @@ export class ACPClient {
 
       const response = await connection.agent.request(
         acp.methods.agent.session.load,
-        {
-          sessionId,
-          cwd: workingDirectory,
-          mcpServers: [],
-        }
+        params
       );
 
       if (
@@ -878,9 +869,9 @@ export class ACPClient {
           .request(acp.methods.agent.session.close, {
             sessionId: replacedSessionId,
           })
-          .catch((error) => {
+          .catch(() => {
             if (!connection.signal.aborted) {
-              console.warn("[ACP] Failed to close replaced session:", error);
+              console.warn("[ACP] Failed to close replaced session");
             }
           });
       }
@@ -1026,14 +1017,11 @@ export class ACPClient {
           prompt: [{ type: "text", text: message }],
         }
       );
-      console.log("[ACP] Prompt completed:", JSON.stringify(response, null, 2));
+      console.log(`[ACP] Prompt completed: ${response.stopReason}`);
       return response;
     } catch (error) {
-      console.error("[ACP] Prompt error:", error);
-      if (error instanceof Error) {
-        console.error("[ACP] Error details:", error.message, error.stack);
-      }
-      console.error("[ACP] Raw error:", JSON.stringify(error, null, 2));
+      const code = error instanceof acp.RequestError ? error.code : undefined;
+      console.error("[ACP] Prompt request failed", { code });
       throw error;
     } finally {
       if (this.activePrompt === prompt) {
@@ -1072,6 +1060,7 @@ export class ACPClient {
     this.canCloseSessions = false;
     this.supportsSessionLoading = false;
     this.loadingSessionId = null;
+    this.mcpCapabilities = {};
     this.activePrompt = null;
     this.authenticationMethods = [];
     this.setState("disconnected");

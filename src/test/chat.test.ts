@@ -3,11 +3,15 @@ import * as vscode from "vscode";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
+import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
 import type {
   AuthMethod,
   AuthMethodId,
+  LoadSessionRequest,
+  McpCapabilities,
+  NewSessionRequest,
   RequestPermissionRequest,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
@@ -41,10 +45,11 @@ interface MockACPClient {
   setOnRequestPermission: (callback: any) => void;
   isConnected: () => boolean;
   connect: () => Promise<void>;
-  newSession: (dir: string) => Promise<void>;
+  newSession: (params: NewSessionRequest) => Promise<void>;
   sendMessage: (text: string) => Promise<{ stopReason: string }>;
-  loadSession: (sessionId: string, dir: string) => Promise<void>;
+  loadSession: (params: LoadSessionRequest) => Promise<void>;
   supportsSessionLoad: () => boolean;
+  getMcpCapabilities: () => McpCapabilities;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -190,12 +195,15 @@ class TestACPClient implements MockACPClient {
     return { stopReason: "end_turn" };
   }
 
-  async loadSession(_sessionId: string, _dir: string): Promise<void> {
+  async loadSession(_params: LoadSessionRequest): Promise<void> {
     throw new Error("Session loading is unavailable");
   }
 
   supportsSessionLoad(): boolean {
     return false;
+  }
+  getMcpCapabilities(): McpCapabilities {
+    return {};
   }
 
   async setMode(modeId: string): Promise<void> {
@@ -1414,6 +1422,90 @@ suite("ChatViewProvider", () => {
     });
   });
 
+  test("redacts MCP secrets from stderr, logs, and error messages", () => {
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      acpClient as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const secret = "session-secret-value";
+    const messages: Array<Record<string, unknown>> = [];
+    const logs: string[] = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const redactor = Reflect.get(
+      provider,
+      "mcpSecretRedactor"
+    ) as McpSecretRedactor;
+    redactor.add([secret]);
+    const originalConsoleError = console.error;
+    console.error = (...values: unknown[]) => logs.push(values.join(" "));
+
+    try {
+      const handleStderr = Reflect.get(provider, "handleStderr") as (
+        this: ChatViewProvider,
+        text: string
+      ) => void;
+      handleStderr.call(
+        provider,
+        'ProviderError:\ndata: {providerID: "session-'
+      );
+      handleStderr.call(provider, 'secret-value", modelID: "model"}');
+      const postACPError = Reflect.get(provider, "postACPError") as (
+        this: ChatViewProvider,
+        context: string,
+        error: unknown
+      ) => void;
+      postACPError.call(provider, "Session failed", new Error(secret));
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    const visibleOutput = JSON.stringify(messages);
+    const bufferedStderr = Reflect.get(provider, "stderrBuffer") as string;
+    assert.ok(!visibleOutput.includes(secret));
+    assert.ok(!logs.join("\n").includes(secret));
+    assert.ok(!bufferedStderr.includes(secret));
+    assert.match(visibleOutput, /\[redacted\]/);
+  });
+
+  test("rethrows session creation errors without MCP secrets", async () => {
+    const secret = "session-secret-value";
+    class SecretErrorClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async newSession(): Promise<void> {
+        throw new Error(`Agent echoed ${secret}`);
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new SecretErrorClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const redactor = Reflect.get(
+      provider,
+      "mcpSecretRedactor"
+    ) as McpSecretRedactor;
+    redactor.add([secret]);
+    const handleConnect = Reflect.get(provider, "handleConnect") as (
+      this: ChatViewProvider
+    ) => Promise<void>;
+
+    await assert.rejects(
+      () => handleConnect.call(provider),
+      (error) => {
+        assert.ok(error instanceof Error);
+        assert.strictEqual(error.message, "Agent echoed [redacted]");
+        return true;
+      }
+    );
+  });
+
   test("ends a cancelled prompt without an error card", async () => {
     class CancellingClient extends TestACPClient {
       isConnected(): boolean {
@@ -1466,7 +1558,7 @@ suite("ChatViewProvider", () => {
 
     assert.deepStrictEqual(messages.at(-1), {
       type: "agentError",
-      text: "Model not found: openai/missing",
+      text: "Agent reported an error. Check the ACP output channel for details.",
     });
   });
 
@@ -1592,7 +1684,8 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          const sessionId = params.sessionId;
           this.currentSessionId = sessionId;
           this.emitSessionUpdate({
             sessionId,
@@ -1676,7 +1769,8 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          const sessionId = params.sessionId;
           this.currentSessionId = sessionId;
           this.emitSessionUpdate({
             sessionId,
@@ -1757,8 +1851,8 @@ suite("ChatViewProvider", () => {
           return { stopReason: "end_turn" };
         }
 
-        async loadSession(sessionId: string): Promise<void> {
-          this.currentSessionId = sessionId;
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
         }
       }
 
