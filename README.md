@@ -18,6 +18,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **📝 Rich Markdown** — Code blocks, syntax highlighting, and formatted responses
 - **🔄 Streaming Responses** — Watch the AI think in real-time
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
+- **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
 
 ## Requirements
 
@@ -46,6 +47,8 @@ You need at least one ACP-compatible agent installed:
 2. Click **Connect** to start a session
 3. Select your preferred agent from the dropdown
 4. Start chatting!
+
+If an agent requires ACP authentication, choose one of its advertised sign-in methods. The agent owns that flow; VSCode ACP does not ask for, store, or log API keys or other credentials.
 
 ### Session History
 

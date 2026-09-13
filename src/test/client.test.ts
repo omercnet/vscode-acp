@@ -401,6 +401,73 @@ suite("ACPClient with Mock Server", () => {
     });
   });
 
+  suite("authentication", () => {
+    test("retains advertised agent methods and authenticates before retrying session creation", async () => {
+      demoMode = "authentication";
+
+      await client.connect();
+      assert.deepStrictEqual(client.getAuthenticationMethods(), [
+        { id: "browser", name: "Browser sign-in" },
+      ]);
+
+      await assert.rejects(
+        () => client.newSession("/test/dir"),
+        (error) => error instanceof RequestError && error.code === -32000
+      );
+      await client.authenticate("browser");
+      const session = await client.newSession("/test/dir");
+
+      assert.ok(session.sessionId);
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getAuthenticationRequests(),
+        ["browser"]
+      );
+      assert.strictEqual(
+        mockProcesses[0].server.getNewSessionRequestCount(),
+        2
+      );
+    });
+
+    test("rejects terminal and stale authentication methods without sending them", async () => {
+      demoMode = "authentication-terminal";
+      await client.connect();
+
+      await assert.rejects(
+        () => client.authenticate("terminal"),
+        /Authentication method is not available/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getAuthenticationRequests(),
+        []
+      );
+
+      client.dispose();
+      await assert.rejects(
+        () => client.authenticate("terminal"),
+        /Not connected/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getAuthenticationRequests(),
+        []
+      );
+    });
+
+    test("keeps the connected, sessionless state when authentication fails", async () => {
+      demoMode = "authentication-failure";
+      await client.connect();
+
+      await assert.rejects(() => client.newSession("/test/dir"));
+      await assert.rejects(() => client.authenticate("browser"));
+
+      assert.strictEqual(client.getState(), "connected");
+      assert.strictEqual(client.getSessionMetadata(), null);
+      assert.strictEqual(
+        mockProcesses[0].server.getNewSessionRequestCount(),
+        1
+      );
+    });
+  });
+
   suite("newSession", () => {
     test("should create a new session", async () => {
       await client.connect();

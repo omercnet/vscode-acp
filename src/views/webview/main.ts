@@ -1227,6 +1227,15 @@ export class WebviewController {
       this.elements;
 
     switch (msg.type) {
+      case "restoreInput":
+        if (msg.text) {
+          this.elements.inputEl.value = msg.text;
+          this.elements.inputEl.style.height = "auto";
+          this.elements.inputEl.focus();
+          this.saveState();
+        }
+        break;
+
       case "userMessage":
         if (msg.text) {
           this.addMessage(msg.text, "user");

@@ -9,7 +9,10 @@ import {
 } from "../acp/agents";
 import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import { selectAgentPaths } from "../acp/agentPaths";
+import { RequestError } from "@agentclientprotocol/sdk";
 import type {
+  AuthMethodAgent,
+  AuthMethodId,
   SessionNotification,
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -50,6 +53,10 @@ interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
   text: string;
+}
+
+interface AuthenticationPickItem extends vscode.QuickPickItem {
+  methodId: AuthMethodId;
 }
 
 interface WebviewMessage {
@@ -1111,6 +1118,58 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async selectAuthenticationMethod(): Promise<AuthMethodId | null> {
+    const methods = this.acpClient
+      .getAuthenticationMethods()
+      .filter(
+        (method): method is AuthMethodAgent =>
+          !("type" in method && method.type === "terminal")
+      );
+    if (methods.length === 0) {
+      throw new Error("No supported authentication methods are available");
+    }
+
+    const selection = await vscode.window.showQuickPick<AuthenticationPickItem>(
+      methods.map((method) => ({
+        label: method.name,
+        description: method.description ?? undefined,
+        methodId: method.id,
+      })),
+      {
+        title: "Authentication required",
+        placeHolder: "Select an authentication method",
+        ignoreFocusOut: true,
+      }
+    );
+    return selection?.methodId ?? null;
+  }
+
+  private async createSessionWithAuthentication(
+    workingDirectory: string
+  ): Promise<void> {
+    try {
+      await this.acpClient.newSession(workingDirectory);
+    } catch (error) {
+      if (describeACPError(error).kind !== "authentication-required") {
+        throw error;
+      }
+
+      const hasSupportedMethod = this.acpClient
+        .getAuthenticationMethods()
+        .some((method) => !("type" in method && method.type === "terminal"));
+      if (!hasSupportedMethod) {
+        throw error;
+      }
+
+      const methodId = await this.selectAuthenticationMethod();
+      if (!methodId) {
+        throw new Error("Authentication cancelled");
+      }
+      await this.acpClient.authenticate(methodId);
+      await this.acpClient.newSession(workingDirectory);
+    }
+  }
+
   private async ensureConnection(): Promise<void> {
     if (this.acpClient.isConnected()) {
       return;
@@ -1150,7 +1209,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sessionStart = this.runSessionTransition(label, async () => {
         await this.ensureConnection();
         if (!this.hasSession) {
-          await this.acpClient.newSession(workingDir);
+          await this.createSessionWithAuthentication(workingDir);
           this.hasSession = true;
           this.sendSessionMetadata();
         }
@@ -1163,14 +1222,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleUserMessage(text: string): Promise<void> {
     const queuedGeneration = this.conversationGeneration;
-    this.postMessage({ type: "userMessage", text });
-
+    let promptStarted = false;
     try {
       await this.ensureSession();
       if (queuedGeneration !== this.conversationGeneration) {
-        this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
-        return;
+        throw new RequestError(-32800, "Request cancelled");
       }
+      this.postMessage({ type: "userMessage", text });
+      promptStarted = true;
       const promptGeneration = this.conversationGeneration;
       const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
@@ -1208,6 +1267,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
+      if (!promptStarted) {
+        this.postMessage({ type: "restoreInput", text });
+      }
       const { kind } = describeACPError(error);
       if (kind === "cancelled") {
         console.log("[Chat] Prompt cancelled:", error);
@@ -1291,7 +1353,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.ensureConnection();
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.acpClient.newSession(workingDir);
+        await this.createSessionWithAuthentication(workingDir);
         this.hasSession = true;
         this.hasRestoredModeModel = false;
         this.postMessage({ type: "chatCleared" });

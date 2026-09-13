@@ -52,6 +52,11 @@ function getModelState(
     currentModelId: modelConfig.currentValue,
   };
 }
+function isAgentAuthenticationMethod(
+  method: acp.AuthMethod
+): method is acp.AuthMethodAgent {
+  return !("type" in method && method.type === "terminal");
+}
 
 export interface SessionMetadata {
   modes: acp.SessionModeState | null;
@@ -221,6 +226,7 @@ export class ACPClient {
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
+  private authenticationMethods: acp.AuthMethod[] = [];
   private pendingCommandsBySession = new Map<
     acp.SessionId,
     acp.AvailableCommand[]
@@ -290,6 +296,9 @@ export class ACPClient {
 
   getCurrentSessionId(): string | null {
     return this.isConnected() ? this.currentSessionId : null;
+  }
+  getAuthenticationMethods(): readonly acp.AuthMethod[] {
+    return [...this.authenticationMethods];
   }
 
   supportsSessionLoad(): boolean {
@@ -368,6 +377,7 @@ export class ACPClient {
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
+    this.authenticationMethods = [];
     this.canCloseSessions = false;
     this.setState("connecting");
 
@@ -428,6 +438,7 @@ export class ACPClient {
         this.activePrompt = null;
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
+        this.authenticationMethods = [];
         this.loadingSessionId = null;
         this.setState("disconnected");
       });
@@ -566,6 +577,7 @@ export class ACPClient {
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
       this.supportsSessionLoading =
         initResponse.agentCapabilities?.loadSession === true;
+      this.authenticationMethods = [...(initResponse.authMethods ?? [])];
 
       this.setState("connected");
       return initResponse;
@@ -587,6 +599,7 @@ export class ACPClient {
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
         this.loadingSessionId = null;
+        this.authenticationMethods = [];
         this.setState("error");
       }
       throw error;
@@ -873,6 +886,27 @@ export class ACPClient {
     return this.sessionMetadata;
   }
 
+  async authenticate(methodId: acp.AuthMethodId): Promise<void> {
+    const connection = this.connection;
+    const method = this.authenticationMethods.find(
+      (candidate) => candidate.id === methodId
+    );
+    if (!connection) {
+      throw new Error("Not connected");
+    }
+    if (!method || !isAgentAuthenticationMethod(method)) {
+      throw new Error("Authentication method is not available");
+    }
+
+    await connection.agent.request(acp.methods.agent.authenticate, {
+      methodId,
+    });
+
+    if (connection !== this.connection) {
+      throw new Error("Authentication result is stale");
+    }
+  }
+
   async setMode(modeId: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
@@ -996,6 +1030,7 @@ export class ACPClient {
     this.supportsSessionLoading = false;
     this.loadingSessionId = null;
     this.activePrompt = null;
+    this.authenticationMethods = [];
     this.setState("disconnected");
   }
 

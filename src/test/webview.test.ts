@@ -588,6 +588,16 @@ suite("Webview", () => {
         assert.strictEqual(msgs.length, 1);
       });
 
+      test("restores an unsent prompt after authentication cancellation", () => {
+        controller.handleMessage({ type: "restoreInput", text: "Resume this" });
+
+        assert.strictEqual(elements.inputEl.value, "Resume this");
+        assert.strictEqual(
+          mockVsCode.getState<{ inputValue: string }>()?.inputValue,
+          "Resume this"
+        );
+      });
+
       test("handles connectionState", () => {
         controller.handleMessage({
           type: "connectionState",
