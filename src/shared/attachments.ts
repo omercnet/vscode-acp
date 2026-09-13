@@ -61,9 +61,26 @@ export function formatByteSize(bytes: number | undefined): string {
 }
 
 /**
+ * Characters that must never survive into an attachment label: C0/C1
+ * controls (a file name may legally contain newlines and escapes on POSIX)
+ * plus the zero-width and bidirectional formatting characters. Left in
+ * place they let a file name or an agent-supplied replay label forge chip
+ * tooltips, reorder displayed text, or smuggle instructions into the
+ * `resource_link.name` an agent feeds to its model.
+ */
+const UNSAFE_LABEL_CHARS =
+  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/** Strips control, zero-width, and bidi-override characters from a label. */
+export function sanitizeAttachmentLabel(label: string): string {
+  return label.replace(UNSAFE_LABEL_CHARS, "");
+}
+
+/**
  * Validates attachment metadata against the reasonable size/count
- * boundaries above. Returns `false` for names/URIs that are empty or
- * absurdly long; callers should drop (not truncate) offending entries.
+ * boundaries above. Returns `false` for names/URIs that are empty,
+ * absurdly long, carry unsafe label characters, or point at anything other
+ * than a local file; callers should drop (not truncate) offending entries.
  */
 export function isAttachmentMetadataValid(
   name: string,
@@ -74,9 +91,13 @@ export function isAttachmentMetadataValid(
   return (
     name.length > 0 &&
     name.length <= MAX_ATTACHMENT_NAME_LENGTH &&
+    name === sanitizeAttachmentLabel(name) &&
     uri.length > 0 &&
     uri.length <= MAX_ATTACHMENT_URI_LENGTH &&
-    (mimeType === undefined || mimeType.length <= MAX_ATTACHMENT_MIME_LENGTH) &&
+    uri.toLowerCase().startsWith("file://") &&
+    (mimeType === undefined ||
+      (mimeType.length <= MAX_ATTACHMENT_MIME_LENGTH &&
+        mimeType === sanitizeAttachmentLabel(mimeType))) &&
     (size === undefined || (Number.isSafeInteger(size) && size >= 0))
   );
 }

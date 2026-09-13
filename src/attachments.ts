@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import {
   isAttachmentMetadataValid,
+  sanitizeAttachmentLabel,
   type FileAttachment,
 } from "./shared/attachments";
 
@@ -77,11 +78,26 @@ export function canonicalFileUri(uri: vscode.Uri): string {
 
 /**
  * Derives the basename of a URI's path without going through `fsPath`
- * (which is platform-dependent and unnecessary for a display label).
+ * (which is platform-dependent and unnecessary for a display label), with
+ * control and bidi characters stripped: POSIX file names may contain them,
+ * and they would otherwise reach both the chip tooltip and the
+ * `resource_link.name` the agent feeds to its model.
  */
 function basenameFromUriPath(uri: vscode.Uri): string {
   const segments = uri.path.split("/").filter((segment) => segment.length > 0);
-  return segments.length > 0 ? segments[segments.length - 1] : uri.path;
+  return sanitizeAttachmentLabel(
+    segments.length > 0 ? segments[segments.length - 1] : uri.path
+  );
+}
+
+/**
+ * Neutralizes VS Code's `$(icon)` markup in untrusted text so a file named
+ * `app$(check).ts` cannot render a synthetic codicon in the picker and
+ * disguise which row the user is selecting. VS Code renders `\$(` as a
+ * literal `$(`.
+ */
+export function escapeQuickPickLabel(text: string): string {
+  return sanitizeAttachmentLabel(text).replace(/\$\(/g, "\\$(");
 }
 
 /**
@@ -158,8 +174,10 @@ export function pickAttachmentUris(remaining: number): Promise<vscode.Uri[]> {
         }
         seen.add(uri.toString());
         items.push({
-          label: `$(file) ${vscode.workspace.asRelativePath(uri, false)}`,
-          description: uri.fsPath,
+          label: `$(file) ${escapeQuickPickLabel(
+            vscode.workspace.asRelativePath(uri, false)
+          )}`,
+          description: escapeQuickPickLabel(uri.fsPath),
           uri,
         });
       }

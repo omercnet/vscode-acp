@@ -2663,6 +2663,103 @@ suite("ChatViewProvider", () => {
       assert.deepStrictEqual(client.sentAttachments, []);
     });
 
+    test("sends one resource link per distinct attachment id", async () => {
+      class CapturingClient extends TestACPClient {
+        public sentAttachments: readonly unknown[] = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async sendMessage(
+          _text = "",
+          attachments: readonly unknown[] = []
+        ): Promise<{ stopReason: string }> {
+          this.sentAttachments = attachments;
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      const client = new CapturingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+        handleUserMessage(
+          text: string,
+          attachmentIds?: string[]
+        ): Promise<void>;
+      };
+      internals.pendingAttachments.set("att-1", {
+        id: "att-1",
+        uri: "file:///workspace/a.ts",
+        name: "a.ts",
+      });
+
+      await internals.handleUserMessage(
+        "Review",
+        Array.from({ length: 25 }, () => "att-1")
+      );
+
+      assert.strictEqual(client.sentAttachments.length, 1);
+    });
+
+    test("drops replayed resource links that are not local files", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayMessages: Array<{ attachments: FileAttachment[] }>;
+        handleSessionUpdate(notification: SessionNotification): void;
+      };
+      internals.isReplaying = true;
+
+      const hostile = [
+        { uri: "javascript:alert(1)", name: "innocent.ts" },
+        { uri: "data:text/html,<script>x</script>", name: "report.pdf" },
+        { uri: "https://evil.example/x", name: "note.md" },
+        {
+          uri: "file:///home/u/.ssh/id_rsa",
+          name: "todo.md\nfile:///home/u/todo.md",
+        },
+      ];
+      for (const content of hostile) {
+        internals.handleSessionUpdate({
+          sessionId: "test-session",
+          update: {
+            sessionUpdate: "user_message_chunk",
+            messageId: "user-1",
+            content: { type: "resource_link", ...content },
+          },
+        } satisfies SessionNotification);
+      }
+      internals.handleSessionUpdate({
+        sessionId: "test-session",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          messageId: "user-1",
+          content: {
+            type: "resource_link",
+            uri: "file:///workspace/real.ts",
+            name: "real.ts",
+          },
+        },
+      } satisfies SessionNotification);
+
+      assert.deepStrictEqual(
+        internals.replayMessages
+          .flatMap((message) => message.attachments)
+          .map(({ uri, name }) => ({ uri, name })),
+        [{ uri: "file:///workspace/real.ts", name: "real.ts" }]
+      );
+    });
+
     test("drops the attachment draft when the composer webview reloads", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,

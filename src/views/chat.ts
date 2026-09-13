@@ -1571,7 +1571,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return [];
     }
     const resolved: FileAttachment[] = [];
+    const seen = new Set<string>();
     for (const id of attachmentIds.slice(0, MAX_ATTACHMENTS)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
       const attachment = this.pendingAttachments.get(id);
       if (attachment) {
         resolved.push(attachment);
