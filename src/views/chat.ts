@@ -5,7 +5,10 @@ import {
   getAgent,
   getAgentsWithStatus,
   getFirstAvailableAgent,
+  type AgentDiscoveryOptions,
 } from "../acp/agents";
+import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
+import { selectAgentPaths } from "../acp/agentPaths";
 import type {
   SessionNotification,
   ReadTextFileRequest,
@@ -113,25 +116,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   > = new Map();
   private readonly permissionRequestTimeoutMs = 60000;
+  private readonly configurationSubscription: vscode.Disposable;
+  private readonly workspaceTrustSubscription: vscode.Disposable;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly acpClient: ACPClient,
     globalState: vscode.Memento,
-    workspaceState: vscode.Memento = globalState
+    workspaceState: vscode.Memento = globalState,
+    private readonly getAgentResolutionOptions: () => AgentCommandResolutionOptions = () => ({})
   ) {
     this.globalState = globalState;
     this.workspaceState = workspaceState;
 
     const savedAgentId = this.globalState.get<string>(SELECTED_AGENT_KEY);
     if (savedAgentId) {
-      const agent = getAgent(savedAgentId);
+      const agent = this.getConfiguredAgent(savedAgentId);
       if (agent) {
         this.acpClient.setAgent(agent);
       }
     } else {
-      this.acpClient.setAgent(getFirstAvailableAgent());
+      this.acpClient.setAgent(
+        getFirstAvailableAgent(this.getAgentDiscoveryOptions())
+      );
     }
+
+    this.configurationSubscription = vscode.workspace.onDidChangeConfiguration(
+      (event) => {
+        if (event.affectsConfiguration("vscode-acp.agentPaths")) {
+          this.refreshAgentConfiguration();
+        }
+      }
+    );
+    this.workspaceTrustSubscription = vscode.workspace.onDidGrantWorkspaceTrust(
+      () => this.refreshAgentConfiguration()
+    );
 
     this.acpClient.setOnStateChange((state) => {
       if (state === "disconnected" || state === "error") {
@@ -274,16 +293,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             type: "connectionState",
             state: this.acpClient.getState(),
           });
-          const agentsWithStatus = getAgentsWithStatus();
-          this.postMessage({
-            type: "agents",
-            agents: agentsWithStatus.map((a) => ({
-              id: a.id,
-              name: a.name,
-              available: a.available,
-            })),
-            selected: this.acpClient.getAgentId(),
-          });
+          this.sendAgentStatus();
           this.sendSessionMetadata();
           if (this.sessionTransitionLabel) {
             this.postMessage({
@@ -315,6 +325,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public async deleteSession(): Promise<void> {
     await this.showSessionHistory("delete");
+  }
+
+  private refreshAgentConfiguration(): void {
+    const selectedAgent = this.getConfiguredAgent(this.acpClient.getAgentId());
+    if (selectedAgent) {
+      this.acpClient.setAgent(selectedAgent);
+    }
+    this.sendAgentStatus();
+  }
+  private getAgentDiscoveryOptions(): AgentDiscoveryOptions {
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
+    const agentPaths = selectAgentPaths(
+      configuration.inspect<Record<string, string>>("agentPaths"),
+      vscode.workspace.isTrusted
+    );
+    return { ...this.getAgentResolutionOptions(), agentPaths };
+  }
+
+  private getConfiguredAgent(agentId: string) {
+    return getAgent(agentId, this.getAgentDiscoveryOptions().agentPaths);
+  }
+
+  private sendAgentStatus(): void {
+    const agentsWithStatus = getAgentsWithStatus(
+      this.getAgentDiscoveryOptions()
+    );
+    this.postMessage({
+      type: "agents",
+      agents: agentsWithStatus.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        available: agent.available,
+      })),
+      selected: this.acpClient.getAgentId(),
+    });
   }
 
   private async showSessionHistory(mode: "load" | "delete"): Promise<void> {
@@ -938,6 +983,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.terminals.clear();
 
     this.expirePermissionRequests();
+    this.configurationSubscription.dispose();
+    this.workspaceTrustSubscription.dispose();
   }
 
   private handleSessionUpdate(notification: SessionNotification): void {
@@ -1178,7 +1225,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private handleAgentChange(agentId: string): void {
-    const agent = getAgent(agentId);
+    const agent = this.getConfiguredAgent(agentId);
     if (agent) {
       this.expirePermissionRequests();
       this.acpClient.setAgent(agent);

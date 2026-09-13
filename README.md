@@ -68,12 +68,28 @@ Click on any tool to see the command input and output.
 
 ## Configuration
 
-The extension auto-detects installed agents. Supported agents:
+The extension auto-detects installed agents from the extension host's `PATH`.
+Commands are resolved to absolute executables before launch, without searching
+the workspace working directory or invoking a shell. This works the same way in
+local and remote extension hosts.
 
-| Agent       | Command    | Detection      |
-| ----------- | ---------- | -------------- |
-| OpenCode    | `opencode` | Checks `$PATH` |
-| Claude Code | `claude`   | Checks `$PATH` |
+| Agent       | Command    | Detection     |
+| ----------- | ---------- | ------------- |
+| OpenCode    | `opencode` | Checks `PATH` |
+| Claude Code | `npx`      | Checks `PATH` |
+
+Use `vscode-acp.agentPaths` to map an agent ID to an absolute executable path
+when the command is not on `PATH`. User-level overrides remain available in
+Restricted Mode. Workspace-level overrides are ignored until Workspace Trust is
+granted.
+
+```json
+{
+  "vscode-acp.agentPaths": {
+    "opencode": "/opt/opencode/bin/opencode"
+  }
+}
+```
 
 ## Development
 

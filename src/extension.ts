@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { ACPClient, formatACPError } from "./acp/client";
 import { ChatViewProvider } from "./views/chat";
+import type { AgentCommandResolutionOptions } from "./acp/agentCommand";
 
 let acpClient: ACPClient | undefined;
 let chatProvider: ChatViewProvider | undefined;
@@ -17,12 +18,20 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  acpClient = new ACPClient();
+  const getAgentResolutionOptions = (): AgentCommandResolutionOptions => ({
+    excludedDirectories: vscode.workspace.isTrusted
+      ? []
+      : (vscode.workspace.workspaceFolders ?? [])
+          .map((folder) => folder.uri.fsPath)
+          .filter((path) => path !== ""),
+  });
+  acpClient = new ACPClient({ resolutionOptions: getAgentResolutionOptions });
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
     context.globalState,
-    context.workspaceState
+    context.workspaceState,
+    getAgentResolutionOptions
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
