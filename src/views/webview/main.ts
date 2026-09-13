@@ -564,6 +564,8 @@ export class WebviewController {
   private permissionUnlockTimer: number | null = null;
   private replayStatusEl: HTMLElement | null = null;
   private sessionPickerPreviousFocus: HTMLElement | null = null;
+  private sessionPickerKeydownHandler: ((e: KeyboardEvent) => void) | null =
+    null;
 
   constructor(
     vscode: VsCodeApi,
@@ -746,14 +748,20 @@ export class WebviewController {
       cancelBtn.addEventListener("click", () => this.cancelPermission());
     }
 
-    this.elements.sessionPicker.addEventListener("keydown", (event) => {
+    this.sessionPickerKeydownHandler = (event: KeyboardEvent) => {
+      if (!this.elements.sessionPicker.classList.contains("visible")) {
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         this.hideSessionHistory();
-      } else if (event.key === "Tab") {
+        return;
+      }
+      if (event.key === "Tab") {
         this.trapSessionPickerFocus(event);
       }
-    });
+    };
+    this.doc.addEventListener("keydown", this.sessionPickerKeydownHandler);
   }
 
   addMessage(
@@ -1030,6 +1038,21 @@ export class WebviewController {
     this.replayStatusEl = null;
   }
 
+  private setReplayInProgress(inProgress: boolean): void {
+    this.elements.messagesEl.setAttribute(
+      "aria-busy",
+      inProgress ? "true" : "false"
+    );
+    this.elements.inputEl.disabled = inProgress;
+    this.elements.sendBtn.disabled =
+      inProgress || this.elements.inputEl.value.trim() === "";
+    this.elements.agentSelector.disabled = inProgress;
+    this.elements.modeSelector.disabled = inProgress;
+    this.elements.modelSelector.disabled = inProgress;
+    this.elements.connectBtn.disabled = inProgress;
+    this.elements.welcomeConnectBtn.disabled = inProgress;
+  }
+
   private showSessionHistory(
     mode: "load" | "delete",
     sessions: SessionHistoryEntry[]
@@ -1077,11 +1100,15 @@ export class WebviewController {
 
       const details = this.doc.createElement("span");
       details.className = "session-history-details";
-      details.textContent = `${session.cwd} · ${new Date(session.lastUsedAt).toLocaleString()} · ${session.messageCount} messages`;
+      const turnLabel = session.messageCount === 1 ? "turn" : "turns";
+      details.textContent = `${new Date(session.lastUsedAt).toLocaleString()} · ${session.messageCount} ${turnLabel} · ${session.cwd}`;
+      details.title = session.cwd;
       item.appendChild(details);
 
       item.addEventListener("click", () => {
-        item.disabled = true;
+        list
+          .querySelectorAll("button")
+          .forEach((button) => (button.disabled = true));
         this.vscode.postMessage({
           type: mode === "load" ? "selectSession" : "deleteSession",
           sessionId: session.sessionId,
@@ -1311,9 +1338,11 @@ export class WebviewController {
         break;
       case "replayStart":
         this.hideSessionHistory();
+        this.setReplayInProgress(true);
         this.showReplayStatus();
         break;
       case "replayComplete":
+        this.setReplayInProgress(false);
         this.clearChatState();
         msg.messages?.forEach((message) => {
           if (message.role === "user") {
@@ -1331,6 +1360,7 @@ export class WebviewController {
         this.updateViewState();
         break;
       case "replayFailed":
+        this.setReplayInProgress(false);
         this.hideReplayStatus();
         if (msg.text)
           this.addMessage(`Could not restore session: ${msg.text}`, "error");

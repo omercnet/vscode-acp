@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as vscode from "vscode";
 import { tmpdir } from "os";
 import { join } from "path";
+import { setTimeout as delay } from "timers/promises";
 import { ChatViewProvider } from "../views/chat";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
@@ -1152,6 +1153,221 @@ suite("ChatViewProvider", () => {
 
       assert.strictEqual(sessionProvider.hasSession, true);
       assert.ok(messages.some((message) => message.type === "replayFailed"));
+      assert.ok(!messages.some((message) => message.type === "replayComplete"));
+    });
+
+    test("evicts the least recently used session at the history limit", async () => {
+      const workspaceState = new TestMemento();
+      await workspaceState.update(
+        "vscode-acp.sessionHistory",
+        Array.from({ length: 50 }, (_, index) => ({
+          sessionId: `old-session-${index}`,
+          agentId: "test-agent",
+          cwd: process.cwd(),
+          createdAt: index + 1,
+          lastUsedAt: index + 1,
+          preview: `Old session ${index}`,
+          messageCount: 1,
+        }))
+      );
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const saveCurrentSession = Reflect.get(
+        provider,
+        "saveCurrentSession"
+      ) as (this: ChatViewProvider, preview?: string) => Promise<void>;
+
+      await saveCurrentSession.call(provider, "Newest session");
+
+      const history = workspaceState.get<Array<{ sessionId: string }>>(
+        "vscode-acp.sessionHistory"
+      );
+      assert.strictEqual(history?.length, 50);
+      assert.strictEqual(history?.[0].sessionId, "test-session");
+      assert.ok(
+        !history?.some((session) => session.sessionId === "old-session-0")
+      );
+    });
+
+    test("isolates an active replay from concurrent conversation actions", async () => {
+      class DeferredLoadClient extends TestACPClient {
+        promptCalls = 0;
+        newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          this.promptCalls++;
+          return { stopReason: "end_turn" };
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = sessionId;
+          this.emitSessionUpdate({
+            sessionId: "foreign-session",
+            update: {
+              sessionUpdate: "user_message_chunk",
+              messageId: "foreign-user",
+              content: { type: "text", text: "Foreign question" },
+            },
+          } satisfies SessionNotification);
+          await delay(10);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "user_message_chunk",
+              messageId: "user-1",
+              content: { type: "text", text: "Restored question" },
+            },
+          } satisfies SessionNotification);
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      await workspaceState.update("vscode-acp.sessionHistory", [
+        {
+          sessionId: "first-session",
+          agentId: "test-agent",
+          cwd: process.cwd(),
+          createdAt: 1,
+          lastUsedAt: 2,
+          preview: "First",
+          messageCount: 1,
+        },
+        {
+          sessionId: "second-session",
+          agentId: "test-agent",
+          cwd: process.cwd(),
+          createdAt: 1,
+          lastUsedAt: 1,
+          preview: "Second",
+          messageCount: 1,
+        },
+      ]);
+      const client = new DeferredLoadClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const selectSession = Reflect.get(
+        provider,
+        "handleSelectStoredSession"
+      ) as (this: ChatViewProvider, sessionId: string) => Promise<void>;
+      const handleUserMessage = Reflect.get(provider, "handleUserMessage") as (
+        this: ChatViewProvider,
+        text: string
+      ) => Promise<void>;
+      const handleNewChat = Reflect.get(provider, "handleNewChat") as (
+        this: ChatViewProvider
+      ) => Promise<void>;
+      const handleClearChat = Reflect.get(provider, "handleClearChat") as (
+        this: ChatViewProvider
+      ) => void;
+
+      const first = selectSession.call(provider, "first-session");
+      await handleUserMessage.call(provider, "Do not send this");
+      await handleNewChat.call(provider);
+      handleClearChat.call(provider);
+      await selectSession.call(provider, "second-session");
+      await first;
+
+      assert.strictEqual(client.promptCalls, 0);
+      assert.strictEqual(client.newSessionCalls, 0);
+      assert.ok(!messages.some((message) => message.type === "userMessage"));
+      assert.ok(!messages.some((message) => message.type === "chatCleared"));
+      const completions = messages.filter(
+        (message) => message.type === "replayComplete"
+      );
+      assert.strictEqual(completions.length, 1);
+      assert.deepStrictEqual(completions[0].messages, [
+        { role: "user", text: "Restored question" },
+      ]);
+      assert.ok(
+        messages.some(
+          (message) =>
+            message.type === "replayFailed" &&
+            typeof message.text === "string" &&
+            message.text.includes("already being restored")
+        )
+      );
+    });
+
+    test("discards replay completion after an agent change", async () => {
+      class DeferredLoadClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = sessionId;
+          await delay(10);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "agent-1",
+              content: { type: "text", text: "Stale answer" },
+            },
+          } satisfies SessionNotification);
+        }
+      }
+
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new DeferredLoadClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const session = {
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Previous conversation",
+        messageCount: 1,
+      };
+      const loadStoredSession = Reflect.get(provider, "loadStoredSession") as (
+        this: ChatViewProvider,
+        storedSession: typeof session
+      ) => Promise<void>;
+      const handleAgentChange = Reflect.get(provider, "handleAgentChange") as (
+        this: ChatViewProvider,
+        agentId: string
+      ) => void;
+
+      const load = loadStoredSession.call(provider, session);
+      handleAgentChange.call(provider, "claude-code");
+      await load;
+
+      assert.ok(messages.some((message) => message.type === "agentChanged"));
       assert.ok(!messages.some((message) => message.type === "replayComplete"));
     });
   });

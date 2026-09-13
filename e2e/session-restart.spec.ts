@@ -14,7 +14,7 @@ import {
 } from "./utils";
 
 const DEMO_DIR = join(VSCODE_TEST_DIR, "session-restart-demo");
-const USER_DATA_DIR = join(VSCODE_TEST_DIR, "user-data-e2e");
+const USER_DATA_DIR = join(VSCODE_TEST_DIR, "user-data-session-restart");
 const STORE_PATH = join(DEMO_DIR, "sessions.json");
 const BIN_DIR = join(DEMO_DIR, "bin");
 const AGENT_PATH = join(BIN_DIR, "opencode");
@@ -113,6 +113,7 @@ async function focusChat(window: Page) {
 
 test("restores persisted ACP history after an Extension Development Host restart", async ({}, testInfo) => {
   await rm(DEMO_DIR, { recursive: true, force: true });
+  await rm(USER_DATA_DIR, { recursive: true, force: true });
   await mkdir(BIN_DIR, { recursive: true });
   await writeFile(AGENT_PATH, AGENT_SOURCE, { mode: 0o755 });
 
@@ -146,6 +147,9 @@ test("restores persisted ACP history after an Extension Development Host restart
       name: "Load Keep this conversation",
     });
     await expect(sessionItem).toBeVisible();
+    // The second host connected and created a fresh session before the picker
+    // opened; sessions without a completed turn must never reach history.
+    await expect(picker.locator(".session-history-item")).toHaveCount(1);
     await picker.screenshot({
       path: testInfo.outputPath("session-history.png"),
     });
@@ -160,6 +164,9 @@ test("restores persisted ACP history after an Extension Development Host restart
         .locator(".message.assistant")
         .filter({ hasText: "Persisted reply: Keep this conversation" })
     ).toBeVisible();
+    await expect(secondFrame.locator(".message.system").last()).toContainText(
+      "Conversation restored."
+    );
     await secondFrame
       .locator("#messages")
       .screenshot({ path: testInfo.outputPath("restored-conversation.png") });

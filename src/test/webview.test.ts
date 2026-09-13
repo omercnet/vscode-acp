@@ -1544,14 +1544,14 @@ suite("Webview", () => {
       assert.ok(!picker.classList.contains("visible"));
     });
 
-    test("keeps Tab and Shift+Tab focus inside session history", () => {
+    test("traps keyboard focus in the dialog and closes on Escape from outside it", () => {
       controller.handleMessage({
         type: "sessionHistory",
         mode: "load",
         sessions: [
           {
             sessionId: "session-1",
-            cwd: "/workspace/project",
+            cwd: "C:\\workspace\\project",
             createdAt: 1,
             lastUsedAt: 2,
             preview: "Restore this conversation",
@@ -1569,25 +1569,60 @@ suite("Webview", () => {
       ) as HTMLButtonElement;
 
       cancel.focus();
-      picker.dispatchEvent(
-        new dom.window.KeyboardEvent("keydown", {
-          key: "Tab",
-          bubbles: true,
-          cancelable: true,
-        })
+      cancel.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", { key: "Tab", bubbles: true })
       );
-      assert.strictEqual(document.activeElement, item);
+      assert.strictEqual(
+        document.activeElement,
+        item,
+        "Tab past the last control must wrap back into the dialog"
+      );
 
-      item.focus();
-      picker.dispatchEvent(
+      item.dispatchEvent(
         new dom.window.KeyboardEvent("keydown", {
           key: "Tab",
           shiftKey: true,
           bubbles: true,
-          cancelable: true,
         })
       );
       assert.strictEqual(document.activeElement, cancel);
+
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      input.focus();
+      input.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+        })
+      );
+      assert.ok(
+        !picker.classList.contains("visible"),
+        "Escape must close the dialog even when focus escaped it"
+      );
+    });
+
+    test("locks conversation controls while a restore is in flight", () => {
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      const agentSelector = document.getElementById(
+        "agent-selector"
+      ) as HTMLSelectElement;
+      const messagesElement = document.getElementById(
+        "messages"
+      ) as HTMLElement;
+
+      input.value = "Draft prompt";
+      controller.handleMessage({ type: "replayStart" });
+      assert.strictEqual(input.disabled, true);
+      assert.strictEqual(agentSelector.disabled, true);
+      assert.strictEqual(messagesElement.getAttribute("aria-busy"), "true");
+
+      controller.handleMessage({
+        type: "replayComplete",
+        messages: [{ role: "user", text: "Restored question" }],
+      });
+      assert.strictEqual(input.disabled, false);
+      assert.strictEqual(agentSelector.disabled, false);
+      assert.strictEqual(messagesElement.getAttribute("aria-busy"), "false");
     });
 
     test("replaces chat with each replayed message exactly once", () => {

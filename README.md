@@ -49,12 +49,12 @@ You need at least one ACP-compatible agent installed:
 
 ### Session History
 
-Sessions are stored in the current workspace after the first completed turn. Use **ACP: Load Session** to restore a saved conversation when the selected agent advertises ACP `loadSession`; the conversation is replayed before it accepts new prompts. **ACP: New Chat** starts a separate session. **ACP: Delete Session** removes an entry from this workspace's history only; it does not delete the agent's underlying conversation.
+Sessions are stored in the current workspace after the first completed turn; a session you never send a message in is not stored. Use **ACP: Load Session** to restore a saved conversation when the selected agent advertises ACP `loadSession`; the conversation is replayed through the same sanitized Markdown renderer as live replies and marked with a "Conversation restored." status. **ACP: New Chat** starts a separate session. **ACP: Delete Session** removes an entry from this workspace's history only; it does not delete the agent's underlying conversation.
 
-| Setting                          | Default | Effect                                                             |
-| -------------------------------- | ------- | ------------------------------------------------------------------ |
-| `vscode-acp.sessions.autoSave`   | `true`  | Persist newly created and completed sessions in workspace history. |
-| `vscode-acp.sessions.maxHistory` | `50`    | Retain the most recently used 1–200 workspace sessions.            |
+| Setting                          | Default | Effect                                                            |
+| -------------------------------- | ------- | ----------------------------------------------------------------- |
+| `vscode-acp.sessions.autoSave`   | `true`  | Persist a session in workspace history after each completed turn. |
+| `vscode-acp.sessions.maxHistory` | `50`    | Retain the most recently used 1–200 workspace sessions.           |
 
 ### Tool Calls
 

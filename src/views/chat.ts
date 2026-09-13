@@ -100,6 +100,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private connectionStart: Promise<void> | null = null;
   private sessionStart: Promise<void> | null = null;
   private conversationGeneration = 0;
+  private sessionLoad: Promise<void> | null = null;
+  private replaySessionId: string | null = null;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
   private permissionRequests: Map<
@@ -136,6 +138,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.hasSession = false;
         this.connectionStart = null;
         this.sessionStart = null;
+        this.conversationGeneration++;
+        if (this.isReplaying) {
+          this.isReplaying = false;
+          this.replaySessionId = null;
+          this.replayMessages = [];
+          this.postMessage({
+            type: "replayFailed",
+            text: "Session restore was interrupted by the connection closing.",
+          });
+        }
         this.expirePermissionRequests();
       }
       this.postMessage({ type: "connectionState", state });
@@ -309,6 +321,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showSessionHistory(mode: "load" | "delete"): Promise<void> {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     try {
       if (mode === "load") {
         await this.ensureConnection();
@@ -352,7 +367,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
       return;
     }
-    await this.loadStoredSession(session);
+    if (this.sessionLoad) {
+      this.postMessage({
+        type: "replayFailed",
+        text: "Another session is already being restored.",
+      });
+      return;
+    }
+    try {
+      await this.loadStoredSession(session);
+    } catch {
+      // loadStoredSession already reported the failure to the webview.
+    }
   }
 
   private async handleDeleteStoredSession(sessionId: string): Promise<void> {
@@ -459,15 +485,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async loadStoredSession(session: StoredSession): Promise<void> {
+    if (this.sessionLoad) {
+      throw new Error("Another session is already being restored.");
+    }
+    const load = this.replayStoredSession(session);
+    this.sessionLoad = load;
+    try {
+      await load;
+    } finally {
+      this.sessionLoad = null;
+    }
+  }
+
+  private async replayStoredSession(session: StoredSession): Promise<void> {
     const hadSession = this.hasSession;
     const hadRestoredModeModel = this.hasRestoredModeModel;
-    this.conversationGeneration++;
+    const replayGeneration = ++this.conversationGeneration;
     this.isReplaying = true;
+    this.replaySessionId = session.sessionId;
     this.replayMessages = [];
     this.postMessage({ type: "replayStart" });
 
     try {
       await this.acpClient.loadSession(session.sessionId, session.cwd);
+      if (
+        replayGeneration !== this.conversationGeneration ||
+        this.acpClient.getAgentId() !== session.agentId ||
+        this.acpClient.getCurrentSessionId() !== session.sessionId
+      ) {
+        this.isReplaying = false;
+        this.replaySessionId = null;
+        this.replayMessages = [];
+        return;
+      }
+
       this.hasSession = true;
       this.hasRestoredModeModel = false;
       const history = this.getStoredSessions().map((entry) =>
@@ -484,19 +535,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ).catch((error: unknown) =>
         console.warn("[Chat] Failed to update session metadata:", error)
       );
+      const messages = this.replayMessages.map((message) => ({
+        role: message.role,
+        text: message.text,
+      }));
       this.isReplaying = false;
-      this.postMessage({
-        type: "replayComplete",
-        messages: this.replayMessages.map((message) => ({
-          role: message.role,
-          text: message.text,
-        })),
-      });
+      this.replaySessionId = null;
       this.replayMessages = [];
+      this.postMessage({ type: "replayComplete", messages });
       this.sendSessionMetadata();
     } catch (error) {
+      const replayIsCurrent = replayGeneration === this.conversationGeneration;
       this.isReplaying = false;
+      this.replaySessionId = null;
       this.replayMessages = [];
+      if (!replayIsCurrent) {
+        return;
+      }
       this.hasSession = hadSession;
       this.hasRestoredModeModel = hadRestoredModeModel;
       const message = error instanceof Error ? error.message : String(error);
@@ -934,6 +989,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     console.log("[Chat] Session update received:", update.sessionUpdate);
 
     if (this.isReplaying) {
+      if (notification.sessionId !== this.replaySessionId) {
+        return;
+      }
       if (
         (update.sessionUpdate === "user_message_chunk" ||
           update.sessionUpdate === "agent_message_chunk") &&
@@ -1053,18 +1111,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.sessionStart;
   }
 
+  private rejectWhileRestoring(): boolean {
+    if (!this.sessionLoad) {
+      return false;
+    }
+    this.postMessage({
+      type: "error",
+      text: "Wait for the current session restore to finish.",
+    });
+    return true;
+  }
+
   private async handleUserMessage(text: string): Promise<void> {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     this.postMessage({ type: "userMessage", text });
+    let promptGeneration: number | null = null;
+    let promptSessionId: string | null = null;
 
     try {
       await this.ensureSession();
-      const promptGeneration = this.conversationGeneration;
-      const promptSessionId = this.acpClient.getCurrentSessionId();
+      promptGeneration = this.conversationGeneration;
+      promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
       this.stderrBuffer = "";
       this.postMessage({ type: "streamStart" });
       console.log("[Chat] Sending message to ACP...");
       const response = await this.acpClient.sendMessage(text);
+      if (
+        promptGeneration !== this.conversationGeneration ||
+        promptSessionId !== this.acpClient.getCurrentSessionId()
+      ) {
+        this.streamingText = "";
+        this.stderrBuffer = "";
+        return;
+      }
       console.log(
         "[Chat] Prompt response received:",
         JSON.stringify(response, null, 2)
@@ -1095,6 +1177,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
+      if (
+        promptGeneration !== null &&
+        (promptGeneration !== this.conversationGeneration ||
+          promptSessionId !== this.acpClient.getCurrentSessionId())
+      ) {
+        this.streamingText = "";
+        this.stderrBuffer = "";
+        return;
+      }
       const { kind } = describeACPError(error);
       if (kind === "cancelled") {
         console.log("[Chat] Prompt cancelled:", error);
@@ -1125,6 +1216,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleModeChange(modeId: string): Promise<void> {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     try {
       await this.acpClient.setMode(modeId);
       await this.globalState.update(SELECTED_MODE_KEY, modeId);
@@ -1136,6 +1230,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleModelChange(modelId: string): Promise<void> {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     try {
       await this.acpClient.setModel(modelId);
       await this.globalState.update(SELECTED_MODEL_KEY, modelId);
@@ -1156,6 +1253,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleNewChat(): Promise<void> {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     this.expirePermissionRequests();
     this.conversationGeneration++;
     const hadSession = this.hasSession;
@@ -1187,6 +1287,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private handleClearChat(): void {
+    if (this.rejectWhileRestoring()) {
+      return;
+    }
     this.expirePermissionRequests();
     this.postMessage({ type: "chatCleared" });
   }

@@ -156,14 +156,14 @@
         "vscode-acp.sessions.autoSave": {
           "type": "boolean",
           "default": true,
-          "description": "Save new and updated ACP sessions in this workspace history."
+          "description": "Save an ACP session in this workspace history after each completed turn. Sessions without a completed turn are never stored."
         },
         "vscode-acp.sessions.maxHistory": {
           "type": "number",
           "default": 50,
           "minimum": 1,
           "maximum": 200,
-          "description": "Maximum number of ACP sessions stored per workspace."
+          "description": "Maximum number of ACP sessions retained per workspace. The least recently used sessions are dropped first."
         }
       }
     }
