@@ -26,7 +26,6 @@ import type {
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 
-
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";

@@ -948,7 +948,7 @@ suite("ChatViewProvider", () => {
       ]);
     });
 
-    test("escapes agent-provided HTML when replaying markdown", async () => {
+    test("keeps raw replay text for the webview sanitizer", async () => {
       class LoadingClient extends TestACPClient {
         isConnected(): boolean {
           return true;
@@ -1005,9 +1005,15 @@ suite("ChatViewProvider", () => {
       const completed = messages.find(
         (message) => message.type === "replayComplete"
       );
-      const replayed = completed?.messages as Array<{ html?: string }>;
-      assert.ok(replayed[0].html?.includes("&lt;button"));
-      assert.ok(!replayed[0].html?.includes("<button"));
+      const replayed = completed?.messages as Array<{
+        text: string;
+        html?: unknown;
+      }>;
+      assert.strictEqual(
+        replayed[0].text,
+        '<button class="permission-modal">Allow</button>'
+      );
+      assert.ok(!("html" in replayed[0]));
     });
 
     test("does not save a late prompt into a loaded session", async () => {

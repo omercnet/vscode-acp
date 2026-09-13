@@ -1012,7 +1012,6 @@ export class WebviewController {
     this.updateViewState();
   }
 
-
   private showReplayStatus(message = "Restoring conversation…"): void {
     if (!this.replayStatusEl) {
       this.replayStatusEl = this.doc.createElement("div");
@@ -1176,8 +1175,9 @@ export class WebviewController {
         break;
       case "toolCallStart":
         if (msg.toolCallId && msg.name) {
-          // Finalize any preceding text, including whitespace-only content.
-          if (this.currentAssistantMessage) {
+          // Keep a whitespace-only bubble alive until stream end so its tool
+          // card renders through the same finalized Markdown path.
+          if (this.currentAssistantText.trim()) {
             this.finalizeCurrentMessage();
             this.currentAssistantMessage = null;
             this.currentAssistantText = "";

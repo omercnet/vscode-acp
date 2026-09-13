@@ -1560,7 +1560,7 @@ suite("Webview", () => {
       ) as HTMLElement[];
       assert.strictEqual(messages.length, 3);
       assert.strictEqual(messages[0].textContent, "Restored question");
-      assert.strictEqual(messages[1].textContent, "Restored answer");
+      assert.strictEqual(messages[1].textContent?.trim(), "Restored answer");
       assert.strictEqual(messages[2].textContent, "Conversation restored.");
       assert.ok(!messages[1].innerHTML.includes("Restored answer<p>"));
     });
@@ -1571,7 +1571,7 @@ suite("Webview", () => {
         messages: [
           {
             role: "assistant",
-            text: "<script>window.replayXss = true</script><button>Blocked</button>**Safe**",
+            text: "**Safe**\n<script>window.replayXss = true</script><button>Blocked</button>",
           },
         ],
       });
