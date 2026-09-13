@@ -45,9 +45,10 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Workspace-defined agent executable paths are disabled until the workspace is trusted.",
+      "description": "Workspace-defined agent executable paths and MCP server configuration are disabled until the workspace is trusted.",
       "restrictedConfigurations": [
-        "vscode-acp.agentPaths"
+        "vscode-acp.agentPaths",
+        "vscode-acp.mcpServers"
       ]
     },
     "virtualWorkspaces": true
@@ -168,7 +169,6 @@
         "vscode-acp.mcpServers": {
           "type": "array",
           "scope": "resource",
-          "restricted": true,
           "default": [],
           "markdownDescription": "MCP servers connected when ACP sessions are created or loaded. Use `${env:NAME}` only in environment variable and HTTP header values; references are resolved when a session starts.",
           "items": {

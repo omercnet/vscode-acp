@@ -39,6 +39,15 @@ const INTERPOLATION = /\$\{[^}]*\}/;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+export function getMcpConfigurationResource(
+  cwd: string,
+  workspaceFolders = vscode.workspace.workspaceFolders
+): vscode.Uri {
+  return (
+    workspaceFolders?.find((folder) => folder.uri.fsPath === cwd)?.uri ??
+    vscode.Uri.file(cwd)
+  );
+}
 
 export function getConfiguredSession(
   cwd: string,
@@ -46,7 +55,7 @@ export function getConfiguredSession(
   environment: NodeJS.ProcessEnv = process.env
 ): ConfiguredSession {
   const configuration = vscode.workspace
-    .getConfiguration("vscode-acp", vscode.Uri.file(cwd))
+    .getConfiguration("vscode-acp", getMcpConfigurationResource(cwd))
     .get<unknown>("mcpServers", []);
   const sensitiveValues = new Set<string>();
   const mcpServers = validateMcpServers(

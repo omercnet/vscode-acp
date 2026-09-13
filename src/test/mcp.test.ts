@@ -1,11 +1,29 @@
 import * as assert from "assert";
+import * as vscode from "vscode";
 import {
+  getMcpConfigurationResource,
   McpConfigurationError,
   McpSecretRedactor,
   validateMcpServers,
 } from "../acp/mcp";
 
 suite("MCP server configuration", () => {
+  test("preserves remote workspace URIs for resource-scoped settings", () => {
+    const remoteUri = vscode.Uri.parse(
+      "vscode-remote://ssh-remote+host/workspace"
+    );
+    const workspaceFolder = {
+      index: 0,
+      name: "remote",
+      uri: remoteUri,
+    };
+
+    assert.strictEqual(
+      getMcpConfigurationResource(remoteUri.fsPath, [workspaceFolder]),
+      remoteUri
+    );
+  });
+
   test("validates and converts stdio configuration to SDK 1.4 types", () => {
     const servers = validateMcpServers(
       [
