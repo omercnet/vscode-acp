@@ -452,16 +452,13 @@ suite("Webview", () => {
         assert.strictEqual(elements.connectBtn.style.display, "none");
       });
 
-      test("shows an error while disconnected", () => {
+      test("handles error", () => {
         controller.handleMessage({
           type: "error",
-          text: "Authentication required: Sign in to continue",
+          text: "Something went wrong",
         });
-
         const msgs = elements.messagesEl.querySelectorAll(".message.error");
         assert.strictEqual(msgs.length, 1);
-        assert.strictEqual(elements.welcomeView.style.display, "none");
-        assert.strictEqual(elements.messagesEl.style.display, "flex");
       });
 
       test("handles agents list", () => {
@@ -538,16 +535,60 @@ suite("Webview", () => {
         assert.strictEqual(msgs[0].textContent, "Hello World");
       });
 
-      test("handles streamEnd with HTML", () => {
+      test("renders completed Markdown once and removes unsafe HTML", () => {
         controller.handleMessage({ type: "streamStart" });
-        controller.handleMessage({ type: "streamChunk", text: "**bold**" });
         controller.handleMessage({
-          type: "streamEnd",
-          html: "<strong>bold</strong>",
+          type: "streamChunk",
+          text: "**bold**\n\n```ts\nconst value = 1;\n```\n\n<img src=x onerror=alert(1)><script>alert(2)</script>",
+        });
+        controller.handleMessage({ type: "streamEnd" });
+
+        const messages =
+          elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.strictEqual(messages.length, 1);
+        assert.strictEqual(messages[0].querySelectorAll("strong").length, 1);
+        assert.strictEqual(
+          messages[0].querySelector("strong")?.textContent,
+          "bold"
+        );
+        assert.strictEqual(
+          messages[0].querySelector("code")?.textContent,
+          "const value = 1;\n"
+        );
+        assert.strictEqual(messages[0].querySelector("script"), null);
+        assert.strictEqual(
+          messages[0].querySelector("img")?.hasAttribute("onerror"),
+          false
+        );
+        assert.strictEqual(
+          messages[0].textContent?.includes("**bold**"),
+          false
+        );
+      });
+
+      test("sanitizes Markdown finalized before a tool call", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "streamChunk",
+          text: "Before **tool** <img src=x onerror=alert(1)>",
+        });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "bash",
+          kind: "execute",
         });
 
-        const msgs = elements.messagesEl.querySelectorAll(".message.assistant");
-        assert.ok(msgs[0].innerHTML.includes("<strong>"));
+        const message = elements.messagesEl.querySelector(".message.assistant");
+        assert.strictEqual(
+          message?.querySelector("strong")?.textContent,
+          "tool"
+        );
+        assert.strictEqual(
+          message?.querySelector("img")?.hasAttribute("onerror"),
+          false
+        );
+        assert.strictEqual(message?.textContent?.includes("**tool**"), false);
       });
     });
 

@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
-import { marked } from "marked";
 import { ACPClient, describeACPError, formatACPError } from "../acp/client";
 import {
   getAgent,
@@ -26,11 +25,6 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-});
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
@@ -769,13 +763,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           type: "error",
           text: "Agent returned no response. Check the ACP output channel for details.",
         });
-        this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
+        this.postMessage({ type: "streamEnd", stopReason: "error" });
       } else {
-        const renderedHtml = marked.parse(this.streamingText) as string;
         this.postMessage({
           type: "streamEnd",
           stopReason: response.stopReason,
-          html: renderedHtml,
         });
       }
       this.streamingText = "";
@@ -789,8 +781,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postMessage({
         type: "streamEnd",
         stopReason: kind === "cancelled" ? "cancelled" : "error",
-        html: "",
       });
+
       this.streamingText = "";
       this.stderrBuffer = "";
     }

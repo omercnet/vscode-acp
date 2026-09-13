@@ -171,6 +171,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
+    "dompurify": "^3.4.15",
     "marked": "^17.0.1",
     "vscode-jsonrpc": "^8.2.0"
   },

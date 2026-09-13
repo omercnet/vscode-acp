@@ -653,7 +653,6 @@ suite("ChatViewProvider", () => {
     assert.deepStrictEqual(messages.at(-1), {
       type: "streamEnd",
       stopReason: "error",
-      html: "",
     });
   });
 
@@ -688,7 +687,6 @@ suite("ChatViewProvider", () => {
     assert.deepStrictEqual(messages.at(-1), {
       type: "streamEnd",
       stopReason: "cancelled",
-      html: "",
     });
   });
   suite("Client capability handlers", () => {

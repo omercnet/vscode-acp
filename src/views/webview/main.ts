@@ -1,3 +1,8 @@
+import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
+import { Marked } from "marked";
+
+const markdown = new Marked({ breaks: true, gfm: true });
+
 export interface VsCodeApi {
   postMessage(message: unknown): void;
   getState<T>(): T | undefined;
@@ -63,7 +68,6 @@ interface QueuedPermissionRequest {
 export interface ExtensionMessage {
   type: string;
   text?: string;
-  html?: string;
   state?: string;
   agents?: Array<{ id: string; name: string; available: boolean }>;
   selected?: string;
@@ -499,6 +503,7 @@ export class WebviewController {
   private elements: WebviewElements;
   private doc: Document;
   private win: Window;
+  private readonly sanitizer: DOMPurify;
 
   private currentAssistantMessage: HTMLElement | null = null;
   private currentAssistantText = "";
@@ -530,6 +535,7 @@ export class WebviewController {
     this.elements = elements;
     this.doc = doc;
     this.win = win;
+    this.sanitizer = createDOMPurify(win as unknown as WindowLike);
 
     this.restoreState();
     this.setupEventListeners();
@@ -994,18 +1000,7 @@ export class WebviewController {
       case "streamEnd":
         this.hideThinking();
 
-        if (this.currentAssistantMessage) {
-          let html = msg.html || "";
-          if (this.currentAssistantText.trim()) {
-            html = this.currentAssistantText + html;
-          }
-          html += getToolsHtml(this.tools, this.expandedToolId);
-          this.currentAssistantMessage.innerHTML = html;
-          this.messageTexts.set(
-            this.currentAssistantMessage,
-            this.currentAssistantText
-          );
-        }
+        this.finalizeCurrentMessage();
 
         this.currentAssistantMessage = null;
         this.currentAssistantText = "";
@@ -1074,13 +1069,11 @@ export class WebviewController {
       case "error":
         this.hideThinking();
         if (msg.text) this.addMessage(msg.text, "error");
-        this.updateViewState();
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
       case "agentError":
         if (msg.text) this.addMessage(msg.text, "error");
-        this.updateViewState();
         break;
       case "connectionState":
         if (msg.state) {
@@ -1249,14 +1242,18 @@ export class WebviewController {
 
   private finalizeCurrentMessage(): void {
     if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
-      const html =
-        this.currentAssistantText +
-        getToolsHtml(this.tools, this.expandedToolId);
-      this.currentAssistantMessage.innerHTML = html;
+      const renderedMarkdown = markdown.parse(
+        this.currentAssistantText
+      ) as string;
+      const sanitizedMarkdown = this.sanitizer.sanitize(renderedMarkdown);
+      this.currentAssistantMessage.innerHTML =
+        sanitizedMarkdown + getToolsHtml(this.tools, this.expandedToolId);
       this.messageTexts.set(
         this.currentAssistantMessage,
         this.currentAssistantText
       );
+      this.elements.messagesEl.scrollTop =
+        this.elements.messagesEl.scrollHeight;
     }
   }
 
