@@ -956,6 +956,57 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("should transport text followed by resource link metadata", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.sendMessage("Review this file", [
+        {
+          id: "att-1",
+          uri: "file:///test/dir/file.ts",
+          name: "file.ts",
+          mimeType: "text/typescript",
+          size: 321,
+        },
+      ]);
+
+      const process = mockProcesses.at(-1);
+      assert.ok(process);
+      assert.deepStrictEqual(process.server.lastPrompt, [
+        { type: "text", text: "Review this file" },
+        {
+          type: "resource_link",
+          uri: "file:///test/dir/file.ts",
+          name: "file.ts",
+          mimeType: "text/typescript",
+          size: 321,
+        },
+      ]);
+    });
+
+    test("should transport an attachment-only prompt", async () => {
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await client.sendMessage("", [
+        {
+          id: "att-only",
+          uri: "file:///test/dir/only.ts",
+          name: "only.ts",
+        },
+      ]);
+
+      const process = mockProcesses.at(-1);
+      assert.ok(process);
+      assert.deepStrictEqual(process.server.lastPrompt, [
+        {
+          type: "resource_link",
+          uri: "file:///test/dir/only.ts",
+          name: "only.ts",
+        },
+      ]);
+    });
+
     test("should notify multiple session update listeners", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });

@@ -15,6 +15,8 @@ import type {
   RequestPermissionRequest,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
+import * as attachmentHelpers from "../attachments";
+import type { FileAttachment } from "../shared/attachments";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -1767,6 +1769,20 @@ suite("ChatViewProvider", () => {
           this.emitSessionUpdate({
             sessionId,
             update: {
+              sessionUpdate: "user_message_chunk",
+              messageId: "user-1",
+              content: {
+                type: "resource_link",
+                uri: "file:///workspace/replayed.ts",
+                name: "replayed.ts",
+                mimeType: "text/typescript",
+                size: 99,
+              },
+            },
+          } satisfies SessionNotification);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
               sessionUpdate: "agent_message_chunk",
               messageId: "agent-1",
               content: { type: "text", text: "First " },
@@ -1818,10 +1834,40 @@ suite("ChatViewProvider", () => {
       const completed = messages.find(
         (message) => message.type === "replayComplete"
       );
-      assert.deepStrictEqual(completed?.messages, [
-        { role: "user", text: "First question" },
-        { role: "assistant", text: "First answer" },
-      ]);
+      // Internal provider message shape, captured directly at the postMessage
+      // boundary after the SDK payload has already been typed.
+      const replayed = completed?.messages as Array<{
+        role: string;
+        text: string;
+        attachments?: Array<{
+          uri: string;
+          name: string;
+          mimeType?: string;
+          size?: number;
+        }>;
+      }>;
+      assert.strictEqual(replayed[0].role, "user");
+      assert.strictEqual(replayed[0].text, "First question");
+      assert.deepStrictEqual(
+        replayed[0].attachments?.map(({ uri, name, mimeType, size }) => ({
+          uri,
+          name,
+          mimeType,
+          size,
+        })),
+        [
+          {
+            uri: "file:///workspace/replayed.ts",
+            name: "replayed.ts",
+            mimeType: "text/typescript",
+            size: 99,
+          },
+        ]
+      );
+      assert.deepStrictEqual(replayed[1], {
+        role: "assistant",
+        text: "First answer",
+      });
     });
 
     test("keeps raw replay text for the webview sanitizer", async () => {
@@ -2570,6 +2616,153 @@ suite("ChatViewProvider", () => {
           (message) => message.type === "permissionRequestExpired"
         )
       );
+    });
+  });
+
+  suite("Attachment lifecycle", () => {
+    test("does not transport stale attachment ids after chat reset", async () => {
+      class CapturingClient extends TestACPClient {
+        public sentAttachments: readonly unknown[] = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async sendMessage(
+          _text = "",
+          attachments: readonly unknown[] = []
+        ): Promise<{ stopReason: string }> {
+          this.sentAttachments = attachments;
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      const client = new CapturingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+        handleClearChat(): void;
+        handleUserMessage(
+          text: string,
+          attachmentIds?: string[]
+        ): Promise<void>;
+      };
+      internals.pendingAttachments.set("att-stale", {
+        id: "att-stale",
+        uri: "file:///workspace/stale.ts",
+        name: "stale.ts",
+      });
+
+      internals.handleClearChat();
+      await internals.handleUserMessage("Continue", ["att-stale"]);
+
+      assert.deepStrictEqual(client.sentAttachments, []);
+    });
+
+    test("does not consume attachment drafts while a session is replaying", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        pendingAttachments: Map<string, unknown>;
+        handleUserMessage(
+          text: string,
+          attachmentIds?: string[]
+        ): Promise<void>;
+      };
+      internals.isReplaying = true;
+      internals.pendingAttachments.set("att-draft", {
+        id: "att-draft",
+        uri: "file:///workspace/draft.ts",
+        name: "draft.ts",
+      });
+
+      await internals.handleUserMessage("", ["att-draft"]);
+
+      assert.strictEqual(internals.pendingAttachments.size, 1);
+      assert.deepStrictEqual(messages, [
+        {
+          type: "agentError",
+          text: "Wait for the conversation to finish restoring before sending.",
+        },
+      ]);
+    });
+
+    test("keeps the picker lock through asynchronous file metadata work", async () => {
+      const originalPicker = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "pickAttachmentUris"
+      );
+      const originalCreate = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "createFileAttachment"
+      );
+      assert.ok(originalPicker);
+      assert.ok(originalCreate);
+
+      let pickerCalls = 0;
+      let finishMetadata!: (attachment: FileAttachment | null) => void;
+      const metadata = new Promise<FileAttachment | null>((resolve) => {
+        finishMetadata = resolve;
+      });
+      Object.defineProperty(attachmentHelpers, "pickAttachmentUris", {
+        configurable: true,
+        value: async () => {
+          pickerCalls += 1;
+          return [vscode.Uri.file("/workspace/file.ts")];
+        },
+      });
+      Object.defineProperty(attachmentHelpers, "createFileAttachment", {
+        configurable: true,
+        value: () => metadata,
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const internals = provider as unknown as {
+          handleRequestAttachFiles(currentCount: number): Promise<void>;
+          pendingAttachments: Map<string, unknown>;
+        };
+
+        const firstRequest = internals.handleRequestAttachFiles(0);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await internals.handleRequestAttachFiles(0);
+        assert.strictEqual(pickerCalls, 1);
+
+        finishMetadata({
+          id: "att-race",
+          uri: "file:///workspace/file.ts",
+          name: "file.ts",
+        });
+        await firstRequest;
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "pickAttachmentUris",
+          originalPicker
+        );
+        Object.defineProperty(
+          attachmentHelpers,
+          "createFileAttachment",
+          originalCreate
+        );
+      }
     });
   });
 });

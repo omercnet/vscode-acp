@@ -68,8 +68,12 @@ function createWebviewHTML(): string {
   
   <div id="input-container">
     <div id="command-autocomplete" role="listbox"></div>
-    <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
-    <button id="send">Send</button>
+    <div id="attachments-bar" role="list"></div>
+    <div id="input-row">
+      <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
+      <button id="attach-btn">Attach</button>
+      <button id="send">Send</button>
+    </div>
   </div>
   <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
@@ -636,6 +640,83 @@ suite("Webview", () => {
         controller.handleMessage({ type: "restoreInput", text: "Resume this" });
 
         assert.strictEqual(elements.inputEl.value, "Typed while connecting");
+      test("renders attachment-only messages and treats labels as text", () => {
+        controller.handleMessage({
+          type: "userMessage",
+          text: "",
+          attachments: [
+            {
+              id: "att-xss",
+              uri: "file:///workspace/%3Cimg%3E.ts",
+              name: '<img src=x onerror="alert(1)">.ts',
+              mimeType: "text/typescript",
+              size: 42,
+            },
+          ],
+        });
+
+        const message = elements.messagesEl.querySelector(".message.user");
+        assert.ok(message);
+        assert.strictEqual(message.querySelector("img"), null);
+        assert.strictEqual(
+          message.querySelector(".attachment-chip-name")?.textContent,
+          '<img src=x onerror="alert(1)">.ts'
+        );
+      });
+
+      test("clears attachment chips across session transitions", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "att-session",
+              uri: "file:///workspace/session.ts",
+              name: "session.ts",
+            },
+          ],
+        });
+        assert.strictEqual(
+          elements.attachmentsBar.querySelectorAll(".attachment-chip").length,
+          1
+        );
+
+        controller.handleMessage({ type: "agentChanged" });
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+        assert.strictEqual(elements.attachBtn.disabled, false);
+
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "att-next-session",
+              uri: "file:///workspace/next.ts",
+              name: "next.ts",
+            },
+          ],
+        });
+        controller.handleMessage({ type: "chatCleared" });
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+      });
+
+      test("reports files skipped by host-side attachment validation", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [],
+          skippedCount: 2,
+        });
+
+        const notice = elements.messagesEl.querySelector(".message.system");
+        assert.strictEqual(notice?.textContent, "2 files were not attached.");
+
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [],
+          skippedCount: 2,
+        });
+        assert.strictEqual(
+          elements.messagesEl.querySelectorAll(".message.system").length,
+          1
+        );
       });
 
       test("handles connectionState", () => {
@@ -874,6 +955,76 @@ suite("Webview", () => {
           )
         );
       });
+
+      test("attach button requests trusted file selection", () => {
+        mockVsCode._clearMessages();
+        elements.attachBtn.click();
+
+        const request = mockVsCode
+          ._getMessages()
+          .find(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "requestAttachFiles"
+          );
+        assert.deepStrictEqual(request, {
+          type: "requestAttachFiles",
+          attachmentCount: 0,
+        });
+      });
+
+      test("disables and explains the attach control at the file limit", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: Array.from({ length: 10 }, (_, index) => ({
+            id: `att-${index}`,
+            uri: `file:///workspace/${index}.ts`,
+            name: `${index}.ts`,
+          })),
+        });
+
+        assert.strictEqual(elements.attachBtn.disabled, true);
+        assert.strictEqual(
+          elements.attachBtn.getAttribute("aria-label"),
+          "Attachment limit reached (10 files)"
+        );
+      });
+      test("removes an attachment chip and notifies the extension", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "att-remove",
+              uri: "file:///workspace/remove.ts",
+              name: "remove.ts",
+            },
+          ],
+        });
+        mockVsCode._clearMessages();
+
+        const removeButton = elements.attachmentsBar.querySelector(
+          ".attachment-chip-remove"
+        ) as HTMLButtonElement;
+        removeButton.click();
+
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+        assert.strictEqual(document.activeElement, elements.attachBtn);
+        const removal = mockVsCode
+          ._getMessages()
+          .find(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "removeAttachment"
+          );
+        assert.deepStrictEqual(removal, {
+          type: "removeAttachment",
+          attachmentId: "att-remove",
+        });
+      });
     });
 
     suite("input handling", () => {
@@ -928,6 +1079,48 @@ suite("Webview", () => {
             (m: unknown) => (m as { type: string }).type === "sendMessage"
           )
         );
+      });
+
+      test("attachment-only prompt sends ordered attachment ids", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "att-only",
+              uri: "file:///workspace/only.ts",
+              name: "only.ts",
+            },
+          ],
+        });
+        mockVsCode._clearMessages();
+
+        const event = new window.KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: false,
+        });
+        elements.inputEl.dispatchEvent(event);
+
+        const sent = mockVsCode
+          ._getMessages()
+          .find(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "sendMessage"
+          );
+        assert.deepStrictEqual(sent, {
+          type: "sendMessage",
+          text: "",
+          attachmentIds: ["att-only"],
+        });
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(elements.attachBtn.disabled, true);
+
+        controller.handleMessage({ type: "streamEnd" });
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(elements.attachBtn.disabled, false);
       });
 
       test("Escape clears input", () => {
@@ -1785,8 +1978,49 @@ suite("Webview", () => {
     });
 
     test("replaces chat with each replayed message exactly once", () => {
+      const sendButton = document.getElementById("send") as HTMLButtonElement;
+      const attachButton = document.getElementById(
+        "attach-btn"
+      ) as HTMLButtonElement;
       controller.handleMessage({ type: "userMessage", text: "Current chat" });
+      controller.handleMessage({
+        type: "filesAttached",
+        attachments: [
+          {
+            id: "att-during-replay",
+            uri: "file:///workspace/draft.ts",
+            name: "draft.ts",
+          },
+        ],
+      });
+      mockVsCode._clearMessages();
       controller.handleMessage({ type: "replayStart" });
+      assert.strictEqual(sendButton.disabled, true);
+      assert.strictEqual(attachButton.disabled, true);
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      input.value = "Do not send yet";
+      input.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(
+        document.querySelectorAll("#attachments-bar .attachment-chip").length,
+        1
+      );
+      assert.ok(
+        !mockVsCode
+          ._getMessages()
+          .some(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "sendMessage"
+          )
+      );
       controller.handleMessage({
         type: "replayComplete",
         messages: [
@@ -1803,6 +2037,36 @@ suite("Webview", () => {
       assert.strictEqual(messages[1].textContent?.trim(), "Restored answer");
       assert.strictEqual(messages[2].textContent, "Conversation restored.");
       assert.ok(!messages[1].innerHTML.includes("Restored answer<p>"));
+      assert.strictEqual(sendButton.disabled, false);
+      assert.strictEqual(attachButton.disabled, false);
+    });
+
+    test("replays resource links as inert attachment chips", () => {
+      controller.handleMessage({
+        type: "replayComplete",
+        messages: [
+          {
+            role: "user",
+            text: "Restored question",
+            attachments: [
+              {
+                id: "replay-1",
+                uri: "file:///workspace/replayed.ts",
+                name: "replayed.ts",
+                mimeType: "text/typescript",
+                size: 99,
+              },
+            ],
+          },
+        ],
+      });
+
+      const chip = document.querySelector(".message.user .attachment-chip");
+      assert.strictEqual(
+        chip?.querySelector(".attachment-chip-name")?.textContent,
+        "replayed.ts"
+      );
+      assert.strictEqual(chip?.querySelector("button"), null);
     });
 
     test("sanitizes replayed Markdown through the stream renderer", () => {

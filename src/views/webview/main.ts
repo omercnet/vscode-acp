@@ -1,5 +1,11 @@
 import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
 import { Marked } from "marked";
+import {
+  MAX_ATTACHMENTS,
+  formatByteSize,
+  isAttachmentMetadataValid,
+  type FileAttachment,
+} from "../../shared/attachments";
 
 const markdown = new Marked({ breaks: true, gfm: true });
 
@@ -86,6 +92,7 @@ interface QueuedPermissionRequest {
 export interface ReplayMessage {
   role: "user" | "assistant";
   text: string;
+  attachments?: FileAttachment[];
 }
 
 export interface SessionHistoryEntry {
@@ -115,6 +122,9 @@ export interface ExtensionMessage {
     currentModelId: string;
   } | null;
   commands?: AvailableCommand[] | null;
+  attachments?: FileAttachment[];
+  skippedCount?: number;
+  max?: number;
   plan?: { entries: PlanEntry[] };
   mode?: "load" | "delete";
   messages?: ReplayMessage[];
@@ -507,6 +517,8 @@ export interface WebviewElements {
   sendBtn: HTMLButtonElement;
   inputContainer: HTMLElement;
   inputHint: HTMLElement;
+  attachBtn: HTMLButtonElement;
+  attachmentsBar: HTMLElement;
   statusDot: HTMLElement;
   statusText: HTMLElement;
   agentSelector: HTMLSelectElement;
@@ -526,6 +538,8 @@ export function getElements(doc: Document): WebviewElements {
     messagesEl: doc.getElementById("messages")!,
     inputEl: doc.getElementById("input") as HTMLTextAreaElement,
     sendBtn: doc.getElementById("send") as HTMLButtonElement,
+    attachBtn: doc.getElementById("attach-btn") as HTMLButtonElement,
+    attachmentsBar: doc.getElementById("attachments-bar")!,
     statusDot: doc.getElementById("status-dot")!,
     statusText: doc.getElementById("status-text")!,
     inputContainer: doc.getElementById("input-container")!,
@@ -576,6 +590,7 @@ export class WebviewController {
   private inputLocks = new Map<string, string>();
   private restoreInputFocus = false;
   private promptPending = false;
+  private attachments: FileAttachment[] = [];
 
   constructor(
     vscode: VsCodeApi,
@@ -611,13 +626,37 @@ export class WebviewController {
   }
 
   private setupEventListeners(): void {
-    const { sendBtn, inputEl, messagesEl, connectBtn, welcomeConnectBtn } =
-      this.elements;
+    const {
+      sendBtn,
+      attachBtn,
+      attachmentsBar,
+      inputEl,
+      messagesEl,
+      connectBtn,
+      welcomeConnectBtn,
+    } = this.elements;
     const { agentSelector, modeSelector, modelSelector } = this.elements;
 
     const { commandAutocomplete } = this.elements;
 
     sendBtn.addEventListener("click", () => this.send());
+
+    attachBtn.addEventListener("click", () => {
+      this.vscode.postMessage({
+        type: "requestAttachFiles",
+        attachmentCount: this.attachments.length,
+      });
+    });
+
+    attachmentsBar.addEventListener("click", (event) => {
+      const button = (event.target as HTMLElement).closest(
+        ".attachment-chip-remove"
+      );
+      const attachmentId = button?.getAttribute("data-attachment-id");
+      if (attachmentId) {
+        this.removeAttachment(attachmentId);
+      }
+    });
 
     inputEl.addEventListener("keydown", (e) => {
       const isAutocompleteVisible =
@@ -770,9 +809,121 @@ export class WebviewController {
     });
   }
 
+  private createAttachmentChip(
+    attachment: FileAttachment,
+    removable: boolean
+  ): HTMLElement {
+    const chip = this.doc.createElement("span");
+    chip.className = "attachment-chip";
+    chip.setAttribute("role", "listitem");
+
+    const details = [attachment.mimeType, formatByteSize(attachment.size)]
+      .filter(Boolean)
+      .join(" · ");
+    chip.title = details
+      ? `${attachment.name} · ${details}\n${attachment.uri}`
+      : `${attachment.name}\n${attachment.uri}`;
+
+    const icon = this.doc.createElement("span");
+    icon.className = "attachment-chip-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "📄";
+
+    const name = this.doc.createElement("span");
+    name.className = "attachment-chip-name";
+    // Paths and labels are untrusted. DOM text assignment is mandatory here;
+    // never move this value into `innerHTML` or an HTML string template.
+    name.textContent = attachment.name;
+
+    chip.append(icon, name);
+
+    if (removable) {
+      const remove = this.doc.createElement("button");
+      remove.type = "button";
+      remove.className = "attachment-chip-remove";
+      remove.setAttribute("data-attachment-id", attachment.id);
+      remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+      remove.title = `Remove ${attachment.name}`;
+      remove.disabled = this.composerDisabled;
+      remove.textContent = "×";
+      chip.appendChild(remove);
+    }
+
+    return chip;
+  }
+
+  private renderAttachments(): void {
+    const bar = this.elements.attachmentsBar;
+    bar.textContent = "";
+    for (const attachment of this.attachments) {
+      bar.appendChild(this.createAttachmentChip(attachment, true));
+    }
+    bar.classList.toggle("visible", this.attachments.length > 0);
+    const atLimit = this.attachments.length >= MAX_ATTACHMENTS;
+    this.elements.attachBtn.disabled = this.composerDisabled || atLimit;
+    this.elements.attachBtn.title = atLimit
+      ? `Attachment limit reached (${MAX_ATTACHMENTS} files)`
+      : "Attach files";
+    this.elements.attachBtn.setAttribute(
+      "aria-label",
+      this.elements.attachBtn.title
+    );
+  }
+
+  private removeAttachment(attachmentId: string): void {
+    const index = this.attachments.findIndex(
+      (attachment) => attachment.id === attachmentId
+    );
+    if (index < 0) {
+      return;
+    }
+    const [removed] = this.attachments.splice(index, 1);
+    this.vscode.postMessage({ type: "removeAttachment", attachmentId });
+    this.renderAttachments();
+    const remainingButtons =
+      this.elements.attachmentsBar.querySelectorAll<HTMLButtonElement>(
+        ".attachment-chip-remove"
+      );
+    const nextButton =
+      remainingButtons[Math.min(index, remainingButtons.length - 1)];
+    (nextButton ?? this.elements.attachBtn).focus();
+    this.announceToScreenReader(`${removed.name} removed.`);
+    this.saveState();
+  }
+
+  private clearAttachments(): void {
+    this.attachments = [];
+    this.renderAttachments();
+  }
+
+  private setComposerDisabled(disabled: boolean): void {
+    this.composerDisabled = disabled;
+    this.elements.sendBtn.disabled = disabled;
+    this.elements.attachBtn.disabled =
+      disabled || this.attachments.length >= MAX_ATTACHMENTS;
+    for (const button of this.elements.attachmentsBar.querySelectorAll(
+      ".attachment-chip-remove"
+    )) {
+      (button as HTMLButtonElement).disabled = disabled;
+    }
+  }
+
+  private showSystemMessageOnce(text: string): void {
+    const lastMessage = this.elements.messagesEl.lastElementChild;
+    if (
+      lastMessage?.classList.contains("system") &&
+      lastMessage.textContent === text
+    ) {
+      return;
+    }
+    this.addMessage(text, "system");
+    this.updateViewState();
+  }
+
   addMessage(
     text: string,
-    type: "user" | "assistant" | "error" | "system"
+    type: "user" | "assistant" | "error" | "system",
+    attachments: readonly FileAttachment[] = []
   ): HTMLElement {
     const div = this.doc.createElement("div");
     div.className = "message " + type;
@@ -789,20 +940,47 @@ export class WebviewController {
             : "System message";
     div.setAttribute("aria-label", label);
 
+    const attachmentNames = attachments.map((attachment) => attachment.name);
+    const copyText = [
+      text,
+      attachmentNames.length > 0
+        ? `[Attached: ${attachmentNames.join(", ")}]`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+
     if (type === "assistant" || type === "user") {
-      div.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
+      div.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
         const msgText = this.messageTexts.get(div) || div.textContent || "";
         this.vscode.postMessage({ type: "copyMessage", text: msgText });
       });
     }
 
-    div.textContent = text;
-    this.messageTexts.set(div, text);
+    if (text) {
+      const textEl = this.doc.createElement("div");
+      textEl.className = "message-text";
+      textEl.textContent = text;
+      div.appendChild(textEl);
+    }
+
+    if (attachments.length > 0) {
+      const list = this.doc.createElement("div");
+      list.className = "message-attachments";
+      list.setAttribute("role", "list");
+      list.setAttribute("aria-label", "Attached files");
+      for (const attachment of attachments) {
+        list.appendChild(this.createAttachmentChip(attachment, false));
+      }
+      div.appendChild(list);
+    }
+
+    this.messageTexts.set(div, copyText);
     this.elements.messagesEl.appendChild(div);
     this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
 
-    this.announceToScreenReader(label + ": " + text.substring(0, 100));
+    this.announceToScreenReader(`${label}: ${copyText.substring(0, 100)}`);
     return div;
   }
 
@@ -931,10 +1109,12 @@ export class WebviewController {
       return;
     }
     const text = this.elements.inputEl.value.trim();
-    if (!text) return;
-    this.vscode.postMessage({ type: "sendMessage", text });
+    if (!text && this.attachments.length === 0) return;
+    const attachmentIds = this.attachments.map((attachment) => attachment.id);
+    this.vscode.postMessage({ type: "sendMessage", text, attachmentIds });
     this.elements.inputEl.value = "";
     this.elements.inputEl.style.height = "auto";
+    this.clearAttachments();
     this.promptPending = true;
     this.updateInputControls();
     this.saveState();
@@ -1246,13 +1426,56 @@ export class WebviewController {
         break;
 
       case "userMessage":
-        if (msg.text) {
-          this.addMessage(msg.text, "user");
+        if (msg.text || (msg.attachments?.length ?? 0) > 0) {
+          this.addMessage(msg.text ?? "", "user", msg.attachments ?? []);
           this.showThinking();
           this.updateViewState();
           this.promptPending = true;
           this.updateInputControls();
         }
+        break;
+      case "filesAttached": {
+        const incoming = Array.isArray(msg.attachments) ? msg.attachments : [];
+        const beforeCount = this.attachments.length;
+        const existingUris = new Set(
+          this.attachments.map((attachment) => attachment.uri)
+        );
+        for (const attachment of incoming) {
+          if (
+            this.attachments.length >= MAX_ATTACHMENTS ||
+            existingUris.has(attachment.uri) ||
+            !isAttachmentMetadataValid(
+              attachment.name,
+              attachment.uri,
+              attachment.mimeType,
+              attachment.size
+            )
+          ) {
+            continue;
+          }
+          this.attachments.push(attachment);
+          existingUris.add(attachment.uri);
+        }
+        const addedCount = this.attachments.length - beforeCount;
+        this.renderAttachments();
+        this.saveState();
+        if (addedCount > 0) {
+          this.announceToScreenReader(
+            `${addedCount} file${addedCount === 1 ? "" : "s"} attached.`
+          );
+        }
+        if ((msg.skippedCount ?? 0) > 0) {
+          const skippedCount = msg.skippedCount ?? 0;
+          this.showSystemMessageOnce(
+            `${skippedCount} file${skippedCount === 1 ? " was" : "s were"} not attached.`
+          );
+        }
+        break;
+      }
+      case "attachmentLimitReached":
+        this.showSystemMessageOnce(
+          `You can attach up to ${msg.max ?? MAX_ATTACHMENTS} files per prompt.`
+        );
         break;
       case "streamStart":
         this.currentAssistantText = "";
@@ -1414,9 +1637,12 @@ export class WebviewController {
       case "agentChanged":
       case "chatCleared":
         this.clearChatState();
+        this.clearAttachments();
+        this.setComposerDisabled(false);
         modeSelector.style.display = "none";
         modelSelector.style.display = "none";
         this.clearPermissionModal();
+        this.saveState();
         break;
       case "triggerNewChat":
         this.setInputLock("session", true, "Starting a new session…");
@@ -1436,13 +1662,15 @@ export class WebviewController {
       case "replayStart":
         this.setInputLock("replay", true, "Restoring conversation…");
         this.hideSessionHistory();
+        this.setComposerDisabled(true);
         this.showReplayStatus();
         break;
       case "replayComplete":
         this.clearChatState();
+        this.clearAttachments();
         msg.messages?.forEach((message) => {
           if (message.role === "user") {
-            this.addMessage(message.text, "user");
+            this.addMessage(message.text, "user", message.attachments ?? []);
             return;
           }
 
@@ -1454,6 +1682,7 @@ export class WebviewController {
         });
         this.showReplayStatus("Conversation restored.");
         this.setInputLock("replay", false);
+        this.saveState();
         this.updateViewState();
         break;
       case "replayFailed":

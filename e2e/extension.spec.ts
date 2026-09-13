@@ -5,6 +5,9 @@ import {
   getWebviewFrame,
   cmdOrCtrl,
 } from "./fixtures";
+import { join } from "path";
+
+const SCREENSHOTS_DIR = join(__dirname, "..", "screenshots");
 
 test.describe("VSCode ACP Extension", () => {
   test("extension activates and shows in activity bar", async ({ window }) => {
@@ -67,5 +70,47 @@ test.describe("VSCode ACP Extension", () => {
     await expect(deleteSessionCommand).toBeVisible({ timeout: 5000 });
 
     await window.keyboard.press("Escape");
+  });
+
+  test("selects and sends the current file as a resource link", async ({
+    window,
+  }) => {
+    await openACPView(window);
+    await window.getByRole("tab", { name: /Explorer/ }).click();
+    const packageFile = window.getByRole("treeitem", {
+      name: /^package\.json/,
+    });
+    await packageFile.click();
+    await window.waitForTimeout(1000);
+    await window.getByRole("tab", { name: "VSCode ACP" }).click();
+
+    const frame = getWebviewFrame(window);
+    await frame.locator("#attach-btn").click();
+
+    const quickPick = window.locator(".quick-input-widget");
+    await expect(quickPick).toBeVisible({ timeout: 5000 });
+    const packageItem = quickPick
+      .getByText("package.json", { exact: false })
+      .first();
+    await expect(packageItem).toBeVisible({ timeout: 5000 });
+    await packageItem.click();
+    await window.keyboard.press("Enter");
+
+    const selectedChip = frame.locator(
+      "#attachments-bar .attachment-chip-name"
+    );
+    await expect(selectedChip).toHaveText("package.json", { timeout: 5000 });
+    await window.screenshot({
+      path: join(SCREENSHOTS_DIR, "resource-link-selected.png"),
+    });
+
+    await frame.locator("#input").fill("Review this project manifest");
+    await frame.locator("#send").click();
+
+    const sentChip = frame.locator(".message.user .attachment-chip-name");
+    await expect(sentChip).toHaveText("package.json", { timeout: 5000 });
+    await window.screenshot({
+      path: join(SCREENSHOTS_DIR, "resource-link-sent.png"),
+    });
   });
 });

@@ -20,6 +20,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
 - **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user or workspace settings
+- **📎 File Attachments** — Reference current or workspace files without embedding their contents
 
 ## Requirements
 
@@ -50,6 +51,10 @@ You need at least one ACP-compatible agent installed:
 4. Start chatting!
 
 If an agent requires ACP authentication, choose one of its advertised sign-in methods. The agent owns that flow; VSCode ACP does not ask for, store, or log API keys or other credentials.
+
+### File Attachments
+
+Use the paperclip button beside the prompt to select an open editor or browse for workspace files. Selected files appear as removable chips and are sent as ACP `resource_link` blocks with their canonical file URI, name, MIME type, and size. The extension does not read or embed file contents when attaching them; the selected agent must be able to access the referenced URI.
 
 ### Session History
 
