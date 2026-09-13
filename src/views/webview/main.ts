@@ -750,6 +750,8 @@ export class WebviewController {
       if (event.key === "Escape") {
         event.preventDefault();
         this.hideSessionHistory();
+      } else if (event.key === "Tab") {
+        this.trapSessionPickerFocus(event);
       }
     });
   }
@@ -1104,6 +1106,31 @@ export class WebviewController {
       firstSession.focus();
     } else {
       picker.focus();
+    }
+  }
+
+  private trapSessionPickerFocus(event: KeyboardEvent): void {
+    const focusable = Array.from(
+      this.elements.sessionPicker.querySelectorAll<HTMLButtonElement>(
+        "button:not(:disabled)"
+      )
+    );
+    if (focusable.length === 0) {
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = this.doc.activeElement;
+    if (!focusable.includes(active as HTMLButtonElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
     }
   }
 

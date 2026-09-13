@@ -1544,6 +1544,52 @@ suite("Webview", () => {
       assert.ok(!picker.classList.contains("visible"));
     });
 
+    test("keeps Tab and Shift+Tab focus inside session history", () => {
+      controller.handleMessage({
+        type: "sessionHistory",
+        mode: "load",
+        sessions: [
+          {
+            sessionId: "session-1",
+            cwd: "/workspace/project",
+            createdAt: 1,
+            lastUsedAt: 2,
+            preview: "Restore this conversation",
+            messageCount: 2,
+          },
+        ],
+      });
+
+      const picker = document.getElementById("session-picker") as HTMLElement;
+      const item = picker.querySelector(
+        ".session-history-item"
+      ) as HTMLButtonElement;
+      const cancel = picker.querySelector(
+        ".session-picker-close"
+      ) as HTMLButtonElement;
+
+      cancel.focus();
+      picker.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(document.activeElement, item);
+
+      item.focus();
+      picker.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(document.activeElement, cancel);
+    });
+
     test("replaces chat with each replayed message exactly once", () => {
       controller.handleMessage({ type: "userMessage", text: "Current chat" });
       controller.handleMessage({ type: "replayStart" });

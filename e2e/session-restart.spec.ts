@@ -5,8 +5,13 @@ import {
   type Page,
 } from "@playwright/test";
 import { mkdir, rm, writeFile } from "fs/promises";
-import { join } from "path";
-import { findVSCodeExecutable, PROJECT_ROOT, VSCODE_TEST_DIR } from "./utils";
+import { delimiter, join } from "path";
+import {
+  cmdOrCtrl,
+  findVSCodeExecutable,
+  PROJECT_ROOT,
+  VSCODE_TEST_DIR,
+} from "./utils";
 
 const DEMO_DIR = join(VSCODE_TEST_DIR, "session-restart-demo");
 const USER_DATA_DIR = join(VSCODE_TEST_DIR, "user-data-e2e");
@@ -82,7 +87,7 @@ async function launchHost() {
     timeout: 60000,
     env: {
       ...process.env,
-      PATH: `${BIN_DIR}:${process.env.PATH}`,
+      PATH: `${BIN_DIR}${delimiter}${process.env.PATH ?? ""}`,
       VSCODE_ACP_TEST_AGENT_COMMAND: AGENT_PATH,
       VSCODE_ACP_DEMO_STORE: STORE_PATH,
       VSCODE_SKIP_PRELAUNCH: "1",
@@ -94,7 +99,7 @@ async function focusChat(window: Page) {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
   await window.waitForTimeout(3000);
-  await window.keyboard.press("Control+Shift+P");
+  await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
   await window.waitForTimeout(500);
   await window.keyboard.type("ACP: Start Chat");
   await window.waitForTimeout(300);
@@ -131,7 +136,7 @@ test("restores persisted ACP history after an Extension Development Host restart
   try {
     const secondWindow = await secondHost.firstWindow();
     const secondFrame = await focusChat(secondWindow);
-    await secondWindow.keyboard.press("Control+Shift+P");
+    await secondWindow.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
     await secondWindow.waitForTimeout(500);
     await secondWindow.keyboard.type("ACP: Load Session");
     await secondWindow.waitForTimeout(300);
