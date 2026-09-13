@@ -2663,6 +2663,52 @@ suite("ChatViewProvider", () => {
       assert.deepStrictEqual(client.sentAttachments, []);
     });
 
+    test("drops the attachment draft when the composer webview reloads", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      let receive: ((message: Record<string, unknown>) => void) | undefined;
+      const view = {
+        webview: {
+          options: {},
+          html: "",
+          cspSource: "vscode-webview:",
+          asWebviewUri: (uri: vscode.Uri) => uri,
+          postMessage: async () => true,
+          onDidReceiveMessage: (
+            handler: (message: Record<string, unknown>) => void
+          ) => {
+            receive = handler;
+            return { dispose: () => undefined };
+          },
+        },
+        onDidDispose: () => ({ dispose: () => undefined }),
+        show: () => undefined,
+      };
+      provider.resolveWebviewView(
+        view as unknown as vscode.WebviewView,
+        {} as vscode.WebviewViewResolveContext,
+        {} as vscode.CancellationToken
+      );
+      assert.ok(receive);
+
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+      };
+      internals.pendingAttachments.set("att-orphan", {
+        id: "att-orphan",
+        uri: "file:///workspace/orphan.ts",
+        name: "orphan.ts",
+      });
+
+      receive({ type: "ready" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(internals.pendingAttachments.size, 0);
+    });
+
     test("does not consume attachment drafts while a session is replaying", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,

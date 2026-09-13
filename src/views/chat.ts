@@ -343,6 +343,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.pendingAttachments.delete(message.attachmentId ?? "");
           break;
         case "ready":
+          // A freshly loaded composer starts with an empty attachment bar;
+          // drop any draft the previous webview instance owned so its files
+          // do not keep consuming the per-prompt budget invisibly.
+          this.clearPendingAttachments();
           this.postMessage({
             type: "connectionState",
             state: this.acpClient.getState(),
