@@ -136,6 +136,7 @@ export interface ExtensionMessage {
   terminalOutput?: string;
   requestId?: string;
   options?: PermissionOption[];
+  active?: boolean;
 }
 
 /**
@@ -144,6 +145,9 @@ export interface ExtensionMessage {
  * decide a request the user has not read yet.
  */
 const PERMISSION_GUARD_MS = 500;
+
+const DEFAULT_INPUT_HINT =
+  "Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.";
 
 export function escapeHtml(str: string): string {
   return str
@@ -500,6 +504,8 @@ export interface WebviewElements {
   messagesEl: HTMLElement;
   inputEl: HTMLTextAreaElement;
   sendBtn: HTMLButtonElement;
+  inputContainer: HTMLElement;
+  inputHint: HTMLElement;
   statusDot: HTMLElement;
   statusText: HTMLElement;
   agentSelector: HTMLSelectElement;
@@ -521,6 +527,8 @@ export function getElements(doc: Document): WebviewElements {
     sendBtn: doc.getElementById("send") as HTMLButtonElement,
     statusDot: doc.getElementById("status-dot")!,
     statusText: doc.getElementById("status-text")!,
+    inputContainer: doc.getElementById("input-container")!,
+    inputHint: doc.getElementById("input-hint")!,
     agentSelector: doc.getElementById("agent-selector") as HTMLSelectElement,
     connectBtn: doc.getElementById("connect-btn") as HTMLButtonElement,
     welcomeConnectBtn: doc.getElementById(
@@ -564,6 +572,9 @@ export class WebviewController {
   private permissionUnlockTimer: number | null = null;
   private replayStatusEl: HTMLElement | null = null;
   private sessionPickerPreviousFocus: HTMLElement | null = null;
+  private inputLocks = new Map<string, string>();
+  private restoreInputFocus = false;
+  private promptPending = false;
 
   constructor(
     vscode: VsCodeApi,
@@ -699,10 +710,12 @@ export class WebviewController {
     });
 
     connectBtn.addEventListener("click", () => {
+      this.setInputLock("session", true, "Connecting to agent…");
       this.vscode.postMessage({ type: "connect" });
     });
 
     welcomeConnectBtn.addEventListener("click", () => {
+      this.setInputLock("session", true, "Connecting to agent…");
       this.vscode.postMessage({ type: "connect" });
     });
 
@@ -833,8 +846,69 @@ export class WebviewController {
     };
     this.elements.statusText.textContent = labels[state] || state;
     this.isConnected = state === "connected";
+    this.setInputLock(
+      "connection",
+      state === "connecting",
+      "Connecting to agent…"
+    );
     this.updateViewState();
     this.saveState();
+  }
+
+  private setInputLock(reason: string, locked: boolean, message = ""): void {
+    if (locked) {
+      const activeElement = this.doc.activeElement;
+      this.restoreInputFocus ||=
+        reason === "session" ||
+        reason === "replay" ||
+        activeElement === this.elements.inputEl ||
+        activeElement === this.elements.sendBtn;
+      this.inputLocks.set(reason, message || "Preparing session…");
+      this.hideCommandAutocomplete();
+    } else {
+      this.inputLocks.delete(reason);
+    }
+
+    this.updateInputControls();
+  }
+
+  private updateInputControls(): void {
+    const inputLocked = this.inputLocks.size > 0;
+    let hint = DEFAULT_INPUT_HINT;
+    for (const lockMessage of this.inputLocks.values()) {
+      hint = lockMessage;
+    }
+
+    this.elements.inputEl.disabled = inputLocked;
+    this.elements.inputEl.setAttribute("aria-disabled", String(inputLocked));
+    this.elements.sendBtn.disabled = inputLocked || this.promptPending;
+    this.elements.sendBtn.setAttribute(
+      "aria-disabled",
+      String(inputLocked || this.promptPending)
+    );
+    this.elements.connectBtn.disabled = inputLocked;
+    this.elements.sendBtn.textContent = inputLocked ? "Wait…" : "Send";
+    this.elements.sendBtn.setAttribute(
+      "aria-label",
+      inputLocked ? hint : "Send message"
+    );
+    this.elements.sendBtn.title = inputLocked ? hint : "Send (Enter)";
+    this.elements.welcomeConnectBtn.disabled = inputLocked;
+    this.elements.agentSelector.disabled = inputLocked;
+    this.elements.modeSelector.disabled = inputLocked;
+    this.elements.modelSelector.disabled = inputLocked;
+    this.elements.inputContainer.setAttribute("aria-busy", String(inputLocked));
+    this.elements.inputHint.textContent = hint;
+
+    if (
+      !inputLocked &&
+      this.restoreInputFocus &&
+      !this.elements.permissionModal.classList.contains("visible") &&
+      !this.elements.sessionPicker.classList.contains("visible")
+    ) {
+      this.restoreInputFocus = false;
+      this.elements.inputEl.focus();
+    }
   }
 
   updateViewState(): void {
@@ -846,12 +920,16 @@ export class WebviewController {
   }
 
   private send(): void {
+    if (this.inputLocks.size > 0 || this.promptPending) {
+      return;
+    }
     const text = this.elements.inputEl.value.trim();
     if (!text) return;
     this.vscode.postMessage({ type: "sendMessage", text });
     this.elements.inputEl.value = "";
     this.elements.inputEl.style.height = "auto";
-    this.elements.sendBtn.disabled = true;
+    this.promptPending = true;
+    this.updateInputControls();
     this.saveState();
   }
 
@@ -1082,6 +1160,9 @@ export class WebviewController {
 
       item.addEventListener("click", () => {
         item.disabled = true;
+        if (mode === "load") {
+          this.setInputLock("session", true, "Restoring conversation…");
+        }
         this.vscode.postMessage({
           type: mode === "load" ? "selectSession" : "deleteSession",
           sessionId: session.sessionId,
@@ -1151,6 +1232,8 @@ export class WebviewController {
           this.addMessage(msg.text, "user");
           this.showThinking();
           this.updateViewState();
+          this.promptPending = true;
+          this.updateInputControls();
         }
         break;
       case "streamStart":
@@ -1197,8 +1280,15 @@ export class WebviewController {
         this.hasActiveTool = false;
         this.expandedToolId = null;
         this.hideThought();
-        this.elements.sendBtn.disabled = false;
-        this.elements.inputEl.focus();
+        this.promptPending = false;
+        this.updateInputControls();
+        if (
+          this.inputLocks.size === 0 &&
+          !this.elements.permissionModal.classList.contains("visible") &&
+          !this.elements.sessionPicker.classList.contains("visible")
+        ) {
+          this.elements.inputEl.focus();
+        }
         break;
       case "toolCallStart":
         if (msg.toolCallId && msg.name) {
@@ -1260,12 +1350,26 @@ export class WebviewController {
         this.hideThinking();
         if (msg.text) this.addMessage(msg.text, "error");
         this.updateViewState();
-        this.elements.sendBtn.disabled = false;
-        this.elements.inputEl.focus();
+        this.promptPending = false;
+        this.updateInputControls();
+        if (
+          this.inputLocks.size === 0 &&
+          !this.elements.permissionModal.classList.contains("visible") &&
+          !this.elements.sessionPicker.classList.contains("visible")
+        ) {
+          this.elements.inputEl.focus();
+        }
         break;
       case "agentError":
         if (msg.text) this.addMessage(msg.text, "error");
         this.updateViewState();
+        break;
+      case "sessionTransition":
+        this.setInputLock(
+          "session",
+          msg.active === true,
+          msg.text || "Preparing session…"
+        );
         break;
       case "connectionState":
         if (msg.state) {
@@ -1296,6 +1400,7 @@ export class WebviewController {
         this.clearPermissionModal();
         break;
       case "triggerNewChat":
+        this.setInputLock("session", true, "Starting a new session…");
         this.vscode.postMessage({ type: "newChat" });
         break;
       case "triggerClearChat":
@@ -1310,6 +1415,7 @@ export class WebviewController {
         this.hideSessionHistory();
         break;
       case "replayStart":
+        this.setInputLock("replay", true, "Restoring conversation…");
         this.hideSessionHistory();
         this.showReplayStatus();
         break;
@@ -1328,12 +1434,18 @@ export class WebviewController {
           this.currentAssistantText = "";
         });
         this.showReplayStatus("Conversation restored.");
+        this.setInputLock("replay", false);
         this.updateViewState();
         break;
       case "replayFailed":
         this.hideReplayStatus();
-        if (msg.text)
-          this.addMessage(`Could not restore session: ${msg.text}`, "error");
+        if (msg.text) {
+          this.addMessage(
+            `Could not restore session: ${msg.text}. Try another saved session or start a new chat.`,
+            "error"
+          );
+        }
+        this.setInputLock("replay", false);
         break;
       case "sessionMetadata": {
         const hasModes =

@@ -646,9 +646,166 @@ suite("ChatViewProvider", () => {
       }
     );
     assert.ok(!messages.some((message) => message.type === "chatCleared"));
+    assert.deepStrictEqual(
+      messages.find((message) => message.type === "sessionMetadata"),
+      { type: "sessionMetadata", ...metadata }
+    );
     assert.deepStrictEqual(messages.at(-1), {
-      type: "sessionMetadata",
-      ...metadata,
+      type: "sessionTransition",
+      active: false,
+    });
+  });
+
+  suite("Session transition races", () => {
+    test("serializes a replacement chat behind initial session creation", async () => {
+      let finishFirstSession!: () => void;
+      let markFirstSessionStarted!: () => void;
+      const firstSessionStarted = new Promise<void>((resolve) => {
+        markFirstSessionStarted = resolve;
+      });
+
+      class DelayedSessionClient extends TestACPClient {
+        private sessionRequestActive = false;
+        public sessionCount = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          if (this.sessionRequestActive) {
+            throw new Error("Session creation already in progress");
+          }
+          this.sessionRequestActive = true;
+          this.sessionCount++;
+          if (this.sessionCount === 1) {
+            markFirstSessionStarted();
+            await new Promise<void>((resolve) => {
+              finishFirstSession = resolve;
+            });
+          }
+          this.currentSessionId = `session-${this.sessionCount}`;
+          this.sessionRequestActive = false;
+        }
+      }
+
+      const client = new DelayedSessionClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        handleConnect(): Promise<void>;
+        handleNewChat(): Promise<void>;
+      };
+
+      const connecting = lifecycle.handleConnect();
+      await firstSessionStarted;
+      const replacing = lifecycle.handleNewChat();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(client.sessionCount, 1);
+      assert.ok(
+        !messages.some((message) =>
+          String(message.text).includes("Session creation already in progress")
+        )
+      );
+
+      finishFirstSession();
+      await Promise.all([connecting, replacing]);
+      assert.strictEqual(client.sessionCount, 2);
+    });
+
+    test("queues a prompt until session restore finishes", async () => {
+      let finishLoad!: () => void;
+      let markLoadStarted!: () => void;
+      const loadStarted = new Promise<void>((resolve) => {
+        markLoadStarted = resolve;
+      });
+
+      class DelayedLoadClient extends TestACPClient {
+        public promptSent = false;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = null;
+          markLoadStarted();
+          await new Promise<void>((resolve) => {
+            finishLoad = resolve;
+          });
+          this.currentSessionId = sessionId;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          assert.strictEqual(this.currentSessionId, "restored-session");
+          this.promptSent = true;
+          this.emitSessionUpdate({
+            sessionId: "restored-session",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "agent-1",
+              content: { type: "text", text: "Restored reply" },
+            },
+          } satisfies SessionNotification);
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      const client = new DelayedLoadClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        hasSession: boolean;
+        handleUserMessage(text: string): Promise<void>;
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+      lifecycle.hasSession = true;
+
+      const loading = lifecycle.loadStoredSession({
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Restored conversation",
+        messageCount: 1,
+      });
+      await loadStarted;
+      const prompt = lifecycle.handleUserMessage("Continue restored work");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(client.promptSent, false);
+      finishLoad();
+      await Promise.all([loading, prompt]);
+      assert.strictEqual(client.promptSent, true);
+      assert.ok(!messages.some((message) => message.type === "error"));
     });
   });
 
@@ -1109,7 +1266,7 @@ suite("ChatViewProvider", () => {
         }
 
         async loadSession(): Promise<void> {
-          throw new Error("Agent rejected the session");
+          throw new RequestError(-32000, "Sign in to continue");
         }
       }
 
@@ -1147,12 +1304,22 @@ suite("ChatViewProvider", () => {
             preview: "Previous conversation",
             messageCount: 1,
           }),
-        /Agent rejected the session/
+        /Sign in to continue/
       );
 
       assert.strictEqual(sessionProvider.hasSession, true);
-      assert.ok(messages.some((message) => message.type === "replayFailed"));
+      assert.deepStrictEqual(
+        messages.find((message) => message.type === "replayFailed"),
+        {
+          type: "replayFailed",
+          text: "Authentication required: Sign in to continue",
+        }
+      );
       assert.ok(!messages.some((message) => message.type === "replayComplete"));
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "sessionTransition",
+        active: false,
+      });
     });
   });
   suite("Client capability handlers", () => {

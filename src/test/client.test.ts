@@ -125,6 +125,28 @@ suite("ACP error presentation", () => {
     assert.strictEqual(formatACPError(error), "Internal error (-32603)");
   });
 
+  test("replaces internal session transition diagnostics with recovery guidance", () => {
+    const errors = [
+      "Already connected or connecting",
+      "Session creation already in progress",
+      "Session loading already in progress",
+      "No active session",
+    ];
+
+    for (const message of errors) {
+      assert.deepStrictEqual(describeACPError(new Error(message)), {
+        kind: "session-transition",
+        summary: "Session is still getting ready",
+        diagnostic:
+          "Session is still getting ready. Wait for setup to finish, then try again.",
+      });
+      assert.strictEqual(
+        formatACPError(new Error(message)),
+        "Session is still getting ready. Wait for setup to finish, then try again."
+      );
+    }
+  });
+
   test("does not repeat the summary for the SDK's default message", () => {
     assert.strictEqual(
       formatACPError(RequestError.authRequired()),
