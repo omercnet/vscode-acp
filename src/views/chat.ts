@@ -946,7 +946,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; form-action 'none'; frame-src 'none'; object-src 'none';">
   <link href="${styleResetUri}" rel="stylesheet">
   <link href="${styleVSCodeUri}" rel="stylesheet">
   <link href="${styleMainUri}" rel="stylesheet">
