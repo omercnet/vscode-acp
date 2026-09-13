@@ -1,6 +1,5 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
-import { marked } from "marked";
 import { ACPClient, describeACPError, formatACPError } from "../acp/client";
 import {
   getAgent,
@@ -26,11 +25,6 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-});
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
@@ -769,13 +763,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           type: "error",
           text: "Agent returned no response. Check the ACP output channel for details.",
         });
-        this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
+        this.postMessage({ type: "streamEnd", stopReason: "error" });
       } else {
-        const renderedHtml = marked.parse(this.streamingText) as string;
         this.postMessage({
           type: "streamEnd",
           stopReason: response.stopReason,
-          html: renderedHtml,
         });
       }
       this.streamingText = "";
@@ -789,8 +781,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postMessage({
         type: "streamEnd",
         stopReason: kind === "cancelled" ? "cancelled" : "error",
-        html: "",
       });
+
       this.streamingText = "";
       this.stderrBuffer = "";
     }
@@ -954,7 +946,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource};">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource}; form-action 'none'; frame-src 'none'; object-src 'none';">
   <link href="${styleResetUri}" rel="stylesheet">
   <link href="${styleVSCodeUri}" rel="stylesheet">
   <link href="${styleMainUri}" rel="stylesheet">
