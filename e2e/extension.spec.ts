@@ -60,6 +60,12 @@ test.describe("VSCode ACP Extension", () => {
     const startChatCommand = window.locator("text=ACP: Start Chat");
     await expect(startChatCommand).toBeVisible({ timeout: 5000 });
 
+    const loadSessionCommand = window.locator("text=ACP: Load Session");
+    await expect(loadSessionCommand).toBeVisible({ timeout: 5000 });
+
+    const deleteSessionCommand = window.locator("text=ACP: Delete Session");
+    await expect(deleteSessionCommand).toBeVisible({ timeout: 5000 });
+
     await window.keyboard.press("Escape");
   });
 });

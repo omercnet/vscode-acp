@@ -89,15 +89,19 @@ export const AGENTS: AgentConfig[] = [
     name: "Kiro CLI",
     command: "kiro-cli",
     args: ["acp"],
-  }
+  },
 ];
+
+const TEST_AGENT_COMMAND = process.env.VSCODE_ACP_TEST_AGENT_COMMAND;
 
 export function getAgent(id: string): AgentConfig | undefined {
   return AGENTS.find((a) => a.id === id);
 }
 
 export function getDefaultAgent(): AgentConfig {
-  return AGENTS[0];
+  return TEST_AGENT_COMMAND
+    ? { ...AGENTS[0], command: TEST_AGENT_COMMAND, args: [] }
+    : AGENTS[0];
 }
 
 /**
@@ -148,8 +152,12 @@ export function getAgentsWithStatus(forceRefresh = false): AgentWithStatus[] {
  * Get the first available agent, or fall back to the default.
  */
 export function getFirstAvailableAgent(): AgentConfig {
+  if (TEST_AGENT_COMMAND) {
+    return getDefaultAgent();
+  }
+
   const agents = getAgentsWithStatus();
-  const available = agents.find((a) => a.available);
+  const available = agents.find((agent) => agent.available);
   return available ?? AGENTS[0];
 }
 

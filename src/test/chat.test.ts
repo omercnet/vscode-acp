@@ -5,7 +5,10 @@ import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
-import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
+import type {
+  RequestPermissionRequest,
+  SessionNotification,
+} from "@agentclientprotocol/sdk";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -32,6 +35,8 @@ interface MockACPClient {
   connect: () => Promise<void>;
   newSession: (dir: string) => Promise<void>;
   sendMessage: (text: string) => Promise<{ stopReason: string }>;
+  loadSession: (sessionId: string, dir: string) => Promise<void>;
+  supportsSessionLoad: () => boolean;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -92,6 +97,8 @@ class TestACPClient implements MockACPClient {
   private stateChangeCallback:
     | ((state: "disconnected" | "connecting" | "connected" | "error") => void)
     | null = null;
+  private sessionUpdateCallback:
+    ((update: SessionNotification) => void) | null = null;
   public lastSetModeId: string | null = null;
   public lastSetModelId: string | null = null;
   public currentSessionId: string | null = "test-session";
@@ -115,8 +122,15 @@ class TestACPClient implements MockACPClient {
       }
     };
   }
-  setOnSessionUpdate(): () => void {
-    return () => {};
+  setOnSessionUpdate(
+    callback: (update: SessionNotification) => void
+  ): () => void {
+    this.sessionUpdateCallback = callback;
+    return () => {
+      if (this.sessionUpdateCallback === callback) {
+        this.sessionUpdateCallback = null;
+      }
+    };
   }
   setOnStderr(): () => void {
     return () => {};
@@ -136,6 +150,14 @@ class TestACPClient implements MockACPClient {
   async newSession(): Promise<void> {}
   async sendMessage(): Promise<{ stopReason: string }> {
     return { stopReason: "end_turn" };
+  }
+
+  async loadSession(_sessionId: string, _dir: string): Promise<void> {
+    throw new Error("Session loading is unavailable");
+  }
+
+  supportsSessionLoad(): boolean {
+    return false;
   }
 
   async setMode(modeId: string): Promise<void> {
@@ -177,6 +199,10 @@ class TestACPClient implements MockACPClient {
     state: "disconnected" | "connecting" | "connected" | "error"
   ): void {
     this.stateChangeCallback?.(state);
+  }
+
+  emitSessionUpdate(update: SessionNotification): void {
+    this.sessionUpdateCallback?.(update);
   }
 }
 
@@ -687,6 +713,184 @@ suite("ChatViewProvider", () => {
     assert.deepStrictEqual(messages.at(-1), {
       type: "streamEnd",
       stopReason: "cancelled",
+    });
+  });
+
+  suite("Session history", () => {
+    test("persists active session metadata in workspace state", async () => {
+      const workspaceState = new TestMemento();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        saveCurrentSession(preview?: string): Promise<void>;
+      };
+
+      await sessionProvider.saveCurrentSession("Describe the migration plan");
+
+      const history = workspaceState.get<
+        Array<{
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          preview: string;
+          messageCount: number;
+        }>
+      >("vscode-acp.sessionHistory");
+      assert.strictEqual(history?.length, 1);
+      assert.strictEqual(history?.[0].sessionId, "test-session");
+      assert.strictEqual(history?.[0].agentId, "test-agent");
+      assert.strictEqual(history?.[0].cwd, process.cwd());
+      assert.strictEqual(history?.[0].preview, "Describe the migration plan");
+      assert.strictEqual(history?.[0].messageCount, 1);
+    });
+
+    test("rebuilds replayed messages without duplicating chunks", async () => {
+      class LoadingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(sessionId: string): Promise<void> {
+          this.currentSessionId = sessionId;
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "user_message_chunk",
+              messageId: "user-1",
+              content: { type: "text", text: "First " },
+            },
+          } satisfies SessionNotification);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "user_message_chunk",
+              messageId: "user-1",
+              content: { type: "text", text: "question" },
+            },
+          } satisfies SessionNotification);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "agent-1",
+              content: { type: "text", text: "First " },
+            },
+          } satisfies SessionNotification);
+          this.emitSessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "agent-1",
+              content: { type: "text", text: "answer" },
+            },
+          } satisfies SessionNotification);
+        }
+      }
+
+      const client = new LoadingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const sessionProvider = provider as unknown as {
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+
+      await sessionProvider.loadStoredSession({
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "First question",
+        messageCount: 1,
+      });
+
+      const completed = messages.find(
+        (message) => message.type === "replayComplete"
+      );
+      assert.deepStrictEqual(completed?.messages, [
+        { role: "user", text: "First question" },
+        { role: "assistant", text: "First answer" },
+      ]);
+    });
+
+    test("keeps the visible session state when loading fails", async () => {
+      class FailingLoadClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(): Promise<void> {
+          throw new Error("Agent rejected the session");
+        }
+      }
+
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new FailingLoadClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const sessionProvider = provider as unknown as {
+        hasSession: boolean;
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+      sessionProvider.hasSession = true;
+
+      await assert.rejects(
+        () =>
+          sessionProvider.loadStoredSession({
+            sessionId: "missing-session",
+            agentId: "test-agent",
+            cwd: process.cwd(),
+            createdAt: 1,
+            lastUsedAt: 1,
+            preview: "Previous conversation",
+            messageCount: 1,
+          }),
+        /Agent rejected the session/
+      );
+
+      assert.strictEqual(sessionProvider.hasSession, true);
+      assert.ok(messages.some((message) => message.type === "replayFailed"));
+      assert.ok(!messages.some((message) => message.type === "replayComplete"));
     });
   });
   suite("Client capability handlers", () => {

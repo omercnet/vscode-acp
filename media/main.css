@@ -1062,3 +1062,86 @@ kbd {
 .permission-cancel-btn:hover {
   background: var(--vscode-list-hoverBackground);
 }
+
+.session-picker {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.session-picker.visible {
+  display: flex;
+}
+
+.session-picker-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(560px, 90%);
+  max-height: 80%;
+  padding: 16px;
+  overflow: auto;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.session-picker-content h3,
+.session-picker-content p {
+  margin: 0;
+}
+
+.session-history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  background: var(--vscode-list-inactiveSelectionBackground);
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-history-item:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.session-history-item:focus-visible,
+.session-picker-close:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.session-history-preview {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-details {
+  overflow: hidden;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-picker-close {
+  align-self: flex-end;
+  padding: 6px 12px;
+}

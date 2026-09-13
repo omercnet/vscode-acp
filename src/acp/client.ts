@@ -210,6 +210,8 @@ export class ACPClient {
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
   private canCloseSessions = false;
+  private supportsSessionLoading = false;
+  private loadingSessionId: acp.SessionId | null = null;
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -264,6 +266,10 @@ export class ACPClient {
 
   getCurrentSessionId(): string | null {
     return this.isConnected() ? this.currentSessionId : null;
+  }
+
+  supportsSessionLoad(): boolean {
+    return this.supportsSessionLoading;
   }
 
   setOnStateChange(callback: StateChangeCallback): () => void {
@@ -382,6 +388,8 @@ export class ACPClient {
         this.pendingModeBySession.clear();
         this.activePrompt = null;
         this.canCloseSessions = false;
+        this.supportsSessionLoading = false;
+        this.loadingSessionId = null;
         this.setState("disconnected");
       });
 
@@ -517,6 +525,8 @@ export class ACPClient {
       }
       this.canCloseSessions =
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
+      this.supportsSessionLoading =
+        initResponse.agentCapabilities?.loadSession === true;
 
       this.setState("connected");
       return initResponse;
@@ -536,6 +546,8 @@ export class ACPClient {
         this.currentSessionId = null;
         this.sessionMetadata = null;
         this.canCloseSessions = false;
+        this.supportsSessionLoading = false;
+        this.loadingSessionId = null;
         this.setState("error");
       }
       throw error;
@@ -574,7 +586,7 @@ export class ACPClient {
       }
     }
 
-    if (!isCurrentSession) {
+    if (!isCurrentSession && params.sessionId !== this.loadingSessionId) {
       return;
     }
     if (update.sessionUpdate === "agent_message_chunk") {
@@ -698,6 +710,118 @@ export class ACPClient {
           this.sessionMetadata = replacedSessionMetadata;
         }
         this.pendingSessionRequestGeneration = null;
+        this.pendingCommandsBySession.clear();
+        this.pendingConfigOptionsBySession.clear();
+        this.pendingModeBySession.clear();
+      }
+      throw error;
+    }
+  }
+  async loadSession(
+    sessionId: acp.SessionId,
+    workingDirectory: string
+  ): Promise<acp.LoadSessionResponse> {
+    const connection = this.connection;
+    if (!connection) {
+      throw new Error("Not connected");
+    }
+    if (!this.supportsSessionLoading) {
+      throw new Error("Agent does not support session loading");
+    }
+    if (this.pendingSessionRequestGeneration !== null) {
+      throw new Error("Session loading already in progress");
+    }
+
+    const requestGeneration = ++this.sessionRequestGeneration;
+    this.pendingSessionRequestGeneration = requestGeneration;
+    this.loadingSessionId = sessionId;
+    this.pendingCommandsBySession.clear();
+    this.pendingConfigOptionsBySession.clear();
+    this.pendingModeBySession.clear();
+    const replacedSessionId = this.currentSessionId;
+    const replacedSessionMetadata = this.sessionMetadata;
+    this.currentSessionId = null;
+    this.sessionMetadata = null;
+    const replacedPromptSessionId = this.activePrompt?.sessionId;
+
+    try {
+      if (replacedPromptSessionId) {
+        await connection.agent.notify(acp.methods.agent.session.cancel, {
+          sessionId: replacedPromptSessionId,
+        });
+      }
+
+      const response = await connection.agent.request(
+        acp.methods.agent.session.load,
+        {
+          sessionId,
+          cwd: workingDirectory,
+          mcpServers: [],
+        }
+      );
+
+      if (
+        connection !== this.connection ||
+        requestGeneration !== this.sessionRequestGeneration
+      ) {
+        return response;
+      }
+
+      const bufferedConfigOptions =
+        this.pendingConfigOptionsBySession.get(sessionId);
+      const modes = response.modes ?? null;
+      const bufferedMode = this.pendingModeBySession.get(sessionId);
+      if (
+        modes &&
+        bufferedMode &&
+        modes.availableModes.some((mode) => mode.id === bufferedMode)
+      ) {
+        modes.currentModeId = bufferedMode;
+      }
+      this.currentSessionId = sessionId;
+      this.sessionMetadata = {
+        modes,
+        models: getModelState(
+          response.configOptions === undefined
+            ? bufferedConfigOptions
+            : response.configOptions
+        ),
+        commands: this.pendingCommandsBySession.get(sessionId) ?? null,
+      };
+      if (
+        replacedSessionId &&
+        replacedSessionId !== sessionId &&
+        this.canCloseSessions
+      ) {
+        void connection.agent
+          .request(acp.methods.agent.session.close, {
+            sessionId: replacedSessionId,
+          })
+          .catch((error) => {
+            if (!connection.signal.aborted) {
+              console.warn("[ACP] Failed to close replaced session:", error);
+            }
+          });
+      }
+      this.pendingSessionRequestGeneration = null;
+      this.loadingSessionId = null;
+      this.pendingCommandsBySession.clear();
+      this.pendingConfigOptionsBySession.clear();
+      this.pendingModeBySession.clear();
+
+      return response;
+    } catch (error) {
+      if (this.pendingSessionRequestGeneration === requestGeneration) {
+        if (
+          !connection.signal.aborted &&
+          replacedSessionId &&
+          replacedSessionMetadata
+        ) {
+          this.currentSessionId = replacedSessionId;
+          this.sessionMetadata = replacedSessionMetadata;
+        }
+        this.pendingSessionRequestGeneration = null;
+        this.loadingSessionId = null;
         this.pendingCommandsBySession.clear();
         this.pendingConfigOptionsBySession.clear();
         this.pendingModeBySession.clear();
@@ -830,6 +954,8 @@ export class ACPClient {
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
     this.canCloseSessions = false;
+    this.supportsSessionLoading = false;
+    this.loadingSessionId = null;
     this.activePrompt = null;
     this.setState("disconnected");
   }
