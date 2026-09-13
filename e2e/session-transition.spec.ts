@@ -21,6 +21,8 @@ const SCREENSHOTS_DIR = join(PROJECT_ROOT, "screenshots");
 
 const AGENT_SOURCE = `#!/usr/bin/env node
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+const promptsBySession = new Map();
+let sessionCounter = 0;
 let buffer = "";
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
@@ -33,16 +35,26 @@ process.stdin.on("data", (chunk) => {
     if (message.method === "initialize") {
       send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
     } else if (message.method === "session/new") {
+      const sessionId = "transition-demo-" + ++sessionCounter;
       setTimeout(() => {
         if (process.env.VSCODE_ACP_FAIL_SESSION === "1") {
           send({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: "Sign in to continue" } });
         } else {
-          send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "transition-demo", modes: null } });
+          send({ jsonrpc: "2.0", id: message.id, result: { sessionId, modes: null } });
         }
       }, 1800);
+    } else if (message.method === "session/load") {
+      const sessionId = params.sessionId;
+      setTimeout(() => {
+        const text = promptsBySession.get(sessionId) || "Saved prompt";
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "user_message_chunk", messageId: "saved-user", content: { type: "text", text } } } });
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: { sessionUpdate: "agent_message_chunk", messageId: "saved-agent", content: { type: "text", text: "Saved reply" } } } });
+        send({ jsonrpc: "2.0", id: message.id, result: { modes: null } });
+      }, 1200);
     } else if (message.method === "session/prompt") {
       const text = params.prompt[0].text;
-      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", messageId: "agent-1", content: { type: "text", text: "Ready: " + text } } } });
+      promptsBySession.set(params.sessionId, text);
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: params.sessionId, update: { sessionUpdate: "agent_message_chunk", messageId: "agent-1", content: { type: "text", text: "Ready " + params.sessionId + ": " + text } } } });
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
     } else if (message.id !== undefined) {
       send({ jsonrpc: "2.0", id: message.id, result: {} });
@@ -106,6 +118,14 @@ async function openChatView(window: Page) {
     .frameLocator("#active-frame");
 }
 
+async function runCommand(window: Page, command: string): Promise<void> {
+  await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
+  await window.waitForTimeout(300);
+  await window.keyboard.type(command);
+  await window.waitForTimeout(300);
+  await window.keyboard.press("Enter");
+}
+
 test.beforeAll(async () => {
   await rm(DEMO_DIR, { recursive: true, force: true });
   await mkdir(BIN_DIR, { recursive: true });
@@ -146,7 +166,9 @@ test("locks drafted input until connection and session creation finish", async (
       await input.evaluate((element) => element === document.activeElement)
     ).toBe(true);
     await input.press("Enter");
-    await expect(frame.getByText("Ready: Continue after setup")).toBeVisible();
+    await expect(
+      frame.getByText("Ready transition-demo-1: Continue after setup")
+    ).toBeVisible();
     await expect(
       frame.getByText("Session creation already in progress")
     ).toHaveCount(0);
@@ -185,6 +207,84 @@ test("recovers usable controls with a classified session creation error", async 
     await expect(
       frame.getByText("Session creation already in progress")
     ).toHaveCount(0);
+  } finally {
+    await host.close();
+  }
+});
+
+test("serializes replacement during initial session creation", async () => {
+  const host = await launchHost("replacement");
+  try {
+    const window = await host.firstWindow();
+    const frame = await openChatView(window);
+    const input = frame.locator("#input");
+
+    await input.fill("Draft survives replacement");
+    await frame.locator("#connect-btn").click();
+    await expect(frame.locator("#status-text")).toHaveText("Connected", {
+      timeout: 10000,
+    });
+    await expect(input).toBeDisabled();
+
+    await runCommand(window, "ACP: New Chat");
+    await expect(input).toBeEnabled({ timeout: 10000 });
+    await expect(input).toHaveValue("Draft survives replacement");
+
+    await input.fill("Replacement prompt");
+    await input.press("Enter");
+    await expect(
+      frame.getByText("Ready transition-demo-2: Replacement prompt")
+    ).toBeVisible();
+    await expect(
+      frame.getByText("Session creation already in progress")
+    ).toHaveCount(0);
+  } finally {
+    await host.close();
+  }
+});
+
+test("locks and targets the restored session during load", async () => {
+  const host = await launchHost("restore");
+  try {
+    const window = await host.firstWindow();
+    const frame = await openChatView(window);
+    const input = frame.locator("#input");
+
+    await frame.locator("#connect-btn").click();
+    await expect(input).toBeEnabled({ timeout: 10000 });
+    await input.fill("Remember me");
+    await input.press("Enter");
+    await expect(
+      frame.getByText("Ready transition-demo-1: Remember me")
+    ).toBeVisible();
+
+    await runCommand(window, "ACP: New Chat");
+    await expect(input).toBeDisabled();
+    await expect(input).toBeEnabled({ timeout: 10000 });
+    await input.fill("Continue loaded");
+
+    await runCommand(window, "ACP: Load Session");
+    const savedSession = frame.getByRole("button", {
+      name: "Load Remember me",
+    });
+    await expect(savedSession).toBeVisible();
+    await savedSession.click();
+
+    await expect(input).toBeDisabled();
+    await expect(frame.locator("#input-container")).toHaveAttribute(
+      "aria-busy",
+      "true"
+    );
+    await expect(frame.getByText("Conversation restored.")).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(input).toBeEnabled();
+    await expect(input).toHaveValue("Continue loaded");
+
+    await input.press("Enter");
+    await expect(
+      frame.getByText("Ready transition-demo-1: Continue loaded")
+    ).toBeVisible();
   } finally {
     await host.close();
   }

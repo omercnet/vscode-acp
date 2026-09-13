@@ -807,6 +807,120 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.promptSent, true);
       assert.ok(!messages.some((message) => message.type === "error"));
     });
+
+    test("drops a queued prompt after a newer replacement starts", async () => {
+      let finishFirstSession!: () => void;
+      let finishSecondSession!: () => void;
+      let markFirstSessionStarted!: () => void;
+      let markSecondSessionStarted!: () => void;
+      const firstSessionStarted = new Promise<void>((resolve) => {
+        markFirstSessionStarted = resolve;
+      });
+      const secondSessionStarted = new Promise<void>((resolve) => {
+        markSecondSessionStarted = resolve;
+      });
+
+      class ChainedSessionClient extends TestACPClient {
+        public sessionCount = 0;
+        public promptSessionIds: Array<string | null> = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          this.sessionCount++;
+          const sessionCount = this.sessionCount;
+          if (sessionCount === 1) {
+            markFirstSessionStarted();
+            await new Promise<void>((resolve) => {
+              finishFirstSession = resolve;
+            });
+          } else {
+            markSecondSessionStarted();
+            await new Promise<void>((resolve) => {
+              finishSecondSession = resolve;
+            });
+          }
+          this.currentSessionId = `session-${sessionCount}`;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          this.promptSessionIds.push(this.currentSessionId);
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      const client = new ChainedSessionClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        hasSession: boolean;
+        handleNewChat(): Promise<void>;
+        handleUserMessage(text: string): Promise<void>;
+      };
+      lifecycle.hasSession = true;
+
+      const firstReplacement = lifecycle.handleNewChat();
+      await firstSessionStarted;
+      const queuedPrompt = lifecycle.handleUserMessage("stale draft");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const secondReplacement = lifecycle.handleNewChat();
+
+      finishFirstSession();
+      await secondSessionStarted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.deepStrictEqual(client.promptSessionIds, []);
+
+      finishSecondSession();
+      await Promise.all([firstReplacement, secondReplacement, queuedPrompt]);
+      assert.deepStrictEqual(client.promptSessionIds, []);
+      assert.ok(
+        messages.some(
+          (message) =>
+            message.type === "streamEnd" && message.stopReason === "cancelled"
+        )
+      );
+    });
+
+    test("settles optimistic locks on transition-free exits", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new TestACPClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        handleNewChat(): Promise<void>;
+        handleSelectStoredSession(sessionId: string): Promise<void>;
+      };
+
+      await lifecycle.handleNewChat();
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "sessionTransition",
+        active: false,
+      });
+
+      messages.length = 0;
+      await lifecycle.handleSelectStoredSession("missing-session");
+      assert.deepStrictEqual(messages, [
+        {
+          type: "replayFailed",
+          text: "Session is no longer available.",
+        },
+        { type: "sessionTransition", active: false },
+      ]);
+    });
   });
 
   test("renders structured prompt errors with agent diagnostics", async () => {

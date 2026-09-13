@@ -70,8 +70,8 @@ function createWebviewHTML(): string {
     <div id="command-autocomplete" role="listbox"></div>
     <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
     <button id="send">Send</button>
-  <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   </div>
+  <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
   <div id="options-bar">
     <select id="mode-selector" style="display: none;"></select>
@@ -520,6 +520,49 @@ suite("Webview", () => {
         const error = elements.messagesEl.querySelector(".message.error");
         assert.ok(error?.textContent?.includes("Sign in to continue"));
         assert.ok(error?.textContent?.includes("start a new chat"));
+      });
+
+      test("keeps composed replay and session locks independent", () => {
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Restoring conversation…",
+        } as ExtensionMessage);
+        controller.handleMessage({ type: "replayStart" });
+
+        controller.handleMessage({
+          type: "replayFailed",
+          text: "Session is no longer available.",
+        });
+        assert.strictEqual(elements.inputEl.disabled, true);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(elements.inputEl.disabled, false);
+      });
+
+      test("defers focus restoration until a permission dialog closes", () => {
+        elements.inputEl.focus();
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Starting session…",
+        } as ExtensionMessage);
+        controller.showPermissionModal("request-1", "Write file", "/tmp/a", [
+          { id: "allow", label: "Allow" },
+        ]);
+        assert.strictEqual(document.activeElement, elements.permissionModal);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(document.activeElement, elements.permissionModal);
+
+        controller.hidePermissionModal();
+        assert.strictEqual(document.activeElement, elements.inputEl);
       });
     });
 

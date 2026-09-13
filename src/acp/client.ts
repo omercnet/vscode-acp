@@ -106,15 +106,6 @@ const SESSION_TRANSITION_DIAGNOSTICS: Readonly<Record<string, true>> = {
 };
 
 export function describeACPError(error: unknown): ACPErrorPresentation {
-  if (error instanceof Error && SESSION_TRANSITION_DIAGNOSTICS[error.message]) {
-    return {
-      kind: "session-transition",
-      summary: "Session is still getting ready",
-      diagnostic:
-        "Session is still getting ready. Wait for setup to finish, then try again.",
-    };
-  }
-
   if (error instanceof acp.RequestError) {
     const presentation = ERROR_PRESENTATIONS[error.code];
     if (presentation) {
@@ -130,6 +121,15 @@ export function describeACPError(error: unknown): ACPErrorPresentation {
       code: error.code,
       summary: "ACP request failed",
       diagnostic: error.message,
+    };
+  }
+
+  if (error instanceof Error && SESSION_TRANSITION_DIAGNOSTICS[error.message]) {
+    return {
+      kind: "session-transition",
+      summary: "Session is still getting ready",
+      diagnostic:
+        "Session is still getting ready. Wait for setup to finish, then try again.",
     };
   }
 

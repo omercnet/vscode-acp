@@ -359,6 +359,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "replayFailed",
         text: "Session is no longer available.",
       });
+      this.settleSessionLock();
       return;
     }
     await this.loadStoredSession(session);
@@ -1056,6 +1057,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private settleSessionLock(): void {
+    if (!this.sessionTransition) {
+      this.sessionTransitionLabel = null;
+      this.postMessage({ type: "sessionTransition", active: false });
+    }
+  }
+
   private async ensureConnection(): Promise<void> {
     if (this.acpClient.isConnected()) {
       return;
@@ -1072,10 +1080,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async ensureSession(): Promise<void> {
-    if (this.sessionTransition) {
-      await this.sessionTransition;
-      if (this.hasSession) {
-        return;
+    while (this.sessionTransition) {
+      const transition = this.sessionTransition;
+      try {
+        await transition;
+      } catch (error) {
+        if (!this.sessionTransition || this.sessionTransition === transition) {
+          throw error;
+        }
       }
     }
 
@@ -1103,10 +1115,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleUserMessage(text: string): Promise<void> {
+    const queuedGeneration = this.conversationGeneration;
     this.postMessage({ type: "userMessage", text });
 
     try {
       await this.ensureSession();
+      if (queuedGeneration !== this.conversationGeneration) {
+        this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+        return;
+      }
       const promptGeneration = this.conversationGeneration;
       const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
@@ -1214,6 +1231,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.hasRestoredModeModel = false;
       this.postMessage({ type: "chatCleared" });
       this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      this.settleSessionLock();
       return;
     }
 

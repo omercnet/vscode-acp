@@ -1438,6 +1438,7 @@ export class WebviewController {
         this.updateViewState();
         break;
       case "replayFailed":
+        this.hideSessionHistory();
         this.hideReplayStatus();
         if (msg.text) {
           this.addMessage(
@@ -1783,6 +1784,8 @@ export class WebviewController {
         next.content,
         next.options
       );
+    } else {
+      this.updateInputControls();
     }
   }
 

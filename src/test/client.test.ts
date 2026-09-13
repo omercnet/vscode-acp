@@ -147,6 +147,21 @@ suite("ACP error presentation", () => {
     }
   });
 
+  test("preserves structured classifications for transition-like diagnostics", () => {
+    const error = new RequestError(-32602, "No active session");
+
+    assert.deepStrictEqual(describeACPError(error), {
+      kind: "invalid-parameters",
+      code: -32602,
+      summary: "Invalid parameters",
+      diagnostic: "No active session",
+    });
+    assert.strictEqual(
+      formatACPError(error),
+      "Invalid parameters: No active session"
+    );
+  });
+
   test("does not repeat the summary for the SDK's default message", () => {
     assert.strictEqual(
       formatACPError(RequestError.authRequired()),
