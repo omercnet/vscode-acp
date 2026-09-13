@@ -75,7 +75,8 @@ function createWebviewHTML(): string {
     <select id="mode-selector" style="display: none;"></select>
     <select id="model-selector" style="display: none;"></select>
   </div>
-  
+  <div id="session-picker" class="session-picker" role="dialog" aria-modal="true" aria-labelledby="session-picker-title" tabindex="-1"></div>
+
   <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-content" tabindex="-1">
     <div class="permission-modal-content">
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
@@ -1487,6 +1488,147 @@ suite("Webview", () => {
     });
   });
 
+  suite("Session History", () => {
+    let dom: JSDOM;
+    let document: Document;
+    let mockVsCode: ReturnType<typeof createMockVsCodeApi>;
+    let controller: WebviewController;
+
+    setup(() => {
+      dom = new JSDOM(createWebviewHTML(), { runScripts: "dangerously" });
+      document = dom.window.document;
+      mockVsCode = createMockVsCodeApi();
+      controller = initWebview(
+        mockVsCode,
+        document,
+        dom.window as unknown as Window
+      );
+      mockVsCode._clearMessages();
+    });
+
+    test("uses focusable buttons and Escape for keyboard history navigation", () => {
+      controller.handleMessage({
+        type: "sessionHistory",
+        mode: "load",
+        sessions: [
+          {
+            sessionId: "session-1",
+            cwd: "C:\\workspace\\project",
+            createdAt: 1,
+            lastUsedAt: 2,
+            preview: "Restore this conversation",
+            messageCount: 2,
+          },
+        ],
+      });
+
+      const picker = document.getElementById("session-picker") as HTMLElement;
+      const item = picker.querySelector(
+        ".session-history-item"
+      ) as HTMLButtonElement;
+      assert.ok(picker.classList.contains("visible"));
+      assert.strictEqual(document.activeElement, item);
+      assert.strictEqual(item.tagName, "BUTTON");
+      assert.strictEqual(item.parentElement?.getAttribute("role"), "listitem");
+      assert.strictEqual(
+        item.getAttribute("aria-label"),
+        "Load Restore this conversation"
+      );
+
+      picker.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+        })
+      );
+      assert.ok(!picker.classList.contains("visible"));
+    });
+
+    test("keeps Tab and Shift+Tab focus inside session history", () => {
+      controller.handleMessage({
+        type: "sessionHistory",
+        mode: "load",
+        sessions: [
+          {
+            sessionId: "session-1",
+            cwd: "/workspace/project",
+            createdAt: 1,
+            lastUsedAt: 2,
+            preview: "Restore this conversation",
+            messageCount: 2,
+          },
+        ],
+      });
+
+      const picker = document.getElementById("session-picker") as HTMLElement;
+      const item = picker.querySelector(
+        ".session-history-item"
+      ) as HTMLButtonElement;
+      const cancel = picker.querySelector(
+        ".session-picker-close"
+      ) as HTMLButtonElement;
+
+      cancel.focus();
+      picker.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(document.activeElement, item);
+
+      item.focus();
+      picker.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      assert.strictEqual(document.activeElement, cancel);
+    });
+
+    test("replaces chat with each replayed message exactly once", () => {
+      controller.handleMessage({ type: "userMessage", text: "Current chat" });
+      controller.handleMessage({ type: "replayStart" });
+      controller.handleMessage({
+        type: "replayComplete",
+        messages: [
+          { role: "user", text: "Restored question" },
+          { role: "assistant", text: "Restored answer" },
+        ],
+      });
+
+      const messages = Array.from(
+        document.querySelectorAll("#messages .message")
+      ) as HTMLElement[];
+      assert.strictEqual(messages.length, 3);
+      assert.strictEqual(messages[0].textContent, "Restored question");
+      assert.strictEqual(messages[1].textContent?.trim(), "Restored answer");
+      assert.strictEqual(messages[2].textContent, "Conversation restored.");
+      assert.ok(!messages[1].innerHTML.includes("Restored answer<p>"));
+    });
+
+    test("sanitizes replayed Markdown through the stream renderer", () => {
+      controller.handleMessage({
+        type: "replayComplete",
+        messages: [
+          {
+            role: "assistant",
+            text: "**Safe**\n<script>window.replayXss = true</script><button>Blocked</button>",
+          },
+        ],
+      });
+
+      const assistant = document.querySelector(".message.assistant");
+      assert.ok(assistant?.querySelector("strong"));
+      assert.strictEqual(assistant?.querySelector("script"), null);
+      assert.strictEqual(assistant?.querySelector("button"), null);
+      assert.strictEqual(Reflect.get(dom.window, "replayXss"), undefined);
+    });
+  });
   suite("Permission Modal", () => {
     let dom: JSDOM;
     let document: Document;

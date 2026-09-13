@@ -21,7 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
-    context.globalState
+    context.globalState,
+    context.workspaceState
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
@@ -53,17 +54,14 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.startChat", async () => {
       await vscode.commands.executeCommand("vscode-acp.chatView.focus");
-
-      if (!acpClient?.isConnected()) {
-        try {
-          await acpClient?.connect();
-          vscode.window.showInformationMessage("VSCode ACP connected");
-        } catch (error) {
-          console.error("[ACP] Failed to connect:", error);
-          vscode.window.showErrorMessage(
-            `Failed to connect: ${formatACPError(error)}`
-          );
-        }
+      try {
+        await chatProvider?.connect();
+        vscode.window.showInformationMessage("VSCode ACP connected");
+      } catch (error) {
+        console.error("[ACP] Failed to connect:", error);
+        vscode.window.showErrorMessage(
+          `Failed to connect: ${formatACPError(error)}`
+        );
       }
     })
   );
@@ -71,6 +69,20 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.newChat", () => {
       chatProvider?.newChat();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.loadSession", async () => {
+      await vscode.commands.executeCommand("vscode-acp.chatView.focus");
+      await chatProvider?.loadSession();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.deleteSession", async () => {
+      await vscode.commands.executeCommand("vscode-acp.chatView.focus");
+      await chatProvider?.deleteSession();
     })
   );
 

@@ -444,6 +444,66 @@ suite("ACPClient with Mock Server", () => {
     });
   });
 
+  suite("loadSession", () => {
+    test("does not call session/load when the agent lacks the capability", async () => {
+      await client.connect();
+
+      assert.strictEqual(client.supportsSessionLoad(), false);
+      await assert.rejects(
+        () => client.loadSession("missing-session", "/test/dir"),
+        /does not support session loading/
+      );
+    });
+
+    test("replays message chunks while restoring the selected session", async () => {
+      demoMode = "load";
+      await client.connect();
+      const created = await client.newSession("/test/dir");
+      const updates: Array<{ sessionUpdate: string; text: string }> = [];
+      client.setOnSessionUpdate((notification) => {
+        const update = notification.update;
+        if (
+          (update.sessionUpdate === "user_message_chunk" ||
+            update.sessionUpdate === "agent_message_chunk") &&
+          update.content.type === "text"
+        ) {
+          updates.push({
+            sessionUpdate: update.sessionUpdate,
+            text: update.content.text,
+          });
+        }
+      });
+
+      await client.loadSession(created.sessionId, "/test/dir");
+
+      assert.strictEqual(client.supportsSessionLoad(), true);
+      assert.strictEqual(client.getCurrentSessionId(), created.sessionId);
+      assert.deepStrictEqual(updates, [
+        { sessionUpdate: "user_message_chunk", text: "Restored " },
+        { sessionUpdate: "user_message_chunk", text: "question" },
+        { sessionUpdate: "agent_message_chunk", text: "Restored " },
+        { sessionUpdate: "agent_message_chunk", text: "answer" },
+      ]);
+    });
+
+    test("keeps the active session when loading fails", async () => {
+      demoMode = "load-failure";
+      await client.connect();
+      const active = await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.loadSession(active.sessionId, "/test/dir"),
+        /Session load failed/
+      );
+
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.strictEqual(
+        (await client.sendMessage("Still active")).stopReason,
+        "end_turn"
+      );
+    });
+  });
+
   suite("sendMessage", () => {
     test("should send message and receive response", async () => {
       await client.connect();

@@ -45,6 +45,8 @@ export type DemoMode =
   | "invalid-config"
   | "invalid-version"
   | "late-permission"
+  | "load"
+  | "load-failure"
   | "no-initialize"
   | "session-isolation"
   | "mode-update"
@@ -174,7 +176,8 @@ export class MockACPServer {
                 ? acp.PROTOCOL_VERSION + 1
                 : acp.PROTOCOL_VERSION,
             agentCapabilities: {
-              loadSession: false,
+              loadSession:
+                this.demoMode === "load" || this.demoMode === "load-failure",
               ...(this.demoMode === "session-close" ||
               this.demoMode === "session-close-hangs"
                 ? { sessionCapabilities: { close: {} } }
@@ -186,6 +189,11 @@ export class MockACPServer {
       case "session/new":
         if (id !== undefined) {
           this.handleNewSession(id, params);
+        }
+        break;
+      case "session/load":
+        if (id !== undefined) {
+          this.handleLoadSession(id, params);
         }
         break;
       case "session/prompt":
@@ -379,6 +387,55 @@ export class MockACPServer {
         }).catch(() => {});
       });
     }
+  }
+
+  private handleLoadSession(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    if (this.demoMode === "load-failure") {
+      this.sendError(id, -32000, "Session load failed");
+      return;
+    }
+
+    const sessionId =
+      typeof params?.sessionId === "string" ? params.sessionId : undefined;
+    const session = sessionId ? this.sessions.get(sessionId) : undefined;
+    if (!session) {
+      this.sendError(id, -32000, "Session not found");
+      return;
+    }
+
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "user_message_chunk",
+      messageId: "restored-user",
+      content: { type: "text", text: "Restored " },
+    });
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "user_message_chunk",
+      messageId: "restored-user",
+      content: { type: "text", text: "question" },
+    });
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "agent_message_chunk",
+      messageId: "restored-agent",
+      content: { type: "text", text: "Restored " },
+    });
+    this.sendSessionUpdate(session.id, {
+      sessionUpdate: "agent_message_chunk",
+      messageId: "restored-agent",
+      content: { type: "text", text: "answer" },
+    });
+    this.sendResponse(id, {
+      modes: {
+        availableModes: [
+          { id: "code", name: "Code" },
+          { id: "architect", name: "Architect" },
+        ],
+        currentModeId: "code",
+      },
+      configOptions: session.configOptions,
+    } satisfies acp.LoadSessionResponse);
   }
 
   private handleSetConfigOption(

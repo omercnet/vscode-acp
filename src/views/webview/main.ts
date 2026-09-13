@@ -83,6 +83,20 @@ interface QueuedPermissionRequest {
   options: PermissionOption[];
 }
 
+export interface ReplayMessage {
+  role: "user" | "assistant";
+  text: string;
+}
+
+export interface SessionHistoryEntry {
+  sessionId: string;
+  cwd: string;
+  createdAt: number;
+  lastUsedAt: number;
+  preview: string;
+  messageCount: number;
+}
+
 export interface ExtensionMessage {
   type: string;
   text?: string;
@@ -102,6 +116,10 @@ export interface ExtensionMessage {
   } | null;
   commands?: AvailableCommand[] | null;
   plan?: { entries: PlanEntry[] };
+  mode?: "load" | "delete";
+  messages?: ReplayMessage[];
+  sessions?: SessionHistoryEntry[];
+  sessionId?: string;
   toolCallId?: string;
   name?: string;
   title?: string;
@@ -493,6 +511,7 @@ export interface WebviewElements {
   commandAutocomplete: HTMLElement;
   planContainer: HTMLElement;
   permissionModal: HTMLElement;
+  sessionPicker: HTMLElement;
 }
 
 export function getElements(doc: Document): WebviewElements {
@@ -513,6 +532,7 @@ export function getElements(doc: Document): WebviewElements {
     commandAutocomplete: doc.getElementById("command-autocomplete")!,
     planContainer: doc.getElementById("agent-plan-container")!,
     permissionModal: doc.getElementById("permission-modal")!,
+    sessionPicker: doc.getElementById("session-picker")!,
   };
 }
 
@@ -542,6 +562,8 @@ export class WebviewController {
   private permissionQueue: QueuedPermissionRequest[] = [];
   private permissionControlsLocked = false;
   private permissionUnlockTimer: number | null = null;
+  private replayStatusEl: HTMLElement | null = null;
+  private sessionPickerPreviousFocus: HTMLElement | null = null;
 
   constructor(
     vscode: VsCodeApi,
@@ -723,6 +745,15 @@ export class WebviewController {
     if (cancelBtn) {
       cancelBtn.addEventListener("click", () => this.cancelPermission());
     }
+
+    this.elements.sessionPicker.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.hideSessionHistory();
+      } else if (event.key === "Tab") {
+        this.trapSessionPickerFocus(event);
+      }
+    });
   }
 
   addMessage(
@@ -970,6 +1001,146 @@ export class WebviewController {
     }
   }
 
+  private clearChatState(): void {
+    this.elements.messagesEl.innerHTML = "";
+    this.currentAssistantMessage = null;
+    this.currentAssistantText = "";
+    this.messageTexts.clear();
+    this.availableCommands = [];
+    this.hideCommandAutocomplete();
+    this.hidePlan();
+    this.hideThought();
+    this.hideReplayStatus();
+    this.updateViewState();
+  }
+
+  private showReplayStatus(message = "Restoring conversation…"): void {
+    if (!this.replayStatusEl) {
+      this.replayStatusEl = this.doc.createElement("div");
+      this.replayStatusEl.className = "message system";
+      this.replayStatusEl.setAttribute("role", "status");
+      this.replayStatusEl.setAttribute("aria-live", "polite");
+      this.elements.messagesEl.appendChild(this.replayStatusEl);
+    }
+    this.replayStatusEl.textContent = message;
+  }
+
+  private hideReplayStatus(): void {
+    this.replayStatusEl?.remove();
+    this.replayStatusEl = null;
+  }
+
+  private showSessionHistory(
+    mode: "load" | "delete",
+    sessions: SessionHistoryEntry[]
+  ): void {
+    const picker = this.elements.sessionPicker;
+    const view = this.doc.defaultView;
+    this.sessionPickerPreviousFocus =
+      view && this.doc.activeElement instanceof view.HTMLElement
+        ? this.doc.activeElement
+        : null;
+    picker.replaceChildren();
+
+    const panel = this.doc.createElement("div");
+    panel.className = "session-picker-content";
+    const title = this.doc.createElement("h3");
+    title.id = "session-picker-title";
+    title.textContent = mode === "load" ? "Load session" : "Delete session";
+    panel.appendChild(title);
+
+    const description = this.doc.createElement("p");
+    description.textContent =
+      mode === "load"
+        ? "Choose a saved conversation to restore."
+        : "Choose a saved conversation to remove from this workspace history.";
+    panel.appendChild(description);
+
+    const list = this.doc.createElement("div");
+    list.className = "session-history-list";
+    list.setAttribute("role", "list");
+    sessions.forEach((session) => {
+      const listItem = this.doc.createElement("div");
+      listItem.setAttribute("role", "listitem");
+      const item = this.doc.createElement("button");
+      item.type = "button";
+      item.className = "session-history-item";
+      item.setAttribute(
+        "aria-label",
+        `${mode === "load" ? "Load" : "Delete"} ${session.preview || "untitled session"}`
+      );
+
+      const preview = this.doc.createElement("span");
+      preview.className = "session-history-preview";
+      preview.textContent = session.preview || "Untitled session";
+      item.appendChild(preview);
+
+      const details = this.doc.createElement("span");
+      details.className = "session-history-details";
+      details.textContent = `${session.cwd} · ${new Date(session.lastUsedAt).toLocaleString()} · ${session.messageCount} messages`;
+      item.appendChild(details);
+
+      item.addEventListener("click", () => {
+        item.disabled = true;
+        this.vscode.postMessage({
+          type: mode === "load" ? "selectSession" : "deleteSession",
+          sessionId: session.sessionId,
+        });
+      });
+      listItem.appendChild(item);
+      list.appendChild(listItem);
+    });
+    panel.appendChild(list);
+
+    const close = this.doc.createElement("button");
+    close.type = "button";
+    close.className = "session-picker-close";
+    close.textContent = "Cancel";
+    close.addEventListener("click", () => this.hideSessionHistory());
+    panel.appendChild(close);
+
+    picker.appendChild(panel);
+    picker.classList.add("visible");
+    const firstSession = list.querySelector("button");
+    if (view && firstSession instanceof view.HTMLButtonElement) {
+      firstSession.focus();
+    } else {
+      picker.focus();
+    }
+  }
+
+  private trapSessionPickerFocus(event: KeyboardEvent): void {
+    const focusable = Array.from(
+      this.elements.sessionPicker.querySelectorAll<HTMLButtonElement>(
+        "button:not(:disabled)"
+      )
+    );
+    if (focusable.length === 0) {
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = this.doc.activeElement;
+    if (!focusable.includes(active as HTMLButtonElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  private hideSessionHistory(): void {
+    this.elements.sessionPicker.classList.remove("visible");
+    this.elements.sessionPicker.replaceChildren();
+    this.sessionPickerPreviousFocus?.focus();
+    this.sessionPickerPreviousFocus = null;
+  }
+
   handleMessage(msg: ExtensionMessage): void {
     const { modeSelector, modelSelector, agentSelector, connectBtn } =
       this.elements;
@@ -1031,7 +1202,8 @@ export class WebviewController {
         break;
       case "toolCallStart":
         if (msg.toolCallId && msg.name) {
-          // Finalize current text message before showing tools
+          // Keep a whitespace-only bubble alive until stream end so its tool
+          // card renders through the same finalized Markdown path.
           if (this.currentAssistantText.trim()) {
             this.finalizeCurrentMessage();
             this.currentAssistantMessage = null;
@@ -1118,23 +1290,50 @@ export class WebviewController {
         break;
       case "agentChanged":
       case "chatCleared":
-        this.elements.messagesEl.innerHTML = "";
-        this.currentAssistantMessage = null;
-        this.messageTexts.clear();
+        this.clearChatState();
         modeSelector.style.display = "none";
         modelSelector.style.display = "none";
         this.clearPermissionModal();
-        this.availableCommands = [];
-        this.hideCommandAutocomplete();
-        this.hidePlan();
-        this.hideThought();
-        this.updateViewState();
         break;
       case "triggerNewChat":
         this.vscode.postMessage({ type: "newChat" });
         break;
       case "triggerClearChat":
         this.vscode.postMessage({ type: "clearChat" });
+        break;
+      case "sessionHistory":
+        if (msg.mode && msg.sessions) {
+          this.showSessionHistory(msg.mode, msg.sessions);
+        }
+        break;
+      case "sessionDeleted":
+        this.hideSessionHistory();
+        break;
+      case "replayStart":
+        this.hideSessionHistory();
+        this.showReplayStatus();
+        break;
+      case "replayComplete":
+        this.clearChatState();
+        msg.messages?.forEach((message) => {
+          if (message.role === "user") {
+            this.addMessage(message.text, "user");
+            return;
+          }
+
+          this.currentAssistantMessage = this.addMessage("", "assistant");
+          this.currentAssistantText = message.text;
+          this.finalizeCurrentMessage();
+          this.currentAssistantMessage = null;
+          this.currentAssistantText = "";
+        });
+        this.showReplayStatus("Conversation restored.");
+        this.updateViewState();
+        break;
+      case "replayFailed":
+        this.hideReplayStatus();
+        if (msg.text)
+          this.addMessage(`Could not restore session: ${msg.text}`, "error");
         break;
       case "sessionMetadata": {
         const hasModes =

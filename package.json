@@ -70,6 +70,18 @@
         "title": "Clear Chat",
         "category": "ACP",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "vscode-acp.loadSession",
+        "title": "Load Session",
+        "category": "ACP",
+        "icon": "$(history)"
+      },
+      {
+        "command": "vscode-acp.deleteSession",
+        "title": "Delete Session",
+        "category": "ACP",
+        "icon": "$(trash)"
       }
     ],
     "viewsContainers": {
@@ -100,9 +112,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "vscode-acp.clearChat",
+          "command": "vscode-acp.loadSession",
           "when": "view == vscode-acp.chatView",
           "group": "navigation@2"
+        },
+        {
+          "command": "vscode-acp.deleteSession",
+          "when": "view == vscode-acp.chatView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "vscode-acp.clearChat",
+          "when": "view == vscode-acp.chatView",
+          "group": "navigation@4"
         }
       ],
       "commandPalette": [
@@ -117,8 +139,33 @@
         {
           "command": "vscode-acp.clearChat",
           "when": "true"
+        },
+        {
+          "command": "vscode-acp.loadSession",
+          "when": "true"
+        },
+        {
+          "command": "vscode-acp.deleteSession",
+          "when": "true"
         }
       ]
+    },
+    "configuration": {
+      "title": "VSCode ACP",
+      "properties": {
+        "vscode-acp.sessions.autoSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Save new and updated ACP sessions in this workspace history."
+        },
+        "vscode-acp.sessions.maxHistory": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of ACP sessions stored per workspace."
+        }
+      }
     }
   },
   "scripts": {

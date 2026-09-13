@@ -30,6 +30,25 @@ const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 
+const SESSION_HISTORY_KEY = "vscode-acp.sessionHistory";
+const DEFAULT_SESSION_HISTORY_LIMIT = 50;
+
+interface StoredSession {
+  sessionId: string;
+  agentId: string;
+  cwd: string;
+  createdAt: number;
+  lastUsedAt: number;
+  preview: string;
+  messageCount: number;
+}
+
+interface ReplayMessage {
+  role: "user" | "assistant";
+  messageId: string | null;
+  text: string;
+}
+
 interface WebviewMessage {
   type:
     | "sendMessage"
@@ -41,12 +60,15 @@ interface WebviewMessage {
     | "newChat"
     | "clearChat"
     | "copyMessage"
-    | "permissionResponse";
+    | "permissionResponse"
+    | "selectSession"
+    | "deleteSession";
   text?: string;
   agentId?: string;
   modeId?: string;
   modelId?: string;
   requestId?: string;
+  sessionId?: string;
   optionId?: string;
   cancelled?: boolean;
 }
@@ -70,8 +92,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private hasSession = false;
   private globalState: vscode.Memento;
+  private workspaceState: vscode.Memento;
   private streamingText = "";
   private hasRestoredModeModel = false;
+  private isReplaying = false;
+  private replayMessages: ReplayMessage[] = [];
+  private connectionStart: Promise<void> | null = null;
+  private sessionStart: Promise<void> | null = null;
+  private conversationGeneration = 0;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
   private permissionRequests: Map<
@@ -87,9 +115,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly acpClient: ACPClient,
-    globalState: vscode.Memento
+    globalState: vscode.Memento,
+    workspaceState: vscode.Memento = globalState
   ) {
     this.globalState = globalState;
+    this.workspaceState = workspaceState;
 
     const savedAgentId = this.globalState.get<string>(SELECTED_AGENT_KEY);
     if (savedAgentId) {
@@ -103,6 +133,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnStateChange((state) => {
       if (state === "disconnected" || state === "error") {
+        this.hasSession = false;
+        this.connectionStart = null;
+        this.sessionStart = null;
         this.expirePermissionRequests();
       }
       this.postMessage({ type: "connectionState", state });
@@ -111,7 +144,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.acpClient.setOnSessionUpdate((update) => {
       this.handleSessionUpdate(update);
     });
-
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
     });
@@ -225,6 +257,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "permissionResponse":
           this.handlePermissionResponse(message);
           break;
+        case "selectSession":
+          if (message.sessionId) {
+            await this.handleSelectStoredSession(message.sessionId);
+          }
+          break;
+        case "deleteSession":
+          if (message.sessionId) {
+            await this.handleDeleteStoredSession(message.sessionId);
+          }
+          break;
         case "ready":
           this.postMessage({
             type: "connectionState",
@@ -252,6 +294,236 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public clearChat(): void {
     this.postMessage({ type: "triggerClearChat" });
+  }
+
+  public async connect(): Promise<void> {
+    await this.handleConnect();
+  }
+
+  public async loadSession(): Promise<void> {
+    await this.showSessionHistory("load");
+  }
+
+  public async deleteSession(): Promise<void> {
+    await this.showSessionHistory("delete");
+  }
+
+  private async showSessionHistory(mode: "load" | "delete"): Promise<void> {
+    try {
+      if (mode === "load") {
+        await this.ensureConnection();
+      }
+      if (mode === "load" && !this.acpClient.supportsSessionLoad()) {
+        vscode.window.showErrorMessage(
+          "The selected agent does not support loading previous sessions."
+        );
+        return;
+      }
+
+      const sessions = this.getStoredSessions().filter(
+        (session) => session.agentId === this.acpClient.getAgentId()
+      );
+      if (sessions.length === 0) {
+        vscode.window.showInformationMessage(
+          "No saved sessions are available for the selected agent."
+        );
+        return;
+      }
+
+      this.postMessage({ type: "sessionHistory", mode, sessions });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(
+        `Failed to show session history: ${message}`
+      );
+    }
+  }
+
+  private async handleSelectStoredSession(sessionId: string): Promise<void> {
+    const session = this.getStoredSessions().find(
+      (entry) =>
+        entry.sessionId === sessionId &&
+        entry.agentId === this.acpClient.getAgentId()
+    );
+    if (!session) {
+      this.postMessage({
+        type: "replayFailed",
+        text: "Session is no longer available.",
+      });
+      return;
+    }
+    await this.loadStoredSession(session);
+  }
+
+  private async handleDeleteStoredSession(sessionId: string): Promise<void> {
+    const session = this.getStoredSessions().find(
+      (entry) =>
+        entry.sessionId === sessionId &&
+        entry.agentId === this.acpClient.getAgentId()
+    );
+    if (!session) {
+      return;
+    }
+
+    try {
+      await this.workspaceState.update(
+        SESSION_HISTORY_KEY,
+        this.getStoredSessions().filter(
+          (entry) =>
+            entry.sessionId !== session.sessionId ||
+            entry.agentId !== session.agentId
+        )
+      );
+      this.postMessage({ type: "sessionDeleted", sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.postMessage({
+        type: "replayFailed",
+        text: `Failed to delete session: ${message}`,
+      });
+    }
+  }
+
+  private getStoredSessions(): StoredSession[] {
+    const value = this.workspaceState.get<unknown>(SESSION_HISTORY_KEY);
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.filter(
+      (session): session is StoredSession =>
+        typeof session === "object" &&
+        session !== null &&
+        typeof session.sessionId === "string" &&
+        typeof session.agentId === "string" &&
+        typeof session.cwd === "string" &&
+        typeof session.createdAt === "number" &&
+        typeof session.lastUsedAt === "number" &&
+        typeof session.preview === "string" &&
+        typeof session.messageCount === "number"
+    );
+  }
+
+  private async saveCurrentSession(preview?: string): Promise<void> {
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
+    if (!configuration.get<boolean>("sessions.autoSave", true)) {
+      return;
+    }
+
+    const sessionId = this.acpClient.getCurrentSessionId();
+    if (!sessionId) {
+      return;
+    }
+
+    const configuredLimit = configuration.get<number>(
+      "sessions.maxHistory",
+      DEFAULT_SESSION_HISTORY_LIMIT
+    );
+    const limit = Number.isFinite(configuredLimit)
+      ? Math.max(1, Math.min(200, Math.floor(configuredLimit)))
+      : DEFAULT_SESSION_HISTORY_LIMIT;
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const cwd = workspaceFolder?.uri.fsPath || process.cwd();
+    const history = this.getStoredSessions();
+    const existing = history.find(
+      (session) =>
+        session.sessionId === sessionId &&
+        session.agentId === this.acpClient.getAgentId()
+    );
+    const normalizedPreview = preview
+      ?.replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+    const now = Date.now();
+    const entry: StoredSession = {
+      sessionId,
+      agentId: this.acpClient.getAgentId(),
+      cwd,
+      createdAt: existing?.createdAt ?? now,
+      lastUsedAt: now,
+      preview: normalizedPreview || existing?.preview || "",
+      messageCount: (existing?.messageCount ?? 0) + (preview ? 1 : 0),
+    };
+    const updatedHistory = [
+      entry,
+      ...history.filter(
+        (session) =>
+          session.sessionId !== sessionId ||
+          session.agentId !== this.acpClient.getAgentId()
+      ),
+    ]
+      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+      .slice(0, limit);
+
+    await this.workspaceState.update(SESSION_HISTORY_KEY, updatedHistory);
+  }
+
+  private async loadStoredSession(session: StoredSession): Promise<void> {
+    const hadSession = this.hasSession;
+    const hadRestoredModeModel = this.hasRestoredModeModel;
+    this.conversationGeneration++;
+    this.isReplaying = true;
+    this.replayMessages = [];
+    this.postMessage({ type: "replayStart" });
+
+    try {
+      await this.acpClient.loadSession(session.sessionId, session.cwd);
+      this.hasSession = true;
+      this.hasRestoredModeModel = false;
+      const history = this.getStoredSessions().map((entry) =>
+        entry.sessionId === session.sessionId &&
+        entry.agentId === session.agentId
+          ? { ...entry, lastUsedAt: Date.now() }
+          : entry
+      );
+      void Promise.resolve(
+        this.workspaceState.update(
+          SESSION_HISTORY_KEY,
+          history.sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+        )
+      ).catch((error: unknown) =>
+        console.warn("[Chat] Failed to update session metadata:", error)
+      );
+      this.isReplaying = false;
+      this.postMessage({
+        type: "replayComplete",
+        messages: this.replayMessages.map((message) => ({
+          role: message.role,
+          text: message.text,
+        })),
+      });
+      this.replayMessages = [];
+      this.sendSessionMetadata();
+    } catch (error) {
+      this.isReplaying = false;
+      this.replayMessages = [];
+      this.hasSession = hadSession;
+      this.hasRestoredModeModel = hadRestoredModeModel;
+      const message = error instanceof Error ? error.message : String(error);
+      this.postMessage({ type: "replayFailed", text: message });
+      this.sendSessionMetadata();
+      throw error;
+    }
+  }
+
+  private appendReplayChunk(
+    role: ReplayMessage["role"],
+    messageId: string | null | undefined,
+    text: string
+  ): void {
+    const previous = this.replayMessages.at(-1);
+    if (
+      previous &&
+      previous.role === role &&
+      (messageId === null ||
+        messageId === undefined ||
+        previous.messageId === messageId)
+    ) {
+      previous.text += text;
+      return;
+    }
+
+    this.replayMessages.push({ role, messageId: messageId ?? null, text });
   }
 
   private stderrBuffer = "";
@@ -661,6 +933,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const update = notification.update;
     console.log("[Chat] Session update received:", update.sessionUpdate);
 
+    if (this.isReplaying) {
+      if (
+        (update.sessionUpdate === "user_message_chunk" ||
+          update.sessionUpdate === "agent_message_chunk") &&
+        update.content.type === "text"
+      ) {
+        this.appendReplayChunk(
+          update.sessionUpdate === "user_message_chunk" ? "user" : "assistant",
+          update.messageId,
+          update.content.text
+        );
+      }
+      return;
+    }
+
     if (update.sessionUpdate === "agent_message_chunk") {
       console.log("[Chat] Chunk content:", JSON.stringify(update.content));
       if (update.content.type === "text") {
@@ -729,22 +1016,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: "error", text: formatACPError(error) });
   }
 
+  private async ensureConnection(): Promise<void> {
+    if (this.acpClient.isConnected()) {
+      return;
+    }
+    if (!this.connectionStart) {
+      this.connectionStart = this.acpClient
+        .connect()
+        .then(() => undefined)
+        .finally(() => {
+          this.connectionStart = null;
+        });
+    }
+    await this.connectionStart;
+  }
+
+  private async ensureSession(): Promise<void> {
+    await this.ensureConnection();
+
+    if (this.hasSession) {
+      return;
+    }
+    if (!this.sessionStart) {
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+      this.sessionStart = this.acpClient
+        .newSession(workingDir)
+        .then(() => {
+          this.hasSession = true;
+          this.sendSessionMetadata();
+        })
+        .finally(() => {
+          this.sessionStart = null;
+        });
+    }
+    await this.sessionStart;
+  }
+
   private async handleUserMessage(text: string): Promise<void> {
     this.postMessage({ type: "userMessage", text });
 
     try {
-      if (!this.acpClient.isConnected()) {
-        await this.acpClient.connect();
-      }
-
-      if (!this.hasSession) {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.acpClient.newSession(workingDir);
-        this.hasSession = true;
-        this.sendSessionMetadata();
-      }
-
+      await this.ensureSession();
+      const promptGeneration = this.conversationGeneration;
+      const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
       this.stderrBuffer = "";
       this.postMessage({ type: "streamStart" });
@@ -770,6 +1085,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
         });
       }
+      if (
+        promptGeneration === this.conversationGeneration &&
+        promptSessionId === this.acpClient.getCurrentSessionId()
+      ) {
+        void this.saveCurrentSession(text).catch((error) =>
+          console.warn("[Chat] Failed to save session metadata:", error)
+        );
+      }
       this.streamingText = "";
     } catch (error) {
       const { kind } = describeACPError(error);
@@ -793,6 +1116,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (agent) {
       this.expirePermissionRequests();
       this.acpClient.setAgent(agent);
+      this.conversationGeneration++;
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
       this.postMessage({ type: "agentChanged", agentId });
@@ -824,23 +1148,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleConnect(): Promise<void> {
     try {
-      if (!this.acpClient.isConnected()) {
-        await this.acpClient.connect();
-      }
-      if (!this.hasSession) {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.acpClient.newSession(workingDir);
-        this.hasSession = true;
-        this.sendSessionMetadata();
-      }
+      await this.ensureSession();
     } catch (error) {
       this.postACPError("Failed to connect", error);
+      throw error;
     }
   }
 
   private async handleNewChat(): Promise<void> {
     this.expirePermissionRequests();
+    this.conversationGeneration++;
+    const hadSession = this.hasSession;
+    const hadRestoredModeModel = this.hasRestoredModeModel;
     this.streamingText = "";
 
     if (!this.acpClient.isConnected()) {
@@ -860,7 +1179,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postMessage({ type: "chatCleared" });
       this.sendSessionMetadata();
     } catch (error) {
-      this.hasSession = this.acpClient.getSessionMetadata() !== null;
+      this.hasSession = hadSession;
+      this.hasRestoredModeModel = hadRestoredModeModel;
       this.postACPError("Failed to create new session", error);
       this.sendSessionMetadata();
     }
@@ -996,7 +1316,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
   </div>
-  
+  <div id="session-picker" class="session-picker" role="dialog" aria-modal="true" aria-labelledby="session-picker-title" tabindex="-1"></div>
+
   <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-content" tabindex="-1">
     <div class="permission-modal-content">
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
