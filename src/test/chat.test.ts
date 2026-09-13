@@ -23,7 +23,11 @@ interface MockACPClient {
   getAgentId: () => string;
   getCurrentSessionId: () => string | null;
   getAuthenticationMethods: () => readonly AuthMethod[];
-  authenticate: (methodId: AuthMethodId) => Promise<void>;
+  getConnectionGeneration: () => number;
+  authenticate: (
+    methodId: AuthMethodId,
+    selectedGeneration: number
+  ) => Promise<void>;
   setOnStateChange: (callback: any) => () => void;
   setOnSessionUpdate: (callback: any) => () => void;
   setOnStderr: (callback: any) => () => void;
@@ -123,11 +127,20 @@ class TestACPClient implements MockACPClient {
     return this.currentSessionId;
   }
 
+  public connectionGeneration = 1;
+
   getAuthenticationMethods(): readonly AuthMethod[] {
     return [];
   }
 
-  async authenticate(_methodId: AuthMethodId): Promise<void> {
+  getConnectionGeneration(): number {
+    return this.connectionGeneration;
+  }
+
+  async authenticate(
+    _methodId: AuthMethodId,
+    _selectedGeneration: number
+  ): Promise<void> {
     throw new Error("Authentication method is not available");
   }
   setOnStateChange(
@@ -943,20 +956,28 @@ suite("ChatViewProvider", () => {
   });
 
   suite("authentication", () => {
-    test("presents only agent-managed authentication methods", async () => {
+    test("offers only agent-managed methods and neutralizes agent-supplied icon syntax", async () => {
       class AuthenticationClient extends TestACPClient {
         getAuthenticationMethods(): readonly AuthMethod[] {
           return [
             {
               id: "browser",
-              name: "Browser sign-in",
-              description: "Continue in your browser",
+              name: "$(verified) Browser sign-in",
+              description: "$(shield) Continue in your browser",
             },
             {
               id: "terminal",
               name: "Terminal sign-in",
               type: "terminal",
             },
+            // A client-executed method type from a future ACP revision. The SDK
+            // does not validate `initialize` responses, so it reaches the client
+            // verbatim and must not be offered as agent-managed.
+            {
+              id: "future",
+              name: "Future sign-in",
+              type: "terminal-v2",
+            } as unknown as AuthMethod,
           ];
         }
       }
@@ -1001,8 +1022,8 @@ suite("ChatViewProvider", () => {
         assert.strictEqual(selected, "browser");
         assert.deepStrictEqual(choices, [
           {
-            label: "Browser sign-in",
-            description: "Continue in your browser",
+            label: "\\$(verified) Browser sign-in",
+            description: "\\$(shield) Continue in your browser",
             methodId: "browser",
           },
         ]);
@@ -1035,8 +1056,11 @@ suite("ChatViewProvider", () => {
           }
         }
 
-        async authenticate(methodId: AuthMethodId): Promise<void> {
-          this.authenticatedMethods.push(methodId);
+        async authenticate(
+          methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedMethods.push(`${methodId}@${selectedGeneration}`);
         }
       }
 
@@ -1056,7 +1080,7 @@ suite("ChatViewProvider", () => {
       await authenticationProvider.ensureSession();
 
       assert.strictEqual(client.newSessionCalls, 2);
-      assert.deepStrictEqual(client.authenticatedMethods, ["browser"]);
+      assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
       assert.strictEqual(authenticationProvider.hasSession, true);
     });
 
@@ -1079,8 +1103,11 @@ suite("ChatViewProvider", () => {
           throw new RequestError(-32000, "Authentication required");
         }
 
-        async authenticate(methodId: AuthMethodId): Promise<void> {
-          this.authenticatedMethods.push(methodId);
+        async authenticate(
+          methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedMethods.push(`${methodId}@${selectedGeneration}`);
           if (this.authenticationError) {
             throw this.authenticationError;
           }
@@ -1146,8 +1173,63 @@ suite("ChatViewProvider", () => {
         /Authentication method is not available/
       );
       assert.strictEqual(staleClient.newSessionCalls, 1);
-      assert.deepStrictEqual(staleClient.authenticatedMethods, ["browser"]);
+      assert.deepStrictEqual(staleClient.authenticatedMethods, ["browser@1"]);
       assert.strictEqual(staleAuthenticationProvider.hasSession, false);
+    });
+
+    test("carries the connection generation that produced the method list", async () => {
+      class ReconnectingClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticatedGenerations: number[] = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          throw new RequestError(-32000, "Authentication required");
+        }
+
+        async authenticate(
+          _methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedGenerations.push(selectedGeneration);
+          if (selectedGeneration !== this.connectionGeneration) {
+            throw new Error("Authentication selection is stale");
+          }
+        }
+      }
+
+      const client = new ReconnectingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      // The agent process is replaced while the native picker is open.
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => {
+          client.connectionGeneration++;
+          return "browser";
+        },
+      });
+
+      await assert.rejects(
+        () => authenticationProvider.ensureSession(),
+        /Authentication selection is stale/
+      );
+      assert.deepStrictEqual(client.authenticatedGenerations, [1]);
+      assert.strictEqual(client.newSessionCalls, 1);
+      assert.strictEqual(authenticationProvider.hasSession, false);
     });
   });
 

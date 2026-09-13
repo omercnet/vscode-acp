@@ -414,7 +414,7 @@ suite("ACPClient with Mock Server", () => {
         () => client.newSession("/test/dir"),
         (error) => error instanceof RequestError && error.code === -32000
       );
-      await client.authenticate("browser");
+      await client.authenticate("browser", client.getConnectionGeneration());
       const session = await client.newSession("/test/dir");
 
       assert.ok(session.sessionId);
@@ -433,7 +433,7 @@ suite("ACPClient with Mock Server", () => {
       await client.connect();
 
       await assert.rejects(
-        () => client.authenticate("terminal"),
+        () => client.authenticate("terminal", client.getConnectionGeneration()),
         /Authentication method is not available/
       );
       assert.deepStrictEqual(
@@ -443,7 +443,7 @@ suite("ACPClient with Mock Server", () => {
 
       client.dispose();
       await assert.rejects(
-        () => client.authenticate("terminal"),
+        () => client.authenticate("terminal", client.getConnectionGeneration()),
         /Not connected/
       );
       assert.deepStrictEqual(
@@ -452,12 +452,50 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("rejects a method type the client cannot execute without sending it", async () => {
+      demoMode = "authentication-unknown-type";
+      await client.connect();
+
+      await assert.rejects(
+        () => client.authenticate("future", client.getConnectionGeneration()),
+        /Authentication method is not available/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getAuthenticationRequests(),
+        []
+      );
+    });
+
+    test("discards a selection made against a replaced connection", async () => {
+      demoMode = "authentication";
+      await client.connect();
+      const selectedGeneration = client.getConnectionGeneration();
+
+      client.dispose();
+      await client.connect();
+
+      await assert.rejects(
+        () => client.authenticate("browser", selectedGeneration),
+        /Authentication selection is stale/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[1].server.getAuthenticationRequests(),
+        []
+      );
+      assert.strictEqual(
+        mockProcesses[1].server.getNewSessionRequestCount(),
+        0
+      );
+    });
+
     test("keeps the connected, sessionless state when authentication fails", async () => {
       demoMode = "authentication-failure";
       await client.connect();
 
       await assert.rejects(() => client.newSession("/test/dir"));
-      await assert.rejects(() => client.authenticate("browser"));
+      await assert.rejects(() =>
+        client.authenticate("browser", client.getConnectionGeneration())
+      );
 
       assert.strictEqual(client.getState(), "connected");
       assert.strictEqual(client.getSessionMetadata(), null);

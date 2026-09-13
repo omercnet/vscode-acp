@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
-import { ACPClient, describeACPError, formatACPError } from "../acp/client";
+import {
+  ACPClient,
+  describeACPError,
+  formatACPError,
+  isAgentAuthMethod,
+} from "../acp/client";
 import {
   getAgent,
   getAgentsWithStatus,
@@ -11,7 +16,6 @@ import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import { selectAgentPaths } from "../acp/agentPaths";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type {
-  AuthMethodAgent,
   AuthMethodId,
   SessionNotification,
   ReadTextFileRequest,
@@ -57,6 +61,16 @@ interface ReplayMessage {
 
 interface AuthenticationPickItem extends vscode.QuickPickItem {
   methodId: AuthMethodId;
+}
+
+/**
+ * VS Code substitutes `$(name)` in quick pick labels with a codicon glyph. Auth
+ * method names and descriptions come straight from the agent process, so the
+ * sequence is escaped to stop an agent rendering trust iconography (for example
+ * `$(verified)`) inside the authentication prompt.
+ */
+function escapeQuickPickIcons(value: string): string {
+  return value.replace(/\$\(/g, "\\$(");
 }
 
 interface WebviewMessage {
@@ -1121,18 +1135,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async selectAuthenticationMethod(): Promise<AuthMethodId | null> {
     const methods = this.acpClient
       .getAuthenticationMethods()
-      .filter(
-        (method): method is AuthMethodAgent =>
-          !("type" in method && method.type === "terminal")
-      );
+      .filter(isAgentAuthMethod);
     if (methods.length === 0) {
       throw new Error("No supported authentication methods are available");
     }
 
     const selection = await vscode.window.showQuickPick<AuthenticationPickItem>(
       methods.map((method) => ({
-        label: method.name,
-        description: method.description ?? undefined,
+        label: escapeQuickPickIcons(method.name),
+        description: method.description
+          ? escapeQuickPickIcons(method.description)
+          : undefined,
         methodId: method.id,
       })),
       {
@@ -1154,9 +1167,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         throw error;
       }
 
+      const selectedGeneration = this.acpClient.getConnectionGeneration();
       const hasSupportedMethod = this.acpClient
         .getAuthenticationMethods()
-        .some((method) => !("type" in method && method.type === "terminal"));
+        .some(isAgentAuthMethod);
       if (!hasSupportedMethod) {
         throw error;
       }
@@ -1165,7 +1179,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (!methodId) {
         throw new Error("Authentication cancelled");
       }
-      await this.acpClient.authenticate(methodId);
+      await this.acpClient.authenticate(methodId, selectedGeneration);
       await this.acpClient.newSession(workingDirectory);
     }
   }

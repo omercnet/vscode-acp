@@ -19,7 +19,26 @@ export type ProtocolErrorDemoMode =
   | "error-resource-not-found";
 
 export type AuthenticationDemoMode =
-  "authentication" | "authentication-failure" | "authentication-terminal";
+  | "authentication"
+  | "authentication-failure"
+  | "authentication-terminal"
+  | "authentication-unknown-type";
+
+/**
+ * Advertised `authMethods`. Values are raw JSON because agents are untrusted
+ * and `initialize` responses are not schema-validated on the wire, so the mock
+ * must be able to send a `type` the SDK union does not model.
+ */
+const AUTH_METHODS_BY_DEMO_MODE: Partial<Record<DemoMode, unknown[]>> = {
+  authentication: [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-failure": [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-terminal": [
+    { id: "terminal", name: "Terminal sign-in", type: "terminal" },
+  ],
+  "authentication-unknown-type": [
+    { id: "future", name: "Future sign-in", type: "terminal-v2" },
+  ],
+};
 
 const PROTOCOL_ERRORS: Record<
   ProtocolErrorDemoMode,
@@ -185,19 +204,7 @@ export class MockACPServer {
           this.initializeRequest = params as acp.InitializeRequest;
         }
         if (id !== undefined && this.demoMode !== "no-initialize") {
-          const authMethods =
-            this.demoMode === "authentication-terminal"
-              ? [
-                  {
-                    id: "terminal",
-                    name: "Terminal sign-in",
-                    type: "terminal" as const,
-                  },
-                ]
-              : this.demoMode === "authentication" ||
-                  this.demoMode === "authentication-failure"
-                ? [{ id: "browser", name: "Browser sign-in" }]
-                : [];
+          const authMethods = AUTH_METHODS_BY_DEMO_MODE[this.demoMode] ?? [];
           this.sendResponse(id, {
             protocolVersion:
               this.demoMode === "invalid-version"

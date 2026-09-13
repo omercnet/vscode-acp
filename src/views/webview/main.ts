@@ -1227,8 +1227,10 @@ export class WebviewController {
       this.elements;
 
     switch (msg.type) {
+      // The composer stays editable while session setup runs, so a draft typed
+      // in the meantime wins over the prompt that never started.
       case "restoreInput":
-        if (msg.text) {
+        if (msg.text && !this.elements.inputEl.value) {
           this.elements.inputEl.value = msg.text;
           this.elements.inputEl.style.height = "auto";
           this.elements.inputEl.focus();

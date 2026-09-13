@@ -598,6 +598,14 @@ suite("Webview", () => {
         );
       });
 
+      test("keeps a newer draft instead of the restored prompt", () => {
+        elements.inputEl.value = "Typed while connecting";
+
+        controller.handleMessage({ type: "restoreInput", text: "Resume this" });
+
+        assert.strictEqual(elements.inputEl.value, "Typed while connecting");
+      });
+
       test("handles connectionState", () => {
         controller.handleMessage({
           type: "connectionState",
