@@ -1074,11 +1074,13 @@ export class WebviewController {
       case "error":
         this.hideThinking();
         if (msg.text) this.addMessage(msg.text, "error");
+        this.updateViewState();
         this.elements.sendBtn.disabled = false;
         this.elements.inputEl.focus();
         break;
       case "agentError":
         if (msg.text) this.addMessage(msg.text, "error");
+        this.updateViewState();
         break;
       case "connectionState":
         if (msg.state) {

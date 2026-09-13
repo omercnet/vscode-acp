@@ -1,8 +1,16 @@
 import * as assert from "assert";
 import { ChildProcess } from "child_process";
-import { ACPClient, type SpawnFunction } from "../acp/client";
+import {
+  ACPClient,
+  describeACPError,
+  formatACPError,
+  type SpawnFunction,
+} from "../acp/client";
 import { getAgent } from "../acp/agents";
-import type { RequestPermissionResponse } from "@agentclientprotocol/sdk";
+import {
+  RequestError,
+  type RequestPermissionResponse,
+} from "@agentclientprotocol/sdk";
 import {
   createMockProcess,
   type DemoMode,
@@ -77,6 +85,59 @@ suite("ACPClient", () => {
       assert.strictEqual(client.getCurrentSessionId(), null);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
+  });
+});
+
+suite("ACP error presentation", () => {
+  const cases = [
+    [-32700, "protocol", "Protocol error"],
+    [-32600, "invalid-request", "Invalid request"],
+    [-32601, "unsupported-operation", "Unsupported operation"],
+    [-32602, "invalid-parameters", "Invalid parameters"],
+    [-32603, "agent", "Agent error"],
+    [-32000, "authentication-required", "Authentication required"],
+    [-32002, "resource-not-found", "Resource not found"],
+    [-32800, "cancelled", "Request cancelled"],
+  ] as const;
+
+  for (const [code, kind, summary] of cases) {
+    test(`shows ${summary.toLowerCase()} with agent diagnostics`, () => {
+      const error = new RequestError(code, "agent diagnostic");
+
+      assert.deepStrictEqual(describeACPError(error), {
+        kind,
+        code,
+        summary,
+        diagnostic: "agent diagnostic",
+      });
+      assert.strictEqual(formatACPError(error), `${summary}: agent diagnostic`);
+    });
+  }
+
+  test("keeps an unstructured error's own wording", () => {
+    const error = new Error("Internal error (-32603)");
+
+    assert.deepStrictEqual(describeACPError(error), {
+      kind: "unknown",
+      summary: "Error",
+      diagnostic: "Internal error (-32603)",
+    });
+    assert.strictEqual(formatACPError(error), "Internal error (-32603)");
+  });
+
+  test("does not repeat the summary for the SDK's default message", () => {
+    assert.strictEqual(
+      formatACPError(RequestError.authRequired()),
+      "Authentication required"
+    );
+    assert.strictEqual(
+      formatACPError(RequestError.authRequired(undefined, "Sign in")),
+      "Authentication required: Sign in"
+    );
+    assert.strictEqual(
+      formatACPError(RequestError.resourceNotFound("file:///tmp/missing.ts")),
+      "Resource not found: file:///tmp/missing.ts"
+    );
   });
 });
 
@@ -394,6 +455,26 @@ suite("ACPClient with Mock Server", () => {
       const response = await client.sendMessage("Hello");
 
       assert.strictEqual(response.stopReason, "end_turn");
+    });
+
+    test("keeps the connection and session available after an RPC error", async () => {
+      demoMode = "error-internal";
+      await client.connect();
+      await client.newSession("/test/dir");
+
+      await assert.rejects(
+        () => client.sendMessage("Hello"),
+        (error) => {
+          assert.ok(error instanceof RequestError);
+          assert.strictEqual(error.code, -32603);
+          assert.strictEqual(error.message, "Agent execution failed");
+          return true;
+        }
+      );
+
+      assert.strictEqual(client.getState(), "connected");
+      assert.ok(client.getSessionMetadata());
+      assert.ok((await client.newSession("/test/dir")).sessionId);
     });
 
     test("should notify multiple session update listeners", async () => {

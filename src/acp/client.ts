@@ -54,6 +54,103 @@ export interface SessionMetadata {
 export type ACPConnectionState =
   "disconnected" | "connecting" | "connected" | "error";
 
+export type ACPErrorKind =
+  | "protocol"
+  | "invalid-request"
+  | "unsupported-operation"
+  | "invalid-parameters"
+  | "agent"
+  | "authentication-required"
+  | "resource-not-found"
+  | "cancelled"
+  | "unknown";
+
+export interface ACPErrorPresentation {
+  kind: ACPErrorKind;
+  code?: number;
+  summary: string;
+  diagnostic: string;
+}
+
+const ERROR_PRESENTATIONS: Record<
+  number,
+  Pick<ACPErrorPresentation, "kind" | "summary">
+> = {
+  [-32700]: { kind: "protocol", summary: "Protocol error" },
+  [-32600]: { kind: "invalid-request", summary: "Invalid request" },
+  [-32601]: {
+    kind: "unsupported-operation",
+    summary: "Unsupported operation",
+  },
+  [-32602]: { kind: "invalid-parameters", summary: "Invalid parameters" },
+  [-32603]: { kind: "agent", summary: "Agent error" },
+  [-32000]: {
+    kind: "authentication-required",
+    summary: "Authentication required",
+  },
+  [-32002]: { kind: "resource-not-found", summary: "Resource not found" },
+  [-32800]: { kind: "cancelled", summary: "Request cancelled" },
+};
+
+/**
+ * Classifies structured JSON-RPC errors exposed by ACP SDK 1.4.
+ *
+ * Only {@link acp.RequestError} instances carry a transport-verified RPC code;
+ * other errors remain unclassified and retain their diagnostic text.
+ */
+export function describeACPError(error: unknown): ACPErrorPresentation {
+  if (error instanceof acp.RequestError) {
+    const presentation = ERROR_PRESENTATIONS[error.code];
+    if (presentation) {
+      return {
+        ...presentation,
+        code: error.code,
+        diagnostic: error.message,
+      };
+    }
+
+    return {
+      kind: "unknown",
+      code: error.code,
+      summary: "ACP request failed",
+      diagnostic: error.message,
+    };
+  }
+
+  return {
+    kind: "unknown",
+    summary: "Error",
+    diagnostic: error instanceof Error ? error.message : String(error),
+  };
+}
+
+/**
+ * Renders a presentation as user-facing text.
+ *
+ * Unclassified errors keep their own wording instead of gaining a synthetic
+ * "Error" prefix, and agents that send the SDK's default message for a code
+ * (for example `RequestError.authRequired()`) do not repeat the summary.
+ */
+export function formatACPError(error: unknown): string {
+  const { code, summary, diagnostic } = describeACPError(error);
+  const detail = diagnostic.trim();
+  if (!detail) {
+    return summary;
+  }
+  if (code === undefined) {
+    return detail;
+  }
+
+  const lowerDetail = detail.toLowerCase();
+  const lowerSummary = summary.toLowerCase();
+  if (lowerDetail === lowerSummary) {
+    return summary;
+  }
+  return lowerDetail.startsWith(`${lowerSummary}: `)
+    ? `${summary}: ${detail.slice(summary.length + 2)}`
+    : `${summary}: ${detail}`;
+}
+
 type StateChangeCallback = (state: ACPConnectionState) => void;
 type SessionUpdateCallback = (update: acp.SessionNotification) => void;
 type StderrCallback = (data: string) => void;

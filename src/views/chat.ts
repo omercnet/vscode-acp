@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
 import { marked } from "marked";
-import { ACPClient } from "../acp/client";
+import { ACPClient, describeACPError, formatACPError } from "../acp/client";
 import {
   getAgent,
   getAgentsWithStatus,
@@ -730,6 +730,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
   }
+  private postACPError(context: string, error: unknown): void {
+    console.error(`[Chat] ${context}:`, error);
+    this.postMessage({ type: "error", text: formatACPError(error) });
+  }
 
   private async handleUserMessage(text: string): Promise<void> {
     this.postMessage({ type: "userMessage", text });
@@ -776,14 +780,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
-      console.error("[Chat] Error in handleUserMessage:", error);
-      const errorMessage =
-        error instanceof Error ? error.message : JSON.stringify(error);
+      const { kind } = describeACPError(error);
+      if (kind === "cancelled") {
+        console.log("[Chat] Prompt cancelled:", error);
+      } else {
+        this.postACPError("Error in handleUserMessage", error);
+      }
       this.postMessage({
-        type: "error",
-        text: `Error: ${errorMessage}`,
+        type: "streamEnd",
+        stopReason: kind === "cancelled" ? "cancelled" : "error",
+        html: "",
       });
-      this.postMessage({ type: "streamEnd", stopReason: "error", html: "" });
       this.streamingText = "";
       this.stderrBuffer = "";
     }
@@ -807,7 +814,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.globalState.update(SELECTED_MODE_KEY, modeId);
       this.sendSessionMetadata();
     } catch (error) {
-      console.error("[Chat] Failed to set mode:", error);
+      this.postACPError("Failed to set mode", error);
       this.sendSessionMetadata();
     }
   }
@@ -818,7 +825,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.globalState.update(SELECTED_MODEL_KEY, modelId);
       this.sendSessionMetadata();
     } catch (error) {
-      console.error("[Chat] Failed to set model:", error);
+      this.postACPError("Failed to set model", error);
       this.sendSessionMetadata();
     }
   }
@@ -836,32 +843,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.sendSessionMetadata();
       }
     } catch (error) {
-      this.postMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : "Failed to connect",
-      });
+      this.postACPError("Failed to connect", error);
     }
   }
 
   private async handleNewChat(): Promise<void> {
     this.expirePermissionRequests();
-    this.hasSession = false;
-    this.hasRestoredModeModel = false;
     this.streamingText = "";
-    this.postMessage({ type: "chatCleared" });
-    this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+
+    if (!this.acpClient.isConnected()) {
+      this.hasSession = false;
+      this.hasRestoredModeModel = false;
+      this.postMessage({ type: "chatCleared" });
+      this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      return;
+    }
 
     try {
-      if (this.acpClient.isConnected()) {
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-        const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.acpClient.newSession(workingDir);
-        this.hasSession = true;
-        this.sendSessionMetadata();
-      }
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+      await this.acpClient.newSession(workingDir);
+      this.hasSession = true;
+      this.hasRestoredModeModel = false;
+      this.postMessage({ type: "chatCleared" });
+      this.sendSessionMetadata();
     } catch (error) {
-      console.error("[Chat] Failed to create new session:", error);
       this.hasSession = this.acpClient.getSessionMetadata() !== null;
+      this.postACPError("Failed to create new session", error);
       this.sendSessionMetadata();
     }
   }
@@ -883,7 +891,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.hasRestoredModeModel && this.hasSession) {
       this.hasRestoredModeModel = true;
       this.restoreSavedModeAndModel().catch((error) =>
-        console.warn("[Chat] Failed to restore saved mode/model:", error)
+        this.postACPError("Failed to restore saved mode/model", error)
       );
     }
   }

@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
+import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
 import type { RequestPermissionRequest } from "@agentclientprotocol/sdk";
 
@@ -30,6 +31,7 @@ interface MockACPClient {
   isConnected: () => boolean;
   connect: () => Promise<void>;
   newSession: (dir: string) => Promise<void>;
+  sendMessage: (text: string) => Promise<{ stopReason: string }>;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -132,6 +134,9 @@ class TestACPClient implements MockACPClient {
   }
   async connect(): Promise<void> {}
   async newSession(): Promise<void> {}
+  async sendMessage(): Promise<{ stopReason: string }> {
+    return { stopReason: "end_turn" };
+  }
 
   async setMode(modeId: string): Promise<void> {
     this.setModeCallCount++;
@@ -574,7 +579,7 @@ suite("ChatViewProvider", () => {
       }
 
       async newSession(): Promise<void> {
-        throw new Error("Replacement session failed");
+        throw new RequestError(-32000, "Sign in to continue");
       }
 
       getSessionMetadata() {
@@ -597,9 +602,93 @@ suite("ChatViewProvider", () => {
 
     await handleNewChat.call(provider);
 
+    assert.deepStrictEqual(
+      messages.find((message) => message.type === "error"),
+      {
+        type: "error",
+        text: "Authentication required: Sign in to continue",
+      }
+    );
+    assert.ok(!messages.some((message) => message.type === "chatCleared"));
     assert.deepStrictEqual(messages.at(-1), {
       type: "sessionMetadata",
       ...metadata,
+    });
+  });
+
+  test("renders structured prompt errors with agent diagnostics", async () => {
+    class AuthenticationRequiredClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async sendMessage(): Promise<{ stopReason: string }> {
+        throw new RequestError(-32000, "Sign in to continue");
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new AuthenticationRequiredClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const handleUserMessage = Reflect.get(provider, "handleUserMessage") as (
+      this: ChatViewProvider,
+      text: string
+    ) => Promise<void>;
+
+    await handleUserMessage.call(provider, "Hello");
+
+    assert.deepStrictEqual(
+      messages.find((message) => message.type === "error"),
+      {
+        type: "error",
+        text: "Authentication required: Sign in to continue",
+      }
+    );
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "streamEnd",
+      stopReason: "error",
+      html: "",
+    });
+  });
+
+  test("ends a cancelled prompt without an error card", async () => {
+    class CancellingClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async sendMessage(): Promise<{ stopReason: string }> {
+        throw new RequestError(-32800, "Request cancelled");
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new CancellingClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const messages: Array<Record<string, unknown>> = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const handleUserMessage = Reflect.get(provider, "handleUserMessage") as (
+      this: ChatViewProvider,
+      text: string
+    ) => Promise<void>;
+
+    await handleUserMessage.call(provider, "Hello");
+
+    assert.ok(!messages.some((message) => message.type === "error"));
+    assert.deepStrictEqual(messages.at(-1), {
+      type: "streamEnd",
+      stopReason: "cancelled",
+      html: "",
     });
   });
   suite("Client capability handlers", () => {
