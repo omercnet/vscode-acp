@@ -19,21 +19,38 @@ export async function findVSCodeExecutable(): Promise<string> {
     );
   }
 
+  const installation = join(VSCODE_TEST_DIR, vscodeDir);
   const currentPlatform = platform();
 
-  if (currentPlatform === "darwin") {
-    return join(
-      VSCODE_TEST_DIR,
-      vscodeDir,
-      "Visual Studio Code.app/Contents/MacOS/Electron"
-    );
-  } else if (currentPlatform === "linux") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "code");
-  } else if (currentPlatform === "win32") {
-    return join(VSCODE_TEST_DIR, vscodeDir, "Code.exe");
+  if (currentPlatform === "win32") {
+    return join(installation, "Code.exe");
+  }
+  if (currentPlatform === "linux") {
+    return join(installation, "code");
+  }
+  if (currentPlatform !== "darwin") {
+    throw new Error(`Unsupported platform: ${currentPlatform}`);
   }
 
-  throw new Error(`Unsupported platform: ${currentPlatform}`);
+  // The macOS bundle and its Electron binary have both been renamed across
+  // releases, so read the actual names instead of hardcoding them.
+  const bundle = (await readdir(installation)).find((entry) =>
+    entry.endsWith(".app")
+  );
+  if (!bundle) {
+    throw new Error(`No VS Code application bundle in ${installation}`);
+  }
+
+  const binaryDir = join(installation, bundle, "Contents", "MacOS");
+  const binaries = await readdir(binaryDir, { withFileTypes: true });
+  const binary =
+    binaries.find((entry) => entry.name === "Electron" || entry.name === "Code")
+      ?.name ?? binaries.find((entry) => entry.isFile())?.name;
+  if (!binary) {
+    throw new Error(`No VS Code executable in ${binaryDir}`);
+  }
+
+  return join(binaryDir, binary);
 }
 
 /**
