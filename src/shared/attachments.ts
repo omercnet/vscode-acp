@@ -61,19 +61,43 @@ export function formatByteSize(bytes: number | undefined): string {
 }
 
 /**
- * Characters that must never survive into an attachment label: C0/C1
- * controls (a file name may legally contain newlines and escapes on POSIX)
- * plus the zero-width and bidirectional formatting characters. Left in
- * place they let a file name or an agent-supplied replay label forge chip
- * tooltips, reorder displayed text, or smuggle instructions into the
- * `resource_link.name` an agent feeds to its model.
+ * Characters that must never survive into attachment display metadata.
+ * Control, format, line-separator, and paragraph-separator code points can
+ * create false rows, reorder text, or hide parts of a file name.
  */
-const UNSAFE_LABEL_CHARS =
-  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+const UNSAFE_LABEL_CHARS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 
-/** Strips control, zero-width, and bidi-override characters from a label. */
+/** Strips display-control characters from an attachment label. */
 export function sanitizeAttachmentLabel(label: string): string {
   return label.replace(UNSAFE_LABEL_CHARS, "");
+}
+
+function hasMatchingCanonicalFileName(name: string, uri: string): boolean {
+  if (!uri.startsWith("file://") || uri !== sanitizeAttachmentLabel(uri)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(uri);
+    if (
+      parsed.protocol !== "file:" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.port !== "" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      return false;
+    }
+
+    const encodedName = parsed.pathname.split("/").filter(Boolean).at(-1);
+    if (!encodedName) {
+      return false;
+    }
+    return sanitizeAttachmentLabel(decodeURIComponent(encodedName)) === name;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -94,10 +118,11 @@ export function isAttachmentMetadataValid(
     name === sanitizeAttachmentLabel(name) &&
     uri.length > 0 &&
     uri.length <= MAX_ATTACHMENT_URI_LENGTH &&
-    uri.toLowerCase().startsWith("file://") &&
+    hasMatchingCanonicalFileName(name, uri) &&
     (mimeType === undefined ||
-      (mimeType.length <= MAX_ATTACHMENT_MIME_LENGTH &&
-        mimeType === sanitizeAttachmentLabel(mimeType))) &&
+      (mimeType.length > 0 &&
+        mimeType.length <= MAX_ATTACHMENT_MIME_LENGTH &&
+        /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(mimeType))) &&
     (size === undefined || (Number.isSafeInteger(size) && size >= 0))
   );
 }

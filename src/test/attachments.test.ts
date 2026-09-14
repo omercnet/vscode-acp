@@ -1,6 +1,6 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
-import { mkdtemp, writeFile } from "fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -8,6 +8,7 @@ import {
   createFileAttachment,
   escapeQuickPickLabel,
   guessMimeType,
+  isTrustedWorkspaceFile,
 } from "../attachments";
 import {
   MAX_ATTACHMENTS,
@@ -74,6 +75,87 @@ suite("Resource link attachments", () => {
     });
   });
 
+  suite("workspace containment", () => {
+    test("accepts files only inside trusted canonical workspace roots", async () => {
+      const root = await mkdtemp(join(tmpdir(), "acp-workspace-"));
+      const outside = await mkdtemp(join(tmpdir(), "acp-outside-"));
+      const insidePath = join(root, "inside.ts");
+      const outsidePath = join(outside, "outside.ts");
+      const linkedPath = join(root, "linked.ts");
+      const folders = [
+        { uri: vscode.Uri.file(root) } as vscode.WorkspaceFolder,
+      ];
+
+      try {
+        await writeFile(insidePath, "inside");
+        await writeFile(outsidePath, "outside");
+        await symlink(outsidePath, linkedPath);
+
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(insidePath),
+            folders,
+            true
+          ),
+          true
+        );
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(outsidePath),
+            folders,
+            true
+          ),
+          false
+        );
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(linkedPath),
+            folders,
+            true
+          ),
+          false
+        );
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(insidePath),
+            folders,
+            false
+          ),
+          false
+        );
+        assert.ok(
+          await createFileAttachment(
+            vscode.Uri.file(insidePath),
+            "inside",
+            folders,
+            true
+          )
+        );
+        assert.strictEqual(
+          await createFileAttachment(
+            vscode.Uri.file(outsidePath),
+            "outside",
+            folders,
+            true
+          ),
+          null
+        );
+        assert.strictEqual(
+          await createFileAttachment(
+            vscode.Uri.file(linkedPath),
+            "link",
+            folders,
+            true
+          ),
+          null
+        );
+      } finally {
+        await rm(root, { recursive: true, force: true });
+        await rm(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   suite("metadata", () => {
     test("infers common MIME types without reading file content", () => {
       assert.strictEqual(guessMimeType("component.TSX"), "text/typescript");
@@ -83,7 +165,7 @@ suite("Resource link attachments", () => {
 
     test("rejects empty or excessive name and URI metadata", () => {
       assert.strictEqual(
-        isAttachmentMetadataValid("file.ts", "file:///x"),
+        isAttachmentMetadataValid("file.ts", "file:///file.ts"),
         true
       );
       assert.strictEqual(isAttachmentMetadataValid("", "file:///x"), false);
@@ -104,7 +186,7 @@ suite("Resource link attachments", () => {
       assert.strictEqual(
         isAttachmentMetadataValid(
           "file.ts",
-          "file:///x",
+          "file:///file.ts",
           "x".repeat(MAX_ATTACHMENT_MIME_LENGTH + 1)
         ),
         false
@@ -112,7 +194,7 @@ suite("Resource link attachments", () => {
       assert.strictEqual(
         isAttachmentMetadataValid(
           "file.ts",
-          "file:///x",
+          "file:///file.ts",
           "text/typescript",
           -1
         ),
@@ -121,7 +203,7 @@ suite("Resource link attachments", () => {
       assert.strictEqual(
         isAttachmentMetadataValid(
           "file.ts",
-          "file:///x",
+          "file:///file.ts",
           "text/typescript",
           Number.MAX_SAFE_INTEGER + 1
         ),
@@ -166,6 +248,76 @@ suite("Resource link attachments", () => {
       );
     });
 
+    test("rejects every Unicode display-control class", () => {
+      for (const unsafe of [
+        "\u00ad",
+        "\u061c",
+        "\u2028",
+        "\u2029",
+        "\u2060",
+        "\u2061",
+        "\u2062",
+        "\u2063",
+        "\u2064",
+        "\ufeff",
+      ]) {
+        assert.strictEqual(
+          isAttachmentMetadataValid(`safe${unsafe}.ts`, "file:///safe.ts"),
+          false,
+          `accepted U+${unsafe.codePointAt(0)?.toString(16)}`
+        );
+      }
+    });
+
+    test("requires canonical file URIs whose basename matches the label", () => {
+      for (const [name, uri] of [
+        ["report.pdf", "file:///home/user/.ssh/id_rsa"],
+        ["x", "FILE:///x"],
+        ["x", "file:///x?download=1"],
+        ["x", "file:///x#fragment"],
+        ["x", "file://user@example.com/x"],
+        ["x", "file:///"],
+        ["x", "file:///bad%2Fname"],
+      ]) {
+        assert.strictEqual(isAttachmentMetadataValid(name, uri), false, uri);
+      }
+
+      assert.strictEqual(
+        isAttachmentMetadataValid(
+          "My résumé.ts",
+          "file:///home/alice/My%20r%C3%A9sum%C3%A9.ts"
+        ),
+        true
+      );
+      assert.strictEqual(
+        isAttachmentMetadataValid("A.ts", "file:///c%3A/Users/Alice/A.ts"),
+        true
+      );
+      assert.strictEqual(
+        isAttachmentMetadataValid("A.ts", "file://server/share/A.ts"),
+        true
+      );
+    });
+
+    test("rejects malformed MIME metadata", () => {
+      for (const mimeType of [
+        "",
+        "text",
+        "text/plain; charset=utf-8",
+        "text/ plain",
+      ]) {
+        assert.strictEqual(
+          isAttachmentMetadataValid("x", "file:///x", mimeType),
+          false,
+          mimeType
+        );
+      }
+      assert.strictEqual(
+        isAttachmentMetadataValid("x", "file:///x", "text/x-typescript"),
+        true
+      );
+    });
+
     test("strips control characters from a real file's name", async function () {
       if (process.platform === "win32") {
         // Windows rejects control characters and ':' in file names, so this
@@ -179,7 +331,9 @@ suite("Resource link attachments", () => {
 
       const created = await createFileAttachment(
         vscode.Uri.file(path),
-        "att-1"
+        "att-1",
+        [{ uri: vscode.Uri.file(dir) } as vscode.WorkspaceFolder],
+        true
       );
 
       assert.ok(created);
@@ -247,11 +401,17 @@ suite("Resource link attachments", () => {
       assert.strictEqual(typeof firstBlock.size, "number");
     });
 
-    test("drops resource links with invalid metadata", () => {
+    test("drops resource links with invalid or spoofed metadata", () => {
       const blocks = buildPromptContent("Keep the text", [
-        attachment("invalid", "file:///workspace/invalid.ts", "invalid.ts", {
-          size: -1,
-        }),
+        attachment(
+          "invalid-size",
+          "file:///workspace/invalid.ts",
+          "invalid.ts",
+          {
+            size: -1,
+          }
+        ),
+        attachment("spoofed", "file:///workspace/private.key", "report.pdf"),
       ]);
 
       assert.deepStrictEqual(blocks, [{ type: "text", text: "Keep the text" }]);

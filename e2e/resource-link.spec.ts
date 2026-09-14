@@ -182,20 +182,22 @@ test("sends a selected file as a resource_link block on the ACP wire", async ({}
     const wireText = await readFile(WIRE_PATH, "utf8");
     const wire = JSON.parse(wireText) as Array<Array<Record<string, unknown>>>;
     expect(wire).toHaveLength(1);
-    const [textBlock, linkBlock] = wire[0];
-    expect(textBlock).toEqual({
-      type: "text",
-      text: "Review this project manifest",
-    });
-    expect(linkBlock.type).toBe("resource_link");
-    expect(linkBlock.name).toBe("package.json");
-    expect(linkBlock.mimeType).toBe("application/json");
-    expect(linkBlock.size).toBe(Buffer.byteLength(manifest));
-    expect(linkBlock.uri).toBe(
-      `file://${PROJECT_ROOT.split("/").map(encodeURIComponent).join("/")}/package.json`
-    );
-    // Only the reference travels: no file contents are embedded anywhere.
-    expect(wireText).not.toContain(JSON.parse(manifest).description);
+    expect(wire[0]).toEqual([
+      {
+        type: "text",
+        text: "Review this project manifest",
+      },
+      {
+        type: "resource_link",
+        uri: `file://${PROJECT_ROOT.split("/").map(encodeURIComponent).join("/")}/package.json`,
+        name: "package.json",
+        mimeType: "application/json",
+        size: Buffer.byteLength(manifest),
+      },
+    ]);
+    // Exact equality above proves there is no content-bearing third block or
+    // extra field; this assertion also guards against embedding the raw file.
+    expect(wireText).not.toContain(manifest);
   } finally {
     await host.close();
   }

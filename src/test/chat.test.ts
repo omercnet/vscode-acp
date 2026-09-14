@@ -2707,7 +2707,7 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.sentAttachments.length, 1);
     });
 
-    test("drops replayed resource links that are not local files", () => {
+    test("drops spoofed or non-local replay resource links", () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
@@ -2727,6 +2727,14 @@ suite("ChatViewProvider", () => {
         {
           uri: "file:///home/u/.ssh/id_rsa",
           name: "todo.md\nfile:///home/u/todo.md",
+        },
+        {
+          uri: "file:///home/u/.ssh/id_rsa",
+          name: "quarterly-report.pdf",
+        },
+        {
+          uri: "file:///workspace/invisible.ts",
+          name: "invisible\u2060.ts",
         },
       ];
       for (const content of hostile) {
@@ -2906,6 +2914,119 @@ suite("ChatViewProvider", () => {
           originalCreate
         );
       }
+    });
+
+    test("discards picker results after a session generation change", async () => {
+      const originalPicker = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "pickAttachmentUris"
+      );
+      const originalCreate = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "createFileAttachment"
+      );
+      assert.ok(originalPicker);
+      assert.ok(originalCreate);
+
+      let finishPicker!: (uris: vscode.Uri[]) => void;
+      const picked = new Promise<vscode.Uri[]>((resolve) => {
+        finishPicker = resolve;
+      });
+      let metadataCalls = 0;
+      Object.defineProperty(attachmentHelpers, "pickAttachmentUris", {
+        configurable: true,
+        value: () => picked,
+      });
+      Object.defineProperty(attachmentHelpers, "createFileAttachment", {
+        configurable: true,
+        value: async () => {
+          metadataCalls += 1;
+          return {
+            id: "att-stale-picker",
+            uri: "file:///workspace/file.ts",
+            name: "file.ts",
+          };
+        },
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const internals = provider as unknown as {
+          conversationGeneration: number;
+          handleRequestAttachFiles(currentCount: number): Promise<void>;
+          pendingAttachments: Map<string, unknown>;
+        };
+
+        const request = internals.handleRequestAttachFiles(0);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        internals.conversationGeneration += 1;
+        finishPicker([vscode.Uri.file("/workspace/file.ts")]);
+        await request;
+
+        assert.strictEqual(metadataCalls, 0);
+        assert.strictEqual(internals.pendingAttachments.size, 0);
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "pickAttachmentUris",
+          originalPicker
+        );
+        Object.defineProperty(
+          attachmentHelpers,
+          "createFileAttachment",
+          originalCreate
+        );
+      }
+    });
+
+    test("restores attachment chips after a prompt fails", async () => {
+      class FailingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          throw new Error("send failed");
+        }
+      }
+
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new FailingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, FileAttachment>;
+        handleUserMessage(
+          text: string,
+          attachmentIds?: string[]
+        ): Promise<void>;
+      };
+      const attachment: FileAttachment = {
+        id: "att-retry",
+        uri: "file:///workspace/retry.ts",
+        name: "retry.ts",
+      };
+      internals.pendingAttachments.set(attachment.id, attachment);
+
+      await internals.handleUserMessage("Review", [attachment.id]);
+
+      assert.strictEqual(
+        internals.pendingAttachments.get(attachment.id),
+        attachment
+      );
+      assert.deepStrictEqual(
+        messages.find((message) => message.type === "filesAttached"),
+        { type: "filesAttached", attachments: [attachment] }
+      );
     });
   });
 });

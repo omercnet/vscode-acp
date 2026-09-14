@@ -579,6 +579,30 @@ suite("Webview", () => {
         assert.strictEqual(elements.inputEl.disabled, false);
       });
 
+      test("keeps the prompt lock through chat clearing and unrelated errors", () => {
+        elements.inputEl.value = "In flight";
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(elements.attachBtn.disabled, true);
+        assert.strictEqual(elements.inputEl.disabled, false);
+
+        controller.handleMessage({ type: "chatCleared" });
+        controller.handleMessage({ type: "error", text: "Unrelated failure" });
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(elements.attachBtn.disabled, true);
+
+        controller.handleMessage({ type: "streamEnd" });
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(elements.attachBtn.disabled, false);
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
       test("defers focus restoration until a permission dialog closes", () => {
         elements.inputEl.focus();
         controller.handleMessage({

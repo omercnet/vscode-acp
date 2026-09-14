@@ -844,7 +844,7 @@ export class WebviewController {
       remove.setAttribute("data-attachment-id", attachment.id);
       remove.setAttribute("aria-label", `Remove ${attachment.name}`);
       remove.title = `Remove ${attachment.name}`;
-      remove.disabled = this.composerDisabled;
+      remove.disabled = this.inputLocks.size > 0 || this.promptPending;
       remove.textContent = "×";
       chip.appendChild(remove);
     }
@@ -859,8 +859,9 @@ export class WebviewController {
       bar.appendChild(this.createAttachmentChip(attachment, true));
     }
     bar.classList.toggle("visible", this.attachments.length > 0);
+    this.updateInputControls();
+
     const atLimit = this.attachments.length >= MAX_ATTACHMENTS;
-    this.elements.attachBtn.disabled = this.composerDisabled || atLimit;
     this.elements.attachBtn.title = atLimit
       ? `Attachment limit reached (${MAX_ATTACHMENTS} files)`
       : "Attach files";
@@ -894,18 +895,6 @@ export class WebviewController {
   private clearAttachments(): void {
     this.attachments = [];
     this.renderAttachments();
-  }
-
-  private setComposerDisabled(disabled: boolean): void {
-    this.composerDisabled = disabled;
-    this.elements.sendBtn.disabled = disabled;
-    this.elements.attachBtn.disabled =
-      disabled || this.attachments.length >= MAX_ATTACHMENTS;
-    for (const button of this.elements.attachmentsBar.querySelectorAll(
-      ".attachment-chip-remove"
-    )) {
-      (button as HTMLButtonElement).disabled = disabled;
-    }
   }
 
   private showSystemMessageOnce(text: string): void {
@@ -1058,6 +1047,7 @@ export class WebviewController {
 
   private updateInputControls(restoreFocus = true): void {
     const inputLocked = this.inputLocks.size > 0;
+    const atAttachmentLimit = this.attachments.length >= MAX_ATTACHMENTS;
     let hint = DEFAULT_INPUT_HINT;
     for (const lockMessage of this.inputLocks.values()) {
       hint = lockMessage;
@@ -1070,6 +1060,14 @@ export class WebviewController {
       "aria-disabled",
       String(inputLocked || this.promptPending)
     );
+    this.elements.attachBtn.disabled =
+      inputLocked || this.promptPending || atAttachmentLimit;
+    for (const button of this.elements.attachmentsBar.querySelectorAll(
+      ".attachment-chip-remove"
+    )) {
+      (button as HTMLButtonElement).disabled =
+        inputLocked || this.promptPending;
+    }
     this.elements.connectBtn.disabled = inputLocked;
     this.elements.sendBtn.textContent = inputLocked ? "Wait…" : "Send";
     this.elements.sendBtn.setAttribute(
@@ -1590,19 +1588,14 @@ export class WebviewController {
       case "error":
         this.hideThinking();
         if (msg.text) this.addMessage(msg.text, "error");
-        this.updateViewState();
-        this.promptPending = false;
-        this.updateInputControls();
         if (
+          !this.promptPending &&
           this.inputLocks.size === 0 &&
           !this.elements.permissionModal.classList.contains("visible") &&
           !this.elements.sessionPicker.classList.contains("visible")
         ) {
           this.elements.inputEl.focus();
         }
-        break;
-      case "agentError":
-        if (msg.text) this.addMessage(msg.text, "error");
         this.updateViewState();
         break;
       case "sessionTransition":
@@ -1638,7 +1631,6 @@ export class WebviewController {
       case "chatCleared":
         this.clearChatState();
         this.clearAttachments();
-        this.setComposerDisabled(false);
         modeSelector.style.display = "none";
         modelSelector.style.display = "none";
         this.clearPermissionModal();
@@ -1660,9 +1652,9 @@ export class WebviewController {
         this.hideSessionHistory();
         break;
       case "replayStart":
+        this.promptPending = false;
         this.setInputLock("replay", true, "Restoring conversation…");
         this.hideSessionHistory();
-        this.setComposerDisabled(true);
         this.showReplayStatus();
         break;
       case "replayComplete":

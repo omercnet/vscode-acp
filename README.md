@@ -54,7 +54,7 @@ If an agent requires ACP authentication, choose one of its advertised sign-in me
 
 ### File Attachments
 
-Use the paperclip button beside the prompt to select an open editor or browse for workspace files. Selected files appear as removable chips and are sent as ACP `resource_link` blocks with their canonical file URI, name, MIME type, and size. The extension does not read or embed file contents when attaching them; the selected agent must be able to access the referenced URI.
+Use the paperclip button beside the prompt to select an open workspace file or browse for files inside a trusted local workspace. Selected files appear as removable chips and are sent as ACP `resource_link` blocks with their canonical file URI and name, plus MIME type and size when available. The extension stats the selected path but does not read or embed file contents when attaching it; the selected agent must be able to access the referenced URI.
 
 ### Session History
 

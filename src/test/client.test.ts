@@ -609,6 +609,10 @@ suite("ACPClient with Mock Server", () => {
       assert.ok(response.sessionId);
       assert.ok(response.sessionId.startsWith("mock-session-"));
       assert.strictEqual(client.getCurrentSessionId(), response.sessionId);
+      assert.deepStrictEqual(
+        mockProcesses.at(-1)?.server.getNewSessionRequest(),
+        { cwd: "/test/dir", mcpServers: [] }
+      );
 
       const metadata = client.getSessionMetadata();
       assert.ok(metadata);
@@ -958,7 +962,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("should transport text followed by resource link metadata", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await client.sendMessage("Review this file", [
         {
@@ -986,7 +990,7 @@ suite("ACPClient with Mock Server", () => {
 
     test("should transport an attachment-only prompt", async () => {
       await client.connect();
-      await client.newSession("/test/dir");
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await client.sendMessage("", [
         {

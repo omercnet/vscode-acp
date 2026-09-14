@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import { realpath } from "fs/promises";
+import { isAbsolute, relative, sep } from "path";
 import {
   isAttachmentMetadataValid,
   sanitizeAttachmentLabel,
@@ -101,6 +103,44 @@ export function escapeQuickPickLabel(text: string): string {
 }
 
 /**
+ * Checks that a local file resolves inside a trusted local workspace root.
+ * Canonical paths prevent workspace symlinks from granting access outside
+ * the workspace boundary.
+ */
+export async function isTrustedWorkspaceFile(
+  uri: vscode.Uri,
+  workspaceFolders = vscode.workspace.workspaceFolders,
+  workspaceTrusted = vscode.workspace.isTrusted
+): Promise<boolean> {
+  if (!workspaceTrusted || uri.scheme !== "file" || !workspaceFolders) {
+    return false;
+  }
+
+  try {
+    const candidate = await realpath(uri.fsPath);
+    for (const folder of workspaceFolders) {
+      if (folder.uri.scheme !== "file") {
+        continue;
+      }
+      const root = await realpath(folder.uri.fsPath);
+      const relativePath = relative(root, candidate);
+      if (
+        relativePath === "" ||
+        (relativePath !== ".." &&
+          !relativePath.startsWith(`..${sep}`) &&
+          !isAbsolute(relativePath))
+      ) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+
+  return false;
+}
+
+/**
  * Builds attachment metadata for a single selected file: stats it for size,
  * infers a MIME type from the extension, and canonicalizes its URI. Returns
  * `null` when the target isn't a regular file or its metadata violates the
@@ -109,9 +149,13 @@ export function escapeQuickPickLabel(text: string): string {
  */
 export async function createFileAttachment(
   uri: vscode.Uri,
-  id: string
+  id: string,
+  workspaceFolders = vscode.workspace.workspaceFolders,
+  workspaceTrusted = vscode.workspace.isTrusted
 ): Promise<FileAttachment | null> {
-  if (uri.scheme !== "file") {
+  if (
+    !(await isTrustedWorkspaceFile(uri, workspaceFolders, workspaceTrusted))
+  ) {
     return null;
   }
 
@@ -144,96 +188,105 @@ export async function createFileAttachment(
 }
 
 /**
- * Opens a picker that lets the user attach files through trusted VS Code
- * APIs only: currently open editor tabs are listed directly, and a title
- * bar button opens the native `showOpenDialog` for any other workspace or
- * filesystem file. No `@`-mention parsing or custom fuzzy search is
- * implemented; this is deliberately the full selection surface.
- *
- * Resolves to all selected URIs (empty when the user cancels); the caller
- * enforces `remaining` while producing user-visible skip feedback.
+ * Opens a picker for files inside trusted local workspace roots. Open tabs
+ * outside the workspace are omitted, and native-dialog selections are
+ * canonicalized and rejected unless they resolve inside a workspace root.
  */
-export function pickAttachmentUris(remaining: number): Promise<vscode.Uri[]> {
-  // QuickPick completes through one of several event callbacks, so the
-  // executor form keeps a single resolver shared across those callbacks and
-  // remains compatible with the extension's declared VS Code 1.74 baseline.
-  return new Promise((resolve) => {
-    type FileQuickPickItem = vscode.QuickPickItem & { uri: vscode.Uri };
+export async function pickAttachmentUris(
+  remaining: number
+): Promise<vscode.Uri[]> {
+  type FileQuickPickItem = vscode.QuickPickItem & { uri: vscode.Uri };
 
-    const seen = new Set<string>();
-    const items: FileQuickPickItem[] = [];
-    for (const group of vscode.window.tabGroups.all) {
-      for (const tab of group.tabs) {
-        const input = tab.input;
-        if (!(input instanceof vscode.TabInputText)) {
-          continue;
-        }
-        const uri = input.uri;
-        if (uri.scheme !== "file" || seen.has(uri.toString())) {
-          continue;
-        }
-        seen.add(uri.toString());
-        items.push({
-          label: `$(file) ${escapeQuickPickLabel(
-            vscode.workspace.asRelativePath(uri, false)
-          )}`,
-          description: escapeQuickPickLabel(uri.fsPath),
-          uri,
-        });
+  const seen = new Set<string>();
+  const items: FileQuickPickItem[] = [];
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const input = tab.input;
+      if (!(input instanceof vscode.TabInputText)) {
+        continue;
       }
+      const uri = input.uri;
+      const key = uri.toString();
+      if (seen.has(key) || !(await isTrustedWorkspaceFile(uri))) {
+        continue;
+      }
+      seen.add(key);
+      items.push({
+        label: `$(file) ${escapeQuickPickLabel(
+          vscode.workspace.asRelativePath(uri, false)
+        )}`,
+        description: escapeQuickPickLabel(uri.fsPath),
+        uri,
+      });
     }
+  }
 
-    const quickPick = vscode.window.createQuickPick<FileQuickPickItem>();
-    quickPick.items = items;
-    quickPick.canSelectMany = true;
-    quickPick.matchOnDescription = true;
-    quickPick.placeholder =
-      items.length > 0
-        ? `Select up to ${remaining} open file${remaining === 1 ? "" : "s"}, or browse for more`
-        : "No open files - use the browse button to attach files";
-    quickPick.buttons = [
-      {
-        iconPath: new vscode.ThemeIcon("folder-opened"),
-        tooltip: "Browse for files...",
-      },
-    ];
+  const quickPick = vscode.window.createQuickPick<FileQuickPickItem>();
+  quickPick.items = items;
+  quickPick.canSelectMany = true;
+  quickPick.matchOnDescription = true;
+  quickPick.placeholder =
+    items.length > 0
+      ? `Select up to ${remaining} open workspace file${remaining === 1 ? "" : "s"}, or browse the workspace`
+      : "No open workspace files - use browse to attach a workspace file";
+  quickPick.buttons = [
+    {
+      iconPath: new vscode.ThemeIcon("folder-opened"),
+      tooltip: "Browse workspace files...",
+    },
+  ];
 
-    let settled = false;
-    let browsing = false;
-    const finish = (uris: vscode.Uri[]) => {
-      if (settled) return;
-      settled = true;
-      quickPick.dispose();
-      resolve(uris);
-    };
-
-    quickPick.onDidTriggerButton(async () => {
-      browsing = true;
-      try {
-        const picked = await vscode.window.showOpenDialog({
-          canSelectMany: true,
-          canSelectFiles: true,
-          canSelectFolders: false,
-          defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
-          openLabel: "Attach",
-        });
-        finish(picked ?? []);
-      } catch (error) {
-        console.error("[Attachments] Failed to open file dialog:", error);
-        finish([]);
-      } finally {
-        browsing = false;
-      }
-    });
-
-    quickPick.onDidAccept(() => {
-      finish(quickPick.selectedItems.map((item) => item.uri));
-    });
-
-    quickPick.onDidHide(() => {
-      if (!browsing) finish([]);
-    });
-
-    quickPick.show();
+  let resolvePromise!: (uris: vscode.Uri[]) => void;
+  const promise = new Promise<vscode.Uri[]>((resolve) => {
+    resolvePromise = resolve;
   });
+  let settled = false;
+  let browsing = false;
+  const finish = (uris: vscode.Uri[]) => {
+    if (settled) return;
+    settled = true;
+    quickPick.dispose();
+    resolvePromise(uris);
+  };
+
+  quickPick.onDidTriggerButton(async () => {
+    browsing = true;
+    try {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: true,
+        canSelectFiles: true,
+        canSelectFolders: false,
+        defaultUri: vscode.workspace.workspaceFolders?.[0]?.uri,
+        openLabel: "Attach workspace files",
+      });
+      const allowed: vscode.Uri[] = [];
+      for (const uri of picked ?? []) {
+        if (await isTrustedWorkspaceFile(uri)) {
+          allowed.push(uri);
+        }
+      }
+      if ((picked?.length ?? 0) > allowed.length) {
+        void vscode.window.showWarningMessage(
+          "Only files inside a trusted local workspace can be attached."
+        );
+      }
+      finish(allowed);
+    } catch (error) {
+      console.error("[Attachments] Failed to open file dialog:", error);
+      finish([]);
+    } finally {
+      browsing = false;
+    }
+  });
+
+  quickPick.onDidAccept(() => {
+    finish(quickPick.selectedItems.map((item) => item.uri));
+  });
+
+  quickPick.onDidHide(() => {
+    if (!browsing) finish([]);
+  });
+
+  quickPick.show();
+  return promise;
 }
