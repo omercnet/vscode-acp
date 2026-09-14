@@ -2854,7 +2854,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
     </div>
   </div>
-  <span id="input-hint" class="sr-only" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
+  <span id="input-hint" class="sr-only" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.</span>
   
   <div id="options-bar" role="toolbar" aria-label="Session options">
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
