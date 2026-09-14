@@ -57,7 +57,7 @@ jobs:
       - name: Coverage Summary
         if: runner.os == 'Linux'
         run: |
-          COVERAGE=$(cat coverage/lcov.info | awk '
+          COVERAGE=$(awk '
             /^SF:/ { file=$0; sub("SF:", "", file); next }
             /^LH:/ { hit=$0; sub("LH:", "", hit); next }
             /^LF:/ { 
@@ -65,9 +65,9 @@ jobs:
               if (found > 0) { total_hit += hit; total_found += found }
             }
             END { if (total_found > 0) printf "%.1f%% (%d/%d lines)", (total_hit/total_found)*100, total_hit, total_found; else print "0.0% (0/0 lines)" }
-          ')
-          echo "## 📊 Coverage Report" >> $GITHUB_STEP_SUMMARY
-          echo "**Lines:** $COVERAGE" >> $GITHUB_STEP_SUMMARY
+          ' coverage/lcov.info)
+          echo "## 📊 Coverage Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Lines:** $COVERAGE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment Coverage on PR
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
