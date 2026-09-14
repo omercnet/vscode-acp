@@ -68,12 +68,35 @@ Click on any tool to see the command input and output.
 
 ## Configuration
 
-The extension auto-detects installed agents. Supported agents:
+The extension auto-detects installed agents from the extension host's `PATH`.
+Commands are resolved to absolute executables and started from the resolved
+installation directory without a shell. Relative `PATH` entries and untrusted
+workspace directories are removed before launch; the workspace path is sent
+separately when the ACP session starts. The same rules apply in local and remote
+extension hosts.
 
-| Agent       | Command    | Detection      |
-| ----------- | ---------- | -------------- |
-| OpenCode    | `opencode` | Checks `$PATH` |
-| Claude Code | `claude`   | Checks `$PATH` |
+| Agent       | Command    | Detection     |
+| ----------- | ---------- | ------------- |
+| OpenCode    | `opencode` | Checks `PATH` |
+| Claude Code | `npx`      | Checks `PATH` |
+
+Use `vscode-acp.agentPaths` to map an agent ID to an absolute executable path
+when the command is not on `PATH`. User-level overrides remain available in
+Restricted Mode. Workspace-level overrides are ignored until Workspace Trust is
+granted.
+
+On Windows, `npm`-generated `.cmd`/`.bat` shims are decoded into the interpreter
+and script they invoke. Other shim styles (for example Scoop or Chocolatey
+wrappers) are not decoded; point `vscode-acp.agentPaths` at the real executable
+in that case.
+
+```json
+{
+  "vscode-acp.agentPaths": {
+    "opencode": "/opt/opencode/bin/opencode"
+  }
+}
+```
 
 ## Development
 

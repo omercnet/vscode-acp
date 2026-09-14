@@ -25,7 +25,16 @@ suite("Client capabilities", () => {
         args: [],
       },
       spawn: mockSpawn,
-      skipAvailabilityCheck: true,
+      resolutionOptions: () => ({
+        platform: "linux",
+        env: { PATH: "/test/bin" },
+        fileSystem: {
+          isFile: (path) => path === "/test/bin/mock",
+          isExecutable: (path) => path === "/test/bin/mock",
+          readText: () => undefined,
+          realpath: (path) => path,
+        },
+      }),
     });
   });
 

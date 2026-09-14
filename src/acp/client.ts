@@ -1,7 +1,15 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
-import { type AgentConfig, getDefaultAgent, isAgentAvailable } from "./agents";
+import {
+  type AgentConfig,
+  getDefaultAgent,
+  resolveAgentCommand,
+} from "./agents";
+import {
+  createAgentEnvironment,
+  type AgentCommandResolutionOptions,
+} from "./agentCommand";
 
 interface ModelSelectionState {
   configId: string;
@@ -204,7 +212,7 @@ export type SpawnFunction = (
 export interface ACPClientOptions {
   agentConfig?: AgentConfig;
   spawn?: SpawnFunction;
-  skipAvailabilityCheck?: boolean;
+  resolutionOptions?: () => AgentCommandResolutionOptions;
 }
 
 export class ACPClient {
@@ -245,17 +253,17 @@ export class ACPClient {
   private releaseTerminalHandler: ReleaseTerminalCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
-  private skipAvailabilityCheck: boolean;
+  private resolutionOptions: () => AgentCommandResolutionOptions;
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
       this.agentConfig = options;
       this.spawnFn = nodeSpawn as SpawnFunction;
-      this.skipAvailabilityCheck = false;
+      this.resolutionOptions = () => ({});
     } else {
       this.agentConfig = options?.agentConfig ?? getDefaultAgent();
       this.spawnFn = options?.spawn ?? (nodeSpawn as SpawnFunction);
-      this.skipAvailabilityCheck = options?.skipAvailabilityCheck ?? false;
+      this.resolutionOptions = options?.resolutionOptions ?? (() => ({}));
     }
   }
 
@@ -348,10 +356,12 @@ export class ACPClient {
       throw new Error("Already connected or connecting");
     }
 
-    if (!this.skipAvailabilityCheck && !isAgentAvailable(this.agentConfig.id)) {
+    const resolutionOptions = this.resolutionOptions();
+    const launch = resolveAgentCommand(this.agentConfig, resolutionOptions);
+    if (!launch) {
       throw new Error(
-        `Agent "${this.agentConfig.name}" is not installed. ` +
-          `Please install "${this.agentConfig.command}" and try again.`
+        `Agent "${this.agentConfig.name}" is unavailable. ` +
+          "Install it on the extension host PATH or configure an absolute executable path."
       );
     }
 
@@ -362,10 +372,22 @@ export class ACPClient {
     this.setState("connecting");
 
     try {
-      child = this.spawnFn(this.agentConfig.command, this.agentConfig.args, {
-        stdio: ["pipe", "pipe", "pipe"],
-        env: { ...process.env },
-      });
+      console.log(
+        `[ACP] Launching ${this.agentConfig.name} via ${launch.source}`
+      );
+      try {
+        child = this.spawnFn(launch.command, launch.args, {
+          stdio: ["pipe", "pipe", "pipe"],
+          cwd: launch.cwd,
+          env: createAgentEnvironment(resolutionOptions),
+          shell: false,
+        });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+        throw new Error(
+          `Unable to launch agent "${this.agentConfig.name}" (${code})`
+        );
+      }
       this.process = child;
 
       child.stderr?.on("data", (data: Buffer) => {
@@ -378,7 +400,8 @@ export class ACPClient {
       });
 
       child.on("error", (error) => {
-        console.error("[ACP] Process error:", error);
+        const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+        console.error(`[ACP] ${this.agentConfig.name} process error (${code})`);
         if (this.process !== child) {
           return;
         }

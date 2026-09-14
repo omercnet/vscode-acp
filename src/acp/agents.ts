@@ -1,4 +1,8 @@
-import { execSync } from "child_process";
+import {
+  resolveAgentCommand as resolveCommand,
+  type AgentCommandResolutionOptions,
+  type ResolvedAgentCommand,
+} from "./agentCommand";
 
 export interface AgentConfig {
   id: string;
@@ -9,6 +13,9 @@ export interface AgentConfig {
 
 export interface AgentWithStatus extends AgentConfig {
   available: boolean;
+}
+export interface AgentDiscoveryOptions extends AgentCommandResolutionOptions {
+  agentPaths?: Readonly<Record<string, string>>;
 }
 
 export const AGENTS: AgentConfig[] = [
@@ -94,75 +101,58 @@ export const AGENTS: AgentConfig[] = [
 
 const TEST_AGENT_COMMAND = process.env.VSCODE_ACP_TEST_AGENT_COMMAND;
 
-export function getAgent(id: string): AgentConfig | undefined {
-  return AGENTS.find((a) => a.id === id);
-}
-
-export function getDefaultAgent(): AgentConfig {
-  return TEST_AGENT_COMMAND
-    ? { ...AGENTS[0], command: TEST_AGENT_COMMAND, args: [] }
-    : AGENTS[0];
-}
-
-/**
- * Check if a command exists on the system PATH.
- * For npx commands, we assume they're available since npx can install on demand.
- */
-function isCommandAvailable(command: string): boolean {
-  if (command === "npx") {
-    // npx can install packages on demand, assume available if node/npm is installed
-    try {
-      execSync("which npx || where npx", { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
+export function getAgent(
+  id: string,
+  agentPaths: Readonly<Record<string, string>> = {}
+): AgentConfig | undefined {
+  const agent = AGENTS.find((candidate) => candidate.id === id);
+  if (!agent) {
+    return undefined;
   }
-
-  try {
-    // Use 'which' on Unix, 'where' on Windows
-    const whichCmd = process.platform === "win32" ? "where" : "which";
-    execSync(`${whichCmd} ${command}`, { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+  const configuredPath = agentPaths[id];
+  return configuredPath ? { ...agent, command: configuredPath } : agent;
 }
 
-/**
- * Get all agents with their availability status.
- * Caches the result for performance.
- */
-let cachedAgentsWithStatus: AgentWithStatus[] | null = null;
-
-export function getAgentsWithStatus(forceRefresh = false): AgentWithStatus[] {
-  if (cachedAgentsWithStatus && !forceRefresh) {
-    return cachedAgentsWithStatus;
-  }
-
-  cachedAgentsWithStatus = AGENTS.map((agent) => ({
-    ...agent,
-    available: isCommandAvailable(agent.command),
-  }));
-
-  return cachedAgentsWithStatus;
-}
-
-/**
- * Get the first available agent, or fall back to the default.
- */
-export function getFirstAvailableAgent(): AgentConfig {
+export function getDefaultAgent(
+  agentPaths: Readonly<Record<string, string>> = {}
+): AgentConfig {
   if (TEST_AGENT_COMMAND) {
-    return getDefaultAgent();
+    return { ...AGENTS[0], command: TEST_AGENT_COMMAND, args: [] };
   }
-
-  const agents = getAgentsWithStatus();
-  const available = agents.find((agent) => agent.available);
-  return available ?? AGENTS[0];
+  return getAgent(AGENTS[0].id, agentPaths) ?? AGENTS[0];
 }
 
-export function isAgentAvailable(agentId: string): boolean {
-  const agents = getAgentsWithStatus();
-  const agent = agents.find((a) => a.id === agentId);
-  return agent?.available ?? false;
+export function resolveAgentCommand(
+  agent: AgentConfig,
+  options: AgentCommandResolutionOptions = {}
+): ResolvedAgentCommand | undefined {
+  return resolveCommand(agent.command, agent.args, options);
+}
+
+export function getAgentsWithStatus(
+  options: AgentDiscoveryOptions = {}
+): AgentWithStatus[] {
+  const { agentPaths = {}, ...resolutionOptions } = options;
+  return AGENTS.map((configuredAgent) => {
+    const agent = getAgent(configuredAgent.id, agentPaths) ?? configuredAgent;
+    return {
+      ...agent,
+      available: resolveAgentCommand(agent, resolutionOptions) !== undefined,
+    };
+  });
+}
+
+export function getFirstAvailableAgent(
+  options: AgentDiscoveryOptions = {}
+): AgentConfig {
+  if (TEST_AGENT_COMMAND) {
+    return getDefaultAgent(options.agentPaths);
+  }
+
+  const available = getAgentsWithStatus(options).find(
+    (agent) => agent.available
+  );
+  return available
+    ? (getAgent(available.id, options.agentPaths) ?? available)
+    : getDefaultAgent(options.agentPaths);
 }

@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { ChildProcess } from "child_process";
+import { ChildProcess, type SpawnOptions } from "child_process";
 import {
   ACPClient,
   describeACPError,
@@ -205,7 +205,16 @@ suite("ACPClient with Mock Server", () => {
         args: [],
       },
       spawn: mockSpawn,
-      skipAvailabilityCheck: true,
+      resolutionOptions: () => ({
+        platform: "linux",
+        env: { PATH: "/test/bin" },
+        fileSystem: {
+          isFile: (path) => path === "/test/bin/mock",
+          isExecutable: (path) => path === "/test/bin/mock",
+          readText: () => undefined,
+          realpath: (path) => path,
+        },
+      }),
     });
   });
 
@@ -224,6 +233,114 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getState(), "connected");
       assert.ok(response);
       assert.deepStrictEqual(states, ["connecting", "connected"]);
+    });
+    test("spawns the resolved absolute executable without a shell", async () => {
+      let spawned:
+        { command: string; args: string[]; options: SpawnOptions } | undefined;
+      client.dispose();
+      client = new ACPClient({
+        agentConfig: {
+          id: "opencode",
+          name: "OpenCode",
+          command: "opencode",
+          args: ["acp"],
+        },
+        spawn(command, args, options) {
+          spawned = { command, args, options };
+          return createMockProcess() as unknown as ChildProcess;
+        },
+        resolutionOptions: () => ({
+          platform: "linux",
+          env: {
+            PATH: "/workspace/bin:/trusted/bin",
+            AGENT_TEST_VALUE: "preserved",
+          },
+          excludedDirectories: ["/workspace"],
+          fileSystem: {
+            isFile: (path) => path === "/trusted/bin/opencode",
+            isExecutable: (path) => path === "/trusted/bin/opencode",
+            readText: () => undefined,
+            realpath: (path) => path,
+          },
+        }),
+      });
+
+      await client.connect();
+
+      assert.deepStrictEqual(spawned, {
+        command: "/trusted/bin/opencode",
+        args: ["acp"],
+        options: {
+          cwd: "/trusted/bin",
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            PATH: "/trusted/bin",
+            AGENT_TEST_VALUE: "preserved",
+          },
+          shell: false,
+        },
+      });
+    });
+
+    test("never passes a relative command from public options to spawn", async () => {
+      let spawnCalled = false;
+      client.dispose();
+      client = new ACPClient({
+        agentConfig: {
+          id: "mock-agent",
+          name: "Mock Agent",
+          command: "./workspace-payload",
+          args: [],
+        },
+        spawn() {
+          spawnCalled = true;
+          return createMockProcess() as unknown as ChildProcess;
+        },
+        resolutionOptions: () => ({
+          platform: "linux",
+          env: { PATH: "/trusted/bin" },
+          fileSystem: {
+            isFile: () => true,
+            isExecutable: () => true,
+            readText: () => undefined,
+            realpath: (path) => path,
+          },
+        }),
+      });
+
+      await assert.rejects(
+        client.connect(),
+        /Agent "Mock Agent" is unavailable/
+      );
+      assert.strictEqual(spawnCalled, false);
+    });
+
+    test("does not expose a configured executable path when unavailable", async () => {
+      client.dispose();
+      client = new ACPClient({
+        agentConfig: {
+          id: "opencode",
+          name: "OpenCode",
+          command: "/home/private-user/tools/opencode",
+          args: ["acp"],
+        },
+        resolutionOptions: () => ({
+          platform: "linux",
+          env: { PATH: "/home/private-user/bin" },
+          fileSystem: {
+            isFile: () => false,
+            isExecutable: () => false,
+            readText: () => undefined,
+            realpath: (path) => path,
+          },
+        }),
+      });
+
+      await assert.rejects(client.connect(), (error: Error) => {
+        assert.match(error.message, /Agent "OpenCode" is unavailable/);
+        assert.ok(!error.message.includes("private-user"));
+        return true;
+      });
     });
 
     test("should notify multiple state change listeners", async () => {

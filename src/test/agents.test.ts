@@ -47,6 +47,15 @@ suite("agents", () => {
       const agent = getAgent("nonexistent-agent");
       assert.strictEqual(agent, undefined);
     });
+
+    test("should apply an explicit executable path override", () => {
+      const agent = getAgent("opencode", {
+        opencode: "C:\\trusted\\opencode.exe",
+      });
+
+      assert.strictEqual(agent?.command, "C:\\trusted\\opencode.exe");
+      assert.deepStrictEqual(agent?.args, ["acp"]);
+    });
   });
 
   suite("getDefaultAgent", () => {

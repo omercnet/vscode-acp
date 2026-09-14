@@ -45,7 +45,10 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "The extension can run in untrusted workspaces but some features may be limited."
+      "description": "Workspace-defined agent executable paths are disabled until the workspace is trusted.",
+      "restrictedConfigurations": [
+        "vscode-acp.agentPaths"
+      ]
     },
     "virtualWorkspaces": true
   },
@@ -153,6 +156,15 @@
     "configuration": {
       "title": "VSCode ACP",
       "properties": {
+        "vscode-acp.agentPaths": {
+          "type": "object",
+          "scope": "machine-overridable",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Absolute executable paths keyed by agent ID. User-defined paths remain available in Restricted Mode; workspace-defined paths require Workspace Trust."
+        },
         "vscode-acp.sessions.autoSave": {
           "type": "boolean",
           "default": true,
@@ -186,6 +198,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "prepare": "husky",
     "screenshot": "npx tsx scripts/screenshot.ts",
+    "smoke:agent-resolution": "tsx scripts/agent-resolution-smoke.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug"
