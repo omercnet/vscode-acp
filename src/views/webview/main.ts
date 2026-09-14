@@ -168,6 +168,13 @@ const PERMISSION_GUARD_MS = 500;
 const DEFAULT_INPUT_HINT =
   "Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.";
 /**
+ * Shown when a typed slash word matches nothing the connected agent advertised
+ * over ACP. It is also announced through the input hint live region, because a
+ * listbox option that never becomes active is never read out.
+ */
+const NO_MATCHING_COMMANDS_MESSAGE =
+  "No matching ACP commands. This list only includes commands advertised by the active agent; its own app may offer others.";
+/**
  * Decision labels are extension-defined, never agent-supplied, and must state
  * exactly what the extension guarantees. Grants are cleared whenever the
  * session, agent, chat, or view changes, so "always" is session-scoped.
@@ -663,7 +670,9 @@ export class WebviewController {
   private isConnected = false;
   private messageTexts = new Map<HTMLElement, string>();
   private availableCommands: AvailableCommand[] = [];
+  private hasCommandCatalog = false;
   private selectedCommandIndex = -1;
+  private commandHint: string | null = null;
   private hasActiveTool = false;
   private expandedToolId: string | null = null;
   private pendingPermissionRequestId: string | null = null;
@@ -1140,7 +1149,7 @@ export class WebviewController {
   private updateInputControls(restoreFocus = true): void {
     const inputLocked = this.inputLocks.size > 0;
     const atAttachmentLimit = this.attachments.length >= MAX_ATTACHMENTS;
-    let hint = DEFAULT_INPUT_HINT;
+    let hint = this.commandHint ?? DEFAULT_INPUT_HINT;
     for (const lockMessage of this.inputLocks.values()) {
       hint = lockMessage;
     }
@@ -1232,10 +1241,17 @@ export class WebviewController {
   showCommandAutocomplete(commands: AvailableCommand[]): void {
     const { commandAutocomplete, inputEl } = this.elements;
     if (commands.length === 0) {
+      if (!this.hasCommandCatalog) {
+        this.hideCommandAutocomplete();
+        return;
+      }
       commandAutocomplete.innerHTML =
-        '<div class="no-commands" role="option" aria-disabled="true" aria-selected="false">No matching ACP commands. This list only includes commands advertised by the active agent; its own app may offer others.</div>';
+        '<div class="no-commands" role="option" aria-disabled="true" aria-selected="false">' +
+        NO_MATCHING_COMMANDS_MESSAGE +
+        "</div>";
       commandAutocomplete.classList.add("visible");
       inputEl.setAttribute("aria-expanded", "true");
+      this.setCommandHint(NO_MATCHING_COMMANDS_MESSAGE);
       return;
     }
 
@@ -1266,6 +1282,7 @@ export class WebviewController {
 
     commandAutocomplete.classList.add("visible");
     inputEl.setAttribute("aria-expanded", "true");
+    this.setCommandHint(null);
   }
 
   hideCommandAutocomplete(): void {
@@ -1274,6 +1291,49 @@ export class WebviewController {
     commandAutocomplete.innerHTML = "";
     this.selectedCommandIndex = -1;
     inputEl.setAttribute("aria-expanded", "false");
+    this.setCommandHint(null);
+  }
+
+  /**
+   * Mirrors autocomplete state into the input hint live region so screen reader
+   * users hear why a slash word produced no commands.
+   */
+  private setCommandHint(hint: string | null): void {
+    if (this.commandHint === hint) return;
+    this.commandHint = hint;
+    this.updateInputControls(false);
+  }
+
+  /**
+   * Applies an agent command snapshot, refreshing an already open list so it
+   * never renders a stale catalog while keeping the user's highlighted command
+   * highlighted when the update still advertises it.
+   */
+  private applyAvailableCommands(commands: AvailableCommand[]): void {
+    const wasVisible =
+      this.elements.commandAutocomplete.classList.contains("visible");
+    const selectedName =
+      wasVisible && this.selectedCommandIndex >= 0
+        ? this.getFilteredCommands(this.elements.inputEl.value.split(/\s/)[0])[
+            this.selectedCommandIndex
+          ]?.name
+        : undefined;
+
+    this.availableCommands = commands;
+    this.hasCommandCatalog = true;
+    if (!wasVisible) return;
+
+    this.updateAutocomplete();
+    if (selectedName === undefined) return;
+
+    const filtered = this.getFilteredCommands(
+      this.elements.inputEl.value.split(/\s/)[0]
+    );
+    const index = filtered.findIndex((cmd) => cmd.name === selectedName);
+    if (index > 0) {
+      this.selectedCommandIndex = index;
+      this.showCommandAutocomplete(filtered);
+    }
   }
 
   selectCommand(index: number): void {
@@ -1366,6 +1426,7 @@ export class WebviewController {
     this.currentAssistantText = "";
     this.messageTexts.clear();
     this.availableCommands = [];
+    this.hasCommandCatalog = false;
     this.hideCommandAutocomplete();
     this.hidePlan();
     this.hideThought();
@@ -1828,10 +1889,7 @@ export class WebviewController {
         }
 
         if (msg.commands && Array.isArray(msg.commands)) {
-          this.availableCommands = msg.commands;
-          if (this.elements.commandAutocomplete.classList.contains("visible")) {
-            this.updateAutocomplete();
-          }
+          this.applyAvailableCommands(msg.commands);
         }
         break;
       }
@@ -1843,10 +1901,7 @@ export class WebviewController {
         break;
       case "availableCommands":
         if (msg.commands && Array.isArray(msg.commands)) {
-          this.availableCommands = msg.commands;
-          if (this.elements.commandAutocomplete.classList.contains("visible")) {
-            this.updateAutocomplete();
-          }
+          this.applyAvailableCommands(msg.commands);
         }
         break;
       case "plan":

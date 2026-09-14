@@ -1217,6 +1217,18 @@ suite("Webview", () => {
         );
       });
 
+      test("typing a slash before a command catalog arrives keeps Escape behavior", () => {
+        elements.inputEl.value = "/usr/local";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Escape" })
+        );
+        assert.strictEqual(elements.inputEl.value, "");
+      });
+
       test("typing a command the agent did not advertise shows an explanation", () => {
         controller.handleMessage({
           type: "availableCommands",
@@ -1326,6 +1338,61 @@ suite("Webview", () => {
             elements.commandAutocomplete.querySelectorAll(".command-name")
           ).map((element) => element.textContent),
           ["review"]
+        );
+      });
+
+      test("a command update keeps the highlighted command highlighted", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "ArrowDown" })
+        );
+
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: [
+            { name: "clear", description: "Clear chat" },
+            { name: "help", description: "Show help" },
+            { name: "history", description: "Show history" },
+          ],
+        });
+
+        assert.strictEqual(
+          elements.commandAutocomplete.querySelector(
+            ".command-item.selected .command-name"
+          )?.textContent,
+          "history"
+        );
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Enter" })
+        );
+        assert.strictEqual(elements.inputEl.value, "/history ");
+      });
+
+      test("unmatched command explanation is announced through the input hint", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/mcps";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        assert.strictEqual(
+          elements.inputHint.textContent,
+          "No matching ACP commands. This list only includes commands advertised by the active agent; its own app may offer others."
+        );
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Escape" })
+        );
+        assert.strictEqual(
+          elements.inputHint.textContent,
+          "Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent."
         );
       });
 
