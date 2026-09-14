@@ -1,4 +1,5 @@
 import * as assert from "assert";
+import { EventEmitter, once } from "events";
 import * as vscode from "vscode";
 import {
   chmod,
@@ -291,6 +292,7 @@ interface FakeWebview {
     show: (preserveFocus?: boolean) => void;
   };
   messages: Record<string, unknown>[];
+  messageEvents: EventEmitter;
   shownWith: (boolean | undefined)[];
 }
 
@@ -299,11 +301,13 @@ function createFakeWebview(
 ): FakeWebview {
   const messages: Record<string, unknown>[] = [];
   const shownWith: (boolean | undefined)[] = [];
+  const messageEvents = new EventEmitter();
   return {
     view: {
       webview: {
         postMessage: async (message: Record<string, unknown>) => {
-          messages.push(message);
+          const index = messages.push(message) - 1;
+          messageEvents.emit(`message:${index}`, message);
           return delivery;
         },
       },
@@ -313,6 +317,7 @@ function createFakeWebview(
     },
     messages,
     shownWith,
+    messageEvents,
   };
 }
 
@@ -408,15 +413,20 @@ async function decideTerminalRequest(
       ],
     })
   );
-  for (
-    let attempt = 0;
-    webview.messages.length === pendingCount && attempt < 100;
-    attempt++
-  ) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
-  const posted = webview.messages[pendingCount];
-  const requestId = posted?.requestId;
+  const postedMessage = webview.messages[pendingCount];
+  const posted = await Promise.race([
+    postedMessage
+      ? Promise.resolve(postedMessage)
+      : once(webview.messageEvents, `message:${pendingCount}`).then(
+          ([message]) => message as Record<string, unknown>
+        ),
+    decision.then((outcome) => {
+      assert.fail(
+        `permission request settled before posting: ${JSON.stringify(outcome)}`
+      );
+    }),
+  ]);
+  const requestId = posted.requestId;
   if (typeof requestId !== "string") {
     assert.fail("permission request must include a string request id");
   }
