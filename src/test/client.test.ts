@@ -205,7 +205,16 @@ suite("ACPClient with Mock Server", () => {
         args: [],
       },
       spawn: mockSpawn,
-      skipAvailabilityCheck: true,
+      resolutionOptions: () => ({
+        platform: "linux",
+        env: { PATH: "/test/bin" },
+        fileSystem: {
+          isFile: (path) => path === "/test/bin/mock",
+          isExecutable: (path) => path === "/test/bin/mock",
+          readText: () => undefined,
+          realpath: (path) => path,
+        },
+      }),
     });
   });
 
@@ -270,6 +279,39 @@ suite("ACPClient with Mock Server", () => {
           shell: false,
         },
       });
+    });
+
+    test("never passes a relative command from public options to spawn", async () => {
+      let spawnCalled = false;
+      client.dispose();
+      client = new ACPClient({
+        agentConfig: {
+          id: "mock-agent",
+          name: "Mock Agent",
+          command: "./workspace-payload",
+          args: [],
+        },
+        spawn() {
+          spawnCalled = true;
+          return createMockProcess() as unknown as ChildProcess;
+        },
+        resolutionOptions: () => ({
+          platform: "linux",
+          env: { PATH: "/trusted/bin" },
+          fileSystem: {
+            isFile: () => true,
+            isExecutable: () => true,
+            readText: () => undefined,
+            realpath: (path) => path,
+          },
+        }),
+      });
+
+      await assert.rejects(
+        client.connect(),
+        /Agent "Mock Agent" is unavailable/
+      );
+      assert.strictEqual(spawnCalled, false);
     });
 
     test("does not expose a configured executable path when unavailable", async () => {

@@ -229,7 +229,10 @@ function canonicalFile(
 
   try {
     const canonical = context.fileSystem.realpath(candidate);
-    if (!allowExcluded && isExcluded(canonical, context)) {
+    if (
+      !isRooted(canonical, context.platform) ||
+      (!allowExcluded && isExcluded(canonical, context))
+    ) {
       return undefined;
     }
     return canonical;

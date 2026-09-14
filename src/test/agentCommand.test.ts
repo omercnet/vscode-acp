@@ -315,4 +315,19 @@ suite("agent command resolution", () => {
 
     assert.strictEqual(result, undefined);
   });
+
+  test("rejects a filesystem result that is not an absolute launch path", () => {
+    const result = resolveAgentCommand("opencode", [], {
+      platform: "linux",
+      env: { PATH: "/trusted/bin" },
+      fileSystem: {
+        isFile: () => true,
+        isExecutable: () => true,
+        readText: () => undefined,
+        realpath: () => "relative/opencode",
+      },
+    });
+
+    assert.strictEqual(result, undefined);
+  });
 });

@@ -212,7 +212,6 @@ export type SpawnFunction = (
 export interface ACPClientOptions {
   agentConfig?: AgentConfig;
   spawn?: SpawnFunction;
-  skipAvailabilityCheck?: boolean;
   resolutionOptions?: () => AgentCommandResolutionOptions;
 }
 
@@ -254,19 +253,16 @@ export class ACPClient {
   private releaseTerminalHandler: ReleaseTerminalCallback | null = null;
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
-  private skipAvailabilityCheck: boolean;
   private resolutionOptions: () => AgentCommandResolutionOptions;
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
       this.agentConfig = options;
       this.spawnFn = nodeSpawn as SpawnFunction;
-      this.skipAvailabilityCheck = false;
       this.resolutionOptions = () => ({});
     } else {
       this.agentConfig = options?.agentConfig ?? getDefaultAgent();
       this.spawnFn = options?.spawn ?? (nodeSpawn as SpawnFunction);
-      this.skipAvailabilityCheck = options?.skipAvailabilityCheck ?? false;
       this.resolutionOptions = options?.resolutionOptions ?? (() => ({}));
     }
   }
@@ -361,13 +357,7 @@ export class ACPClient {
     }
 
     const resolutionOptions = this.resolutionOptions();
-    const launch = this.skipAvailabilityCheck
-      ? {
-          command: this.agentConfig.command,
-          args: [...this.agentConfig.args],
-          source: "explicit executable" as const,
-        }
-      : resolveAgentCommand(this.agentConfig, resolutionOptions);
+    const launch = resolveAgentCommand(this.agentConfig, resolutionOptions);
     if (!launch) {
       throw new Error(
         `Agent "${this.agentConfig.name}" is unavailable. ` +
