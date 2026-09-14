@@ -110,11 +110,11 @@ export class McpSecretRedactor {
       return new Error(this.redact(String(error)));
     }
     const message = this.redact(error.message);
-    if (message === error.message) {
-      return error;
-    }
     if (error instanceof acp.RequestError) {
       return new acp.RequestError(error.code, message);
+    }
+    if (message === error.message) {
+      return error;
     }
     const redacted = new Error(message);
     redacted.name = error.name;
@@ -341,9 +341,11 @@ function resolveEnvironmentReferences(
     );
   }
 
+  let substituted = false;
   const resolved = value.replace(
     ENV_REFERENCE,
     (_reference, variable: string) => {
+      substituted = true;
       if (!ENV_NAME.test(variable)) {
         fail(
           "MCP_CONFIG_MALFORMED",
@@ -366,7 +368,7 @@ function resolveEnvironmentReferences(
   if (resolved.length > MAX_STRING_LENGTH || resolved.includes("\0")) {
     fail("MCP_CONFIG_UNSAFE", `${location} resolves to an unsafe value`);
   }
-  if (resolved.length > 0) {
+  if (substituted && resolved.length > 0) {
     sensitiveValues?.add(resolved);
   }
   return resolved;

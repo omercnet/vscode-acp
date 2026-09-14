@@ -165,7 +165,7 @@
             "type": "string"
           },
           "markdownDescription": "Absolute executable paths keyed by agent ID. User-defined paths remain available in Restricted Mode; workspace-defined paths require Workspace Trust."
-,
+        },
         "vscode-acp.mcpServers": {
           "type": "array",
           "scope": "resource",

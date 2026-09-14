@@ -164,6 +164,15 @@ suite("ACP error presentation", () => {
     );
   });
 
+  test("rejects malformed agent-managed authentication methods", () => {
+    assert.strictEqual(isAgentAuthMethod("browser"), false);
+    assert.strictEqual(isAgentAuthMethod({ id: "browser" }), false);
+    assert.strictEqual(
+      isAgentAuthMethod({ id: "browser", name: "Browser", type: "agent" }),
+      true
+    );
+  });
+
   test("does not repeat the summary for the SDK's default message", () => {
     assert.strictEqual(
       formatACPError(RequestError.authRequired()),

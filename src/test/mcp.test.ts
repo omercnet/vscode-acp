@@ -228,6 +228,27 @@ suite("MCP server configuration", () => {
     );
   });
 
+  test("does not register literal configuration values as secrets", () => {
+    const sensitiveValues = new Set<string>();
+    validateMcpServers(
+      [
+        {
+          name: "stdio",
+          command: process.execPath,
+          env: [
+            { name: "NO_COLOR", value: "1" },
+            { name: "MODE", value: "readonly" },
+          ],
+        },
+      ],
+      {},
+      {},
+      sensitiveValues
+    );
+
+    assert.deepStrictEqual([...sensitiveValues], []);
+  });
+
   test("requires advertised HTTP and SSE capabilities", () => {
     const http = {
       type: "http",
@@ -312,22 +333,19 @@ suite("MCP server configuration", () => {
     assert.ok(!diagnostic.includes("top-secret"));
   });
 
-  test("preserves RequestError identity and code while redacting secrets", () => {
+  test("preserves RequestError identity and code while dropping secret data", () => {
     const redactor = new McpSecretRedactor();
     redactor.add(["top-secret"]);
 
     const redacted = redactor.redactError(
-      new RequestError(-32000, "Authentication failed for top-secret", {
+      new RequestError(-32000, "Authentication failed", {
         token: "top-secret",
       })
     );
 
     assert.ok(redacted instanceof RequestError);
     assert.strictEqual(redacted.code, -32000);
-    assert.strictEqual(
-      redacted.message,
-      "Authentication failed for [redacted]"
-    );
+    assert.strictEqual(redacted.message, "Authentication failed");
     assert.strictEqual(redacted.data, undefined);
   });
 

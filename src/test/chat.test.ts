@@ -1014,6 +1014,7 @@ suite("ChatViewProvider", () => {
       // Private methods are test seams for the authentication lifecycle.
       const authenticationProvider =
         provider as unknown as AuthenticationTestProvider;
+
       const window = vscode.window as unknown as Record<string, unknown>;
       const descriptor = Object.getOwnPropertyDescriptor(
         vscode.window,
@@ -1569,11 +1570,60 @@ suite("ChatViewProvider", () => {
 
     assert.deepStrictEqual(messages.at(-1), {
       type: "agentError",
-      text: "Agent reported an error. Check the ACP output channel for details.",
+      text: "Agent reported an error. See the Extension Host log for details.",
     });
   });
 
   suite("Session history", () => {
+    test("preserves the loaded session MCP resource when saving", async () => {
+      class LoadingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const remoteResource =
+        "vscode-remote://ssh-remote+host/workspace-folder-b";
+      const workspaceState = new TestMemento();
+      const session = {
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: "/workspace-folder-b",
+        configurationResource: remoteResource,
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Stored in folder B",
+        messageCount: 1,
+      };
+      await workspaceState.update("vscode-acp.sessionHistory", [session]);
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LoadingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        loadStoredSession(value: typeof session): Promise<void>;
+        saveCurrentSession(preview?: string): Promise<void>;
+      };
+
+      await sessionProvider.loadStoredSession(session);
+      await sessionProvider.saveCurrentSession("Continued in folder B");
+
+      const [saved] = workspaceState.get<
+        Array<{ cwd: string; configurationResource?: string }>
+      >("vscode-acp.sessionHistory")!;
+      assert.strictEqual(saved.cwd, session.cwd);
+      assert.strictEqual(saved.configurationResource, remoteResource);
+    });
     test("persists active session metadata in workspace state", async () => {
       const workspaceState = new TestMemento();
       const provider = new ChatViewProvider(

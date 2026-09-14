@@ -67,7 +67,9 @@ export function isAgentAuthMethod(
   const candidate = method as Record<string, unknown>;
   return (
     typeof candidate.id === "string" &&
+    candidate.id.length > 0 &&
     typeof candidate.name === "string" &&
+    candidate.name.length > 0 &&
     (candidate.description === undefined ||
       typeof candidate.description === "string") &&
     (candidate.type === undefined || candidate.type === "agent")

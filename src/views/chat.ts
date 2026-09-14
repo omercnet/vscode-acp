@@ -56,6 +56,8 @@ interface StoredSession {
   messageCount: number;
 }
 
+type SessionContext = Pick<StoredSession, "cwd" | "configurationResource">;
+
 interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
@@ -129,6 +131,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private sessionTransition: Promise<void> | null = null;
   private sessionTransitionLabel: string | null = null;
   private sessionTransitionInputPaused = false;
+  private activeSessionContext: SessionContext | null = null;
   private conversationGeneration = 0;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
@@ -182,6 +185,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.hasSession = false;
         this.connectionStart = null;
         this.sessionStart = null;
+        this.activeSessionContext = null;
         this.expirePermissionRequests();
       }
       this.postMessage({ type: "connectionState", state });
@@ -508,7 +512,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ? Math.max(1, Math.min(200, Math.floor(configuredLimit)))
       : DEFAULT_SESSION_HISTORY_LIMIT;
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const cwd = workspaceFolder?.uri.fsPath || process.cwd();
+    const sessionContext = this.activeSessionContext ?? {
+      cwd: workspaceFolder?.uri.fsPath || process.cwd(),
+      configurationResource: workspaceFolder?.uri.toString(),
+    };
+    const cwd = sessionContext.cwd;
     const history = this.getStoredSessions();
     const existing = history.find(
       (session) =>
@@ -523,8 +531,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const entry: StoredSession = {
       sessionId,
       agentId: this.acpClient.getAgentId(),
+      configurationResource: sessionContext.configurationResource,
       cwd,
-      configurationResource: workspaceFolder?.uri.toString(),
       createdAt: existing?.createdAt ?? now,
       lastUsedAt: now,
       preview: normalizedPreview || existing?.preview || "",
@@ -546,6 +554,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async loadStoredSession(session: StoredSession): Promise<void> {
     await this.runSessionTransition("Restoring conversation…", async () => {
+      const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
       this.conversationGeneration++;
@@ -563,6 +572,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ...this.getSessionParameters(session.cwd, resource),
         };
         await this.acpClient.loadSession(request);
+        this.activeSessionContext = {
+          cwd: session.cwd,
+          configurationResource: session.configurationResource,
+        };
         this.hasSession = true;
         this.hasRestoredModeModel = false;
         const history = this.getStoredSessions().map((entry) =>
@@ -595,6 +608,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.hasSession = hadSession;
         this.hasRestoredModeModel = hadRestoredModeModel;
         const redacted = this.mcpSecretRedactor.redactError(error);
+        this.activeSessionContext = previousSessionContext;
         this.postMessage({
           type: "replayFailed",
           text: formatACPError(redacted),
@@ -635,9 +649,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       /(\w+Error):\s*(\w+)?\s*\n?\s*data:\s*\{([^}]+)\}/
     );
     if (errorMatch) {
+      console.error(
+        "[ACP stderr]",
+        this.mcpSecretRedactor.redact(this.stderrBuffer)
+      );
       this.postMessage({
         type: "agentError",
-        text: "Agent reported an error. Check the ACP output channel for details.",
+        text: "Agent reported an error. See the Extension Host log for details.",
       });
       this.stderrBuffer = "";
     }
@@ -1001,6 +1019,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.terminals.clear();
     this.mcpSecretRedactor.clear();
+    this.activeSessionContext = null;
 
     this.expirePermissionRequests();
     this.configurationSubscription.dispose();
@@ -1267,6 +1286,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           const resource = workspaceFolder?.uri;
           const request = this.getSessionParameters(workingDir, resource);
           await this.createSessionWithAuthentication(request);
+          this.activeSessionContext = {
+            cwd: workingDir,
+            configurationResource: resource?.toString(),
+          };
           this.hasSession = true;
           this.sendSessionMetadata();
         }
@@ -1351,6 +1374,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.conversationGeneration++;
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
+      this.activeSessionContext = null;
       this.postMessage({ type: "agentChanged", agentId });
       this.postMessage({ type: "sessionMetadata", modes: null, models: null });
     }
@@ -1394,6 +1418,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.conversationGeneration++;
       this.hasSession = false;
       this.hasRestoredModeModel = false;
+      this.activeSessionContext = null;
       this.postMessage({ type: "chatCleared" });
       this.postMessage({ type: "sessionMetadata", modes: null, models: null });
       this.settleSessionLock();
@@ -1401,6 +1426,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     await this.runSessionTransition("Starting a new session…", async () => {
+      const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
       this.conversationGeneration++;
@@ -1415,6 +1441,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         );
         await this.createSessionWithAuthentication(request);
         this.hasSession = true;
+        this.activeSessionContext = {
+          cwd: workingDir,
+          configurationResource: workspaceFolder?.uri.toString(),
+        };
         this.hasRestoredModeModel = false;
         this.postMessage({ type: "chatCleared" });
         this.sendSessionMetadata();
@@ -1423,6 +1453,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.hasRestoredModeModel = hadRestoredModeModel;
         this.postACPError("Failed to create new session", error);
         this.sendSessionMetadata();
+        this.activeSessionContext = previousSessionContext;
       }
     });
   }
