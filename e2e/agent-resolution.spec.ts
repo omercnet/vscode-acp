@@ -1,0 +1,156 @@
+import {
+  test,
+  expect,
+  _electron as electron,
+  type Page,
+} from "@playwright/test";
+import { mkdir, rm, writeFile } from "fs/promises";
+import { join } from "path";
+import {
+  cmdOrCtrl,
+  findVSCodeExecutable,
+  PROJECT_ROOT,
+  VSCODE_TEST_DIR,
+} from "./utils";
+
+const DEMO_DIR = join(VSCODE_TEST_DIR, "agent-resolution-demo");
+const USER_DATA_DIR = join(VSCODE_TEST_DIR, "user-data-agent-resolution");
+const WORKSPACE_DIR = join(DEMO_DIR, "untrusted-workspace");
+const WORKSPACE_PAYLOAD = join(WORKSPACE_DIR, "tools", "opencode");
+const TRUSTED_AGENT = join(DEMO_DIR, "trusted-install", "bin", "opencode");
+const SCREENSHOT_PATH = join(
+  PROJECT_ROOT,
+  "screenshots",
+  "restricted-mode-agent-resolution.png"
+);
+
+/**
+ * A minimal ACP agent that reports the executable the extension launched, so
+ * the rendered reply identifies which binary actually ran.
+ */
+const agentSource = (label: string) => `#!/usr/bin/env node
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  const lines = buffer.split("\\n");
+  buffer = lines.pop() || "";
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    const params = message.params || {};
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+    } else if (message.method === "session/new") {
+      send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "agent-resolution", modes: null } });
+    } else if (message.method === "session/prompt") {
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            messageId: "agent-1",
+            content: { type: "text", text: "${label} running from " + __filename },
+          },
+        },
+      });
+      send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+    } else if (message.id !== undefined) {
+      send({ jsonrpc: "2.0", id: message.id, result: {} });
+    }
+  }
+});
+`;
+
+async function launchRestrictedHost() {
+  const settingsDir = join(USER_DATA_DIR, "User");
+  await mkdir(settingsDir, { recursive: true });
+  await writeFile(
+    join(settingsDir, "settings.json"),
+    JSON.stringify({
+      "window.titleBarStyle": "custom",
+      "security.workspace.trust.startupPrompt": "never",
+      "security.workspace.trust.banner": "always",
+      "security.workspace.trust.untrustedFiles": "open",
+      "vscode-acp.agentPaths": { opencode: TRUSTED_AGENT },
+    })
+  );
+  const executablePath = await findVSCodeExecutable();
+  return electron.launch({
+    executablePath,
+    args: [
+      `--extensionDevelopmentPath=${PROJECT_ROOT}`,
+      `--user-data-dir=${USER_DATA_DIR}`,
+      "--disable-gpu-sandbox",
+      "--no-sandbox",
+      "--skip-release-notes",
+      "--skip-welcome",
+      "--disable-telemetry",
+      "--window-position=-2000,-2000",
+      WORKSPACE_DIR,
+    ],
+    timeout: 60000,
+    env: { ...process.env, VSCODE_SKIP_PRELAUNCH: "1" },
+  });
+}
+
+async function focusChat(window: Page) {
+  await window.waitForLoadState("domcontentloaded");
+  await window.setViewportSize({ width: 1280, height: 800 });
+  await window.waitForTimeout(3000);
+  await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
+  await window.waitForTimeout(500);
+  await window.keyboard.type("ACP: Start Chat");
+  await window.waitForTimeout(300);
+  await window.keyboard.press("Enter");
+  await window.waitForTimeout(3000);
+  return window
+    .frameLocator("iframe.webview")
+    .first()
+    .frameLocator("#active-frame");
+}
+
+test("ignores a workspace executable override in Restricted Mode", async ({}, testInfo) => {
+  await rm(DEMO_DIR, { recursive: true, force: true });
+  await mkdir(join(WORKSPACE_DIR, ".vscode"), { recursive: true });
+  await mkdir(join(WORKSPACE_DIR, "tools"), { recursive: true });
+  await mkdir(join(DEMO_DIR, "trusted-install", "bin"), { recursive: true });
+  await writeFile(join(WORKSPACE_DIR, "README.md"), "# untrusted repository\n");
+  await writeFile(
+    join(WORKSPACE_DIR, ".vscode", "settings.json"),
+    JSON.stringify({ "vscode-acp.agentPaths": { opencode: WORKSPACE_PAYLOAD } })
+  );
+  await writeFile(WORKSPACE_PAYLOAD, agentSource("MALICIOUS-WORKSPACE-AGENT"), {
+    mode: 0o755,
+  });
+  await writeFile(TRUSTED_AGENT, agentSource("TRUSTED-AGENT"), {
+    mode: 0o755,
+  });
+
+  const host = await launchRestrictedHost();
+  try {
+    const window = await host.firstWindow();
+    const frame = await focusChat(window);
+    await expect(frame.locator("#connect-btn")).toBeHidden();
+    await frame.locator("#input").fill("Which executable is running you?");
+    await frame.locator("#input").press("Enter");
+
+    await expect(
+      frame
+        .locator(".message.assistant")
+        .filter({ hasText: "TRUSTED-AGENT running from" })
+    ).toContainText(TRUSTED_AGENT);
+    await expect(frame.getByText("MALICIOUS-WORKSPACE-AGENT")).toHaveCount(0);
+
+    await window.waitForTimeout(500);
+    await window.screenshot({ path: SCREENSHOT_PATH });
+    await window.screenshot({
+      path: testInfo.outputPath("restricted-mode-agent-resolution.png"),
+    });
+  } finally {
+    await host.close();
+    await rm(DEMO_DIR, { recursive: true, force: true });
+  }
+});
