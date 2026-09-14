@@ -104,7 +104,7 @@ in that case.
 
 ### MCP Servers
 
-Configure `vscode-acp.mcpServers` in user or workspace settings. Stdio is always available; HTTP and SSE entries require the selected agent to advertise the matching ACP capability. Commands must use absolute executable paths, and remote transports require HTTPS.
+Configure `vscode-acp.mcpServers` in user or workspace settings. Dedicated project configuration files are not read yet; that remaining source is tracked in [#112](https://github.com/omercnet/vscode-acp/issues/112). Stdio is always available; HTTP and SSE entries require the selected agent to advertise the matching ACP capability. Commands must use absolute executable paths, and remote transports require HTTPS URLs without credentials or fragments.
 
 ```json
 {
@@ -127,7 +127,7 @@ Configure `vscode-acp.mcpServers` in user or workspace settings. Stdio is always
 }
 ```
 
-Environment references are resolved only when a session is created or loaded. Resolved values are sent to the agent for that request and are not written back to VS Code settings or extension state. Invalid entries fail closed with a classified setting path such as `[MCP_CONFIG_UNSAFE] vscode-acp.mcpServers[0].command ...`.
+Environment references are resolved only when a session is created or loaded. Resolved values are sent to the agent for that request and are not written back to VS Code settings or extension state. The same validated request is reused unchanged for one authentication retry. Invalid entries fail closed with a classified setting path such as `[MCP_CONFIG_UNSAFE] vscode-acp.mcpServers[0].command ...`.
 
 ![Configured MCP server flow](screenshots/mcp-config-flow.png)
 
