@@ -1007,7 +1007,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           : undefined;
         const request = {
           sessionId: session.sessionId,
-          ...this.getSessionParameters(session.cwd, resource),
+          ...(await this.getSessionParameters(session.cwd, resource)),
         };
         await this.acpClient.loadSession(request);
         if (generation !== this.conversationGeneration) {
@@ -2271,11 +2271,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return redacted;
   }
 
-  private getSessionParameters(
+  private async getSessionParameters(
     cwd: string,
     resource?: vscode.Uri
-  ): NewSessionRequest {
-    const configured = getConfiguredSession(
+  ): Promise<NewSessionRequest> {
+    const configured = await getConfiguredSession(
       cwd,
       this.acpClient.getMcpCapabilities(),
       process.env,
@@ -2440,7 +2440,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.ensureConnection();
         if (!this.hasSession) {
           const resource = workspaceFolder?.uri;
-          const request = this.getSessionParameters(workingDir, resource);
+          const request = await this.getSessionParameters(workingDir, resource);
           await this.createSessionWithAuthentication(request);
           this.activeSessionContext = {
             cwd: workingDir,
@@ -2666,7 +2666,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.ensureConnection();
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        const request = this.getSessionParameters(
+        const request = await this.getSessionParameters(
           workingDir,
           workspaceFolder?.uri
         );

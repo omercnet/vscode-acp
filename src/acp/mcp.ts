@@ -1,8 +1,10 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import * as acp from "@agentclientprotocol/sdk";
+import { parse, type ParseError } from "jsonc-parser";
 
 export const MCP_SERVERS_SETTING = "vscode-acp.mcpServers";
+export const MCP_PROJECT_CONFIG_PATH = ".vscode/mcp.json";
 export interface ConfiguredSession {
   parameters: acp.NewSessionRequest;
   sensitiveValues: readonly string[];
@@ -13,7 +15,8 @@ export type McpConfigurationErrorCode =
   | "MCP_CONFIG_DUPLICATE"
   | "MCP_CONFIG_UNSUPPORTED"
   | "MCP_CONFIG_UNSAFE"
-  | "MCP_CONFIG_ENV";
+  | "MCP_CONFIG_ENV"
+  | "MCP_CONFIG_READ";
 
 export class McpConfigurationError extends Error {
   constructor(
@@ -58,21 +61,184 @@ export function getMcpConfigurationResource(
   return cwdMatches.length === 1 ? cwdMatches[0].uri : vscode.Uri.file(cwd);
 }
 
-export function getConfiguredSession(
+export function getMcpProjectConfigurationUri(
+  cwd: string,
+  workspaceFolders = vscode.workspace.workspaceFolders,
+  resource?: vscode.Uri
+): vscode.Uri | undefined {
+  let workspaceFolder: vscode.WorkspaceFolder | undefined;
+  if (resource) {
+    workspaceFolder = workspaceFolders?.find(
+      (folder) => folder.uri.toString() === resource.toString()
+    );
+  } else {
+    const matches =
+      workspaceFolders?.filter((folder) => folder.uri.fsPath === cwd) ?? [];
+    if (matches.length === 1) workspaceFolder = matches[0];
+  }
+  return workspaceFolder
+    ? vscode.Uri.joinPath(workspaceFolder.uri, MCP_PROJECT_CONFIG_PATH)
+    : undefined;
+}
+export interface McpConfigurationSource {
+  readonly location: string;
+  readonly configuration: unknown;
+}
+interface McpSettingInspection {
+  readonly globalValue?: unknown;
+  readonly workspaceValue?: unknown;
+  readonly workspaceFolderValue?: unknown;
+}
+
+export function selectMcpSettingSources(
+  inspected: McpSettingInspection | undefined,
+  isTrusted: boolean
+): McpConfigurationSource[] {
+  const sources: McpConfigurationSource[] = [
+    {
+      location: `${MCP_SERVERS_SETTING} (user)`,
+      configuration: inspected?.globalValue ?? [],
+    },
+  ];
+  if (isTrusted) {
+    sources.push(
+      {
+        location: `${MCP_SERVERS_SETTING} (workspace)`,
+        configuration: inspected?.workspaceValue ?? [],
+      },
+      {
+        location: `${MCP_SERVERS_SETTING} (workspace folder)`,
+        configuration: inspected?.workspaceFolderValue ?? [],
+      }
+    );
+  }
+  return sources;
+}
+
+export function parseMcpProjectConfiguration(contents: Uint8Array): unknown[] {
+  if (contents.byteLength > MAX_CONFIGURATION_BYTES) {
+    fail(
+      "MCP_CONFIG_UNSAFE",
+      `${MCP_PROJECT_CONFIG_PATH} exceeds the ${MAX_CONFIGURATION_BYTES}-byte limit`
+    );
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+  } catch {
+    fail(
+      "MCP_CONFIG_MALFORMED",
+      `${MCP_PROJECT_CONFIG_PATH} must contain valid UTF-8`
+    );
+  }
+  const errors: ParseError[] = [];
+  const parsed = parse(text, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  }) as unknown;
+  if (errors.length > 0) {
+    fail(
+      "MCP_CONFIG_MALFORMED",
+      `${MCP_PROJECT_CONFIG_PATH} contains invalid JSONC at offset ${errors[0].offset}`
+    );
+  }
+
+  const root = requireObject(parsed, MCP_PROJECT_CONFIG_PATH);
+  requireKeys(root, MCP_PROJECT_CONFIG_PATH, ["servers"]);
+  const servers = requireObject(
+    root.servers,
+    `${MCP_PROJECT_CONFIG_PATH}.servers`
+  );
+  return Object.entries(servers).map(([name, value]) => {
+    const location = `${MCP_PROJECT_CONFIG_PATH}.servers[${JSON.stringify(name)}]`;
+    const server = requireObject(value, location);
+    if (Object.prototype.hasOwnProperty.call(server, "name")) {
+      fail(
+        "MCP_CONFIG_MALFORMED",
+        `${location}.name is unsupported; the object key is the server name`
+      );
+    }
+    const normalized: JsonObject = { ...server, name };
+    const type = server.type === undefined ? "stdio" : server.type;
+    if (type === "stdio" && server.env !== undefined) {
+      normalized.env = projectNamedValues(server.env, `${location}.env`);
+    }
+    if ((type === "http" || type === "sse") && server.headers !== undefined) {
+      normalized.headers = projectNamedValues(
+        server.headers,
+        `${location}.headers`
+      );
+    }
+    return normalized;
+  });
+}
+
+export function configureMcpServers(
+  sources: readonly McpConfigurationSource[],
+  capabilities: acp.McpCapabilities,
+  environment: NodeJS.ProcessEnv = process.env,
+  sensitiveValues = new Set<string>()
+): acp.McpServer[] {
+  const merged = new Map<string, acp.McpServer>();
+  for (const source of sources) {
+    const servers = validateMcpServers(
+      source.configuration,
+      capabilities,
+      environment,
+      sensitiveValues,
+      source.location
+    );
+    for (const server of servers) {
+      merged.set(server.name.toLowerCase(), server);
+    }
+  }
+  return validateMcpServers(
+    [...merged.values()],
+    capabilities,
+    environment,
+    sensitiveValues
+  );
+}
+
+export async function getConfiguredSession(
   cwd: string,
   capabilities: acp.McpCapabilities,
   environment: NodeJS.ProcessEnv = process.env,
   resource?: vscode.Uri
-): ConfiguredSession {
-  const configuration = vscode.workspace
-    .getConfiguration(
-      "vscode-acp",
-      getMcpConfigurationResource(cwd, undefined, resource)
-    )
-    .get<unknown>("mcpServers", []);
+): Promise<ConfiguredSession> {
+  const configurationResource = getMcpConfigurationResource(
+    cwd,
+    undefined,
+    resource
+  );
+  const configuration = vscode.workspace.getConfiguration(
+    "vscode-acp",
+    configurationResource
+  );
+  const inspected = configuration.inspect<unknown>("mcpServers");
+  const sources = selectMcpSettingSources(
+    inspected,
+    vscode.workspace.isTrusted
+  );
+
+  if (vscode.workspace.isTrusted) {
+    const projectUri = getMcpProjectConfigurationUri(cwd, undefined, resource);
+    if (projectUri) {
+      const projectConfiguration =
+        await readMcpProjectConfiguration(projectUri);
+      if (projectConfiguration) {
+        sources.push({
+          location: `${MCP_PROJECT_CONFIG_PATH}.servers`,
+          configuration: projectConfiguration,
+        });
+      }
+    }
+  }
+
   const sensitiveValues = new Set<string>();
-  const mcpServers = validateMcpServers(
-    configuration,
+  const mcpServers = configureMcpServers(
+    sources,
     capabilities,
     environment,
     sensitiveValues
@@ -81,6 +247,41 @@ export function getConfiguredSession(
     parameters: { cwd, mcpServers },
     sensitiveValues: [...sensitiveValues],
   };
+}
+
+async function readMcpProjectConfiguration(
+  uri: vscode.Uri
+): Promise<unknown[] | undefined> {
+  let contents: Uint8Array;
+  try {
+    contents = await vscode.workspace.fs.readFile(uri);
+  } catch (error) {
+    if (isFileNotFound(error)) return undefined;
+    fail("MCP_CONFIG_READ", `${MCP_PROJECT_CONFIG_PATH} could not be read`);
+  }
+  return parseMcpProjectConfiguration(contents);
+}
+
+function isFileNotFound(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error.code === "FileNotFound" || error.code === "ENOENT")
+  );
+}
+
+function projectNamedValues(
+  value: unknown,
+  location: string
+): Array<{ name: string; value: string }> {
+  const object = requireObject(value, location);
+  return Object.entries(object).map(([name, entryValue]) => {
+    if (typeof entryValue !== "string") {
+      fail("MCP_CONFIG_MALFORMED", `${location}.${name} must be a string`);
+    }
+    return { name, value: entryValue };
+  });
 }
 
 export class McpSecretRedactor {
@@ -126,21 +327,22 @@ export function validateMcpServers(
   configuration: unknown,
   capabilities: acp.McpCapabilities,
   environment: NodeJS.ProcessEnv = process.env,
-  sensitiveValues?: Set<string>
+  sensitiveValues?: Set<string>,
+  locationBase = MCP_SERVERS_SETTING
 ): acp.McpServer[] {
   if (!Array.isArray(configuration)) {
-    fail("MCP_CONFIG_MALFORMED", `${MCP_SERVERS_SETTING} must be an array`);
+    fail("MCP_CONFIG_MALFORMED", `${locationBase} must be an array`);
   }
   if (configuration.length > MAX_SERVERS) {
     fail(
       "MCP_CONFIG_MALFORMED",
-      `${MCP_SERVERS_SETTING} supports at most ${MAX_SERVERS} entries`
+      `${locationBase} supports at most ${MAX_SERVERS} entries`
     );
   }
 
   const names = new Set<string>();
   const servers = configuration.map((entry, index) => {
-    const location = `${MCP_SERVERS_SETTING}[${index}]`;
+    const location = `${locationBase}[${index}]`;
     const object = requireObject(entry, location);
     const type = object.type === undefined ? "stdio" : object.type;
     if (type !== "stdio" && type !== "http" && type !== "sse") {
@@ -194,7 +396,7 @@ export function validateMcpServers(
   ) {
     fail(
       "MCP_CONFIG_UNSAFE",
-      `${MCP_SERVERS_SETTING} exceeds the ${MAX_CONFIGURATION_BYTES}-byte limit after environment resolution`
+      `${locationBase} exceeds the ${MAX_CONFIGURATION_BYTES}-byte limit after environment resolution`
     );
   }
   return servers;

@@ -19,7 +19,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **🔄 Streaming Responses** — Watch the AI think in real-time
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
-- **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user or workspace settings
+- **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user settings, workspace settings, or a trusted `.vscode/mcp.json`
 - **📎 File Attachments** — Reference current or workspace files without embedding their contents
 
 ## Requirements
@@ -118,7 +118,16 @@ in that case.
 
 ### MCP Servers
 
-Configure `vscode-acp.mcpServers` in user or workspace settings. Dedicated project configuration files are not read yet; that remaining source is tracked in [#112](https://github.com/omercnet/vscode-acp/issues/112). Stdio is always available; HTTP and SSE entries require the selected agent to advertise the matching ACP capability. Commands must use absolute executable paths, and remote transports require HTTPS URLs without credentials or fragments.
+VSCode ACP accepts MCP servers from these sources, in ascending precedence:
+
+1. User `vscode-acp.mcpServers` settings
+2. Workspace `vscode-acp.mcpServers` settings
+3. Workspace-folder `vscode-acp.mcpServers` settings in a multi-root workspace
+4. The selected folder's `.vscode/mcp.json`
+
+Names are compared case-insensitively. A higher-precedence source replaces a lower-precedence server with the same name; duplicate names inside one source are rejected. Workspace and project sources are ignored in Restricted Mode, while user settings remain available. For multi-root and remote workspaces, the session's exact workspace-folder URI selects both resource-scoped settings and `.vscode/mcp.json`; project files are read through the VS Code workspace filesystem rather than reconstructed as local paths.
+
+Settings use the ACP array shape:
 
 ```json
 {
@@ -128,22 +137,39 @@ Configure `vscode-acp.mcpServers` in user or workspace settings. Dedicated proje
       "command": "/usr/bin/node",
       "args": ["/absolute/path/to/server.js"],
       "env": [{ "name": "API_KEY", "value": "${env:MCP_API_KEY}" }]
-    },
-    {
-      "type": "http",
-      "name": "remote-tools",
-      "url": "https://tools.example.com/mcp",
-      "headers": [
-        { "name": "Authorization", "value": "Bearer ${env:MCP_API_TOKEN}" }
-      ]
     }
   ]
 }
 ```
 
-Environment references are resolved only when a session is created or loaded. Resolved values are sent to the agent for that request and are not written back to VS Code settings or extension state. The same validated request is reused unchanged for one authentication retry. Invalid entries fail closed with a classified setting path such as `[MCP_CONFIG_UNSAFE] vscode-acp.mcpServers[0].command ...`.
+Project configuration reuses [VS Code's established `.vscode/mcp.json` convention](https://code.visualstudio.com/docs/agents/reference/mcp-configuration). VSCode ACP supports its `servers` object with stdio `command`, `args`, and string-valued `env`, or HTTP/SSE `url` and string-valued `headers`. Unsupported sections and server properties fail closed rather than acquiring VS Code-specific behavior such as input prompts, OAuth, environment files, or sandbox configuration.
 
-![Configured MCP server flow](screenshots/mcp-config-flow.png)
+```json
+{
+  "servers": {
+    "filesystem": {
+      "command": "/usr/bin/node",
+      "args": ["/absolute/path/to/server.js"],
+      "env": { "API_KEY": "${env:MCP_API_KEY}" }
+    },
+    "remote-tools": {
+      "type": "http",
+      "url": "https://tools.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:MCP_API_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Stdio commands must be absolute executable paths. Remote transports require HTTPS URLs without credentials or fragments and require the selected agent to advertise the matching ACP capability. JSONC comments and trailing commas are accepted, but the file is size-bounded and schema-validated through the same MCP validator as settings.
+
+Environment references are supported only in stdio environment values and HTTP/SSE header values. They are resolved into a single immutable request snapshot when a new or saved session starts. That snapshot is reused unchanged for one authentication retry; edits apply only to the next session boundary. Resolved values are sent to the agent but are never written back to settings, `.vscode/mcp.json`, or extension state, and registered values are redacted from extension diagnostics. Invalid input fails closed with a structured code and source path such as `[MCP_CONFIG_UNSAFE] .vscode/mcp.json.servers[0].command ...`.
+
+![Configured project MCP server invocation](screenshots/mcp-project-config.png)
+
+![Configured project MCP server session load](screenshots/mcp-project-load.png)
 
 ## Development
 

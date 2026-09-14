@@ -2,9 +2,13 @@ import * as assert from "assert";
 import * as vscode from "vscode";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
+  configureMcpServers,
   getMcpConfigurationResource,
+  getMcpProjectConfigurationUri,
   McpConfigurationError,
   McpSecretRedactor,
+  parseMcpProjectConfiguration,
+  selectMcpSettingSources,
   validateMcpServers,
 } from "../acp/mcp";
 
@@ -46,6 +50,226 @@ suite("MCP server configuration", () => {
     assert.strictEqual(
       getMcpConfigurationResource(remoteUri.fsPath, workspaceFolders).scheme,
       "file"
+    );
+  });
+
+  test("selects the exact remote folder for project configuration", () => {
+    const localUri = vscode.Uri.file("/workspace");
+    const remoteUri = vscode.Uri.parse(
+      "vscode-remote://ssh-remote+host/workspace"
+    );
+    const workspaceFolders = [
+      { index: 0, name: "local", uri: localUri },
+      { index: 1, name: "remote", uri: remoteUri },
+    ];
+
+    const projectUri = getMcpProjectConfigurationUri(
+      remoteUri.fsPath,
+      workspaceFolders,
+      remoteUri
+    );
+    assert.strictEqual(projectUri?.scheme, remoteUri.scheme);
+    assert.strictEqual(projectUri?.authority, remoteUri.authority);
+    assert.strictEqual(projectUri?.path, "/workspace/.vscode/mcp.json");
+    assert.strictEqual(
+      getMcpProjectConfigurationUri(remoteUri.fsPath, workspaceFolders),
+      undefined
+    );
+  });
+
+  test("excludes repository-controlled sources in Restricted Mode", () => {
+    const inspected = {
+      globalValue: [{ name: "user", command: process.execPath }],
+      workspaceValue: [{ name: "workspace", command: process.execPath }],
+      workspaceFolderValue: [{ name: "folder", command: process.execPath }],
+    };
+
+    assert.deepStrictEqual(
+      selectMcpSettingSources(inspected, false).map(
+        (source) => source.configuration
+      ),
+      [inspected.globalValue]
+    );
+    assert.deepStrictEqual(
+      selectMcpSettingSources(inspected, true).map(
+        (source) => source.configuration
+      ),
+      [
+        inspected.globalValue,
+        inspected.workspaceValue,
+        inspected.workspaceFolderValue,
+      ]
+    );
+  });
+
+  test("parses the VS Code mcp.json convention through the ACP validator", () => {
+    const parsed = parseMcpProjectConfiguration(
+      new TextEncoder().encode(`{
+        // Project MCP servers use the established VS Code object form.
+        "servers": {
+          "stdio": {
+            "command": ${JSON.stringify(process.execPath)},
+            "args": ["server.js"],
+            "env": { "TOKEN": "${"${env:MCP_TOKEN}"}" },
+          },
+          "remote": {
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": { "Authorization": "Bearer ${"${env:MCP_TOKEN}"}" },
+          },
+        },
+      }`)
+    );
+    const sensitiveValues = new Set<string>();
+
+    const configured = configureMcpServers(
+      [{ location: ".vscode/mcp.json.servers", configuration: parsed }],
+      { http: true },
+      { MCP_TOKEN: "project-secret" },
+      sensitiveValues
+    );
+
+    assert.deepStrictEqual(configured, [
+      {
+        name: "stdio",
+        command: process.execPath,
+        args: ["server.js"],
+        env: [{ name: "TOKEN", value: "project-secret" }],
+      },
+      {
+        type: "http",
+        name: "remote",
+        url: "https://example.com/mcp",
+        headers: [{ name: "Authorization", value: "Bearer project-secret" }],
+      },
+    ]);
+    assert.deepStrictEqual(
+      [...sensitiveValues],
+      ["project-secret", "Bearer project-secret"]
+    );
+    const reloaded = configureMcpServers(
+      [{ location: ".vscode/mcp.json.servers", configuration: parsed }],
+      { http: true },
+      { MCP_TOKEN: "rotated-secret" }
+    );
+    assert.deepStrictEqual(reloaded[1], {
+      type: "http",
+      name: "remote",
+      url: "https://example.com/mcp",
+      headers: [{ name: "Authorization", value: "Bearer rotated-secret" }],
+    });
+    assert.match(JSON.stringify(parsed), /\$\{env:MCP_TOKEN\}/);
+  });
+
+  test("applies user, workspace, folder, then project precedence by name", () => {
+    const configured = configureMcpServers(
+      [
+        {
+          location: "user",
+          configuration: [
+            { name: "userOnly", command: process.execPath, args: ["user"] },
+            { name: "Shared", command: process.execPath, args: ["user"] },
+          ],
+        },
+        {
+          location: "workspace",
+          configuration: [
+            {
+              name: "workspaceOnly",
+              command: process.execPath,
+              args: ["workspace"],
+            },
+            {
+              name: "shared",
+              command: process.execPath,
+              args: ["workspace"],
+            },
+          ],
+        },
+        {
+          location: "folder",
+          configuration: [
+            {
+              name: "folderOnly",
+              command: process.execPath,
+              args: ["folder"],
+            },
+          ],
+        },
+        {
+          location: "project",
+          configuration: [
+            {
+              name: "SHARED",
+              command: process.execPath,
+              args: ["project"],
+            },
+            {
+              name: "projectOnly",
+              command: process.execPath,
+              args: ["project"],
+            },
+          ],
+        },
+      ],
+      {}
+    );
+
+    assert.deepStrictEqual(
+      configured.map((server) => ({
+        name: server.name,
+        marker: "args" in server ? server.args[0] : undefined,
+      })),
+      [
+        { name: "userOnly", marker: "user" },
+        { name: "SHARED", marker: "project" },
+        { name: "workspaceOnly", marker: "workspace" },
+        { name: "folderOnly", marker: "folder" },
+        { name: "projectOnly", marker: "project" },
+      ]
+    );
+  });
+
+  test("rejects unsupported project schema with structured paths", () => {
+    assert.throws(
+      () =>
+        parseMcpProjectConfiguration(
+          new TextEncoder().encode(
+            JSON.stringify({ servers: {}, inputs: [{ id: "secret" }] })
+          )
+        ),
+      (error) => {
+        assert.ok(error instanceof McpConfigurationError);
+        assert.strictEqual(error.code, "MCP_CONFIG_MALFORMED");
+        assert.match(error.message, /^\[MCP_CONFIG_MALFORMED\]/);
+        assert.match(error.message, /\.vscode\/mcp\.json/);
+        return true;
+      }
+    );
+  });
+
+  test("attributes project validation failures to the project source", () => {
+    const parsed = parseMcpProjectConfiguration(
+      new TextEncoder().encode(
+        JSON.stringify({ servers: { unsafe: { command: "npx" } } })
+      )
+    );
+
+    assert.throws(
+      () =>
+        configureMcpServers(
+          [{ location: ".vscode/mcp.json.servers", configuration: parsed }],
+          {}
+        ),
+      (error) => {
+        assert.ok(error instanceof McpConfigurationError);
+        assert.strictEqual(error.code, "MCP_CONFIG_UNSAFE");
+        assert.match(
+          error.message,
+          /\.vscode\/mcp\.json\.servers\[0\]\.command/
+        );
+        return true;
+      }
     );
   });
 
