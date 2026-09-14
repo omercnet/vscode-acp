@@ -1,11 +1,17 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
 import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
+import {
+  openTrustedWorkspaceFile,
+  workspaceFileCapabilities,
+  type WorkspaceFileAccessContext,
+} from "../acp/workspace-files";
 import type {
   AuthMethod,
   AuthMethodId,
@@ -39,6 +45,12 @@ interface MockACPClient {
   setOnStderr: (callback: any) => () => void;
   setOnReadTextFile: (callback: any) => void;
   setOnWriteTextFile: (callback: any) => void;
+  setFileSystemCapabilities: (
+    callback: () => Promise<{
+      readTextFile: boolean;
+      writeTextFile: boolean;
+    }>
+  ) => void;
   setOnCreateTerminal: (callback: any) => void;
   setOnTerminalOutput: (callback: any) => void;
   setOnWaitForTerminalExit: (callback: any) => void;
@@ -182,6 +194,7 @@ class TestACPClient implements MockACPClient {
   }
   setOnReadTextFile(): void {}
   setOnWriteTextFile(): void {}
+  setFileSystemCapabilities(): void {}
   setOnCreateTerminal(): void {}
   setOnTerminalOutput(): void {}
   setOnWaitForTerminalExit(): void {}
@@ -2133,32 +2146,131 @@ suite("ChatViewProvider", () => {
     });
   });
   suite("Client capability handlers", () => {
-    test("reads files using the protocol's 1-based line offset", async () => {
+    test("reads the authorized file instead of a stale dirty buffer", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
         memento as unknown as vscode.Memento
       );
       const testProvider = provider as unknown as TestableCapabilityHandlers;
-      const uri = vscode.Uri.file(
-        join(tmpdir(), `vscode-acp-lines-${Date.now()}.txt`)
+      const sandbox = await realpath(
+        await mkdtemp(join(tmpdir(), "vscode-acp-chat-files-"))
       );
+      const workspaceRoot = join(sandbox, "workspace");
+      const filePath = join(workspaceRoot, "notes.txt");
+      const uri = vscode.Uri.file(filePath);
+      const savedContent = "first\nsecond\nthird";
+      const context: WorkspaceFileAccessContext = {
+        isTrusted: true,
+        workspaceFolders: [
+          { uri: vscode.Uri.file(workspaceRoot) } as vscode.WorkspaceFolder,
+        ],
+      };
+      let document: vscode.TextDocument | undefined;
 
       try {
-        await vscode.workspace.fs.writeFile(
+        await mkdir(workspaceRoot);
+        await writeFile(filePath, savedContent);
+        await workspaceFileCapabilities(context);
+        Object.defineProperty(provider, "openWorkspaceFile", {
+          value: (requestPath: string, operation: "read" | "write") =>
+            openTrustedWorkspaceFile(requestPath, operation, context),
+        });
+
+        document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document, { preview: true });
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
           uri,
-          new TextEncoder().encode("first\nsecond\nthird")
+          new vscode.Range(
+            document.positionAt(0),
+            document.positionAt(document.getText().length)
+          ),
+          "first\nstale-secret\nthird"
         );
+        await vscode.workspace.applyEdit(edit);
+
         const result = await testProvider.handleReadTextFile({
           sessionId: "session",
-          path: uri.fsPath,
+          path: filePath,
           line: 2,
           limit: 1,
         });
 
         assert.deepStrictEqual(result, { content: "second" });
       } finally {
-        await vscode.workspace.fs.delete(uri);
+        if (document) {
+          const restore = new vscode.WorkspaceEdit();
+          restore.replace(
+            uri,
+            new vscode.Range(
+              document.positionAt(0),
+              document.positionAt(document.getText().length)
+            ),
+            savedContent
+          );
+          await vscode.workspace.applyEdit(restore);
+          await document.save();
+          await vscode.commands.executeCommand(
+            "workbench.action.closeActiveEditor"
+          );
+        }
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    });
+
+    test("enforces containment through the chat read handler", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const testProvider = provider as unknown as TestableCapabilityHandlers;
+      const sandbox = await realpath(
+        await mkdtemp(join(tmpdir(), "vscode-acp-chat-boundary-"))
+      );
+      const workspaceRoot = join(sandbox, "workspace");
+      const outsideRoot = join(sandbox, "outside");
+      const allowedPath = join(workspaceRoot, "allowed.txt");
+      const deniedPath = join(outsideRoot, "secret.txt");
+      const context: WorkspaceFileAccessContext = {
+        isTrusted: true,
+        workspaceFolders: [
+          { uri: vscode.Uri.file(workspaceRoot) } as vscode.WorkspaceFolder,
+        ],
+      };
+
+      try {
+        await mkdir(workspaceRoot);
+        await mkdir(outsideRoot);
+        await writeFile(allowedPath, "allowed");
+        await writeFile(deniedPath, "secret");
+        await workspaceFileCapabilities(context);
+        Object.defineProperty(provider, "openWorkspaceFile", {
+          value: (requestPath: string, operation: "read" | "write") =>
+            openTrustedWorkspaceFile(requestPath, operation, context),
+        });
+
+        assert.deepStrictEqual(
+          await testProvider.handleReadTextFile({
+            sessionId: "session",
+            path: allowedPath,
+          }),
+          { content: "allowed" }
+        );
+        await assert.rejects(
+          () =>
+            testProvider.handleReadTextFile({
+              sessionId: "session",
+              path: deniedPath,
+            }),
+          (error: unknown) =>
+            error instanceof Error &&
+            error.message ===
+              "ACP file access is restricted to trusted workspace files."
+        );
+      } finally {
+        await rm(sandbox, { recursive: true, force: true });
       }
     });
 
