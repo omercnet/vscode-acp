@@ -75,6 +75,15 @@ When the AI uses tools (like running commands or reading files), you'll see them
 
 Click on any tool to see the command input and output.
 
+## Security model
+
+VSCode ACP is not a sandbox. The selected agent runs as a local process, and an approved terminal program runs with your OS account's authority. Approving a shell, interpreter, or similar program can therefore authorize arbitrary code execution with that account's privileges.
+
+- Permission dialogs use extension-defined decision labels and render agent-provided details as inert text. For non-terminal requests, the extension returns the selected ACP permission option to the agent; it does not enforce the agent's subsequent behavior. For terminal requests, **Allow once** authorizes one matching request, while **Always allow in this session** authorizes repeated copies of the same approved request and effective launch. These in-memory grants are revoked on disconnect, session load or replacement, agent change, **Clear Chat**, and view disposal or recreation.
+- Terminal creation requires Workspace Trust, a local workspace folder, a working directory inside that folder, and a matching grant. The prompt shows the resolved executable, arguments, canonical working directory, and allowlisted environment; the extension re-resolves and rechecks them before spawning without a shell. The eight-terminal limit includes launches being prepared or retired. Process-tree cleanup runs on disconnect, session load or replacement, new chat, agent change, and extension shutdown. **Clear Chat** revokes approvals but does not stop existing terminals; merely hiding the retained view revokes neither approvals nor terminals.
+- ACP file reads and writes are not individually prompted. The capabilities are advertised only for a trusted workspace with a pinnable local `file:` root, and apply only to the extension's ACP filesystem handlers, not to the agent process or an approved terminal command. Reads use descriptor traversal on supported Linux hosts and portable identity verification elsewhere; they stay within canonical workspace roots, reject traversal and symlink escapes, and return at most 16 MiB. Writes require verified `/proc/self/fd` descriptor traversal, so they are currently advertised only on supported Linux hosts; macOS, Windows, and Linux hosts without that support do not advertise writes and reject direct write requests.
+- Agent executables are resolved before launch without shell expansion. Bare commands search only absolute `PATH` entries, selected files and `PATH` directories are canonicalized, and relative or untrusted-workspace `PATH` entries are excluded. Supported Windows `npm` `.cmd`/`.bat` shims are decoded to the real interpreter and script. Workspace-level executable overrides remain disabled until Workspace Trust is granted; in Restricted Mode, only user-level overrides apply.
+
 ## Configuration
 
 The extension auto-detects installed agents from the extension host's `PATH`.
