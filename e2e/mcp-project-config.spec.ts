@@ -212,6 +212,7 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
       VSCODE_SKIP_PRELAUNCH: "1",
     },
   });
+  let hostClosed = false;
 
   try {
     const window = await host.firstWindow();
@@ -298,10 +299,12 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
       JSON.stringify({ cwd: loaded.cwd, mcpServers: loaded.mcpServers })
     ).toBe(JSON.stringify(newSnapshot));
     expect(JSON.stringify(newSnapshot)).toContain(RESOLVED_SECRET);
+    await host.close();
+    hostClosed = true;
     expect(await containsText(USER_DATA_DIR, RESOLVED_SECRET)).toBe(false);
     expect(await containsText(WORKSPACE_DIR, RESOLVED_SECRET)).toBe(false);
   } finally {
-    await host.close();
+    if (!hostClosed) await host.close();
     await rm(DEMO_DIR, { recursive: true, force: true });
   }
 });

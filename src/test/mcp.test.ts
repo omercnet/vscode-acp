@@ -102,6 +102,26 @@ suite("MCP server configuration", () => {
     );
   });
 
+  test("preserves explicit invalid setting values for fail-closed validation", () => {
+    const sources = selectMcpSettingSources(
+      {
+        globalValue: null,
+        workspaceValue: null,
+        workspaceFolderValue: null,
+      },
+      true
+    );
+
+    for (const source of sources) {
+      assert.throws(
+        () => configureMcpServers([source], {}),
+        (error) =>
+          error instanceof McpConfigurationError &&
+          error.code === "MCP_CONFIG_MALFORMED"
+      );
+    }
+  });
+
   test("parses the VS Code mcp.json convention through the ACP validator", () => {
     const parsed = parseMcpProjectConfiguration(
       new TextEncoder().encode(`{
@@ -159,6 +179,49 @@ suite("MCP server configuration", () => {
       headers: [{ name: "Authorization", value: "Bearer rotated-secret" }],
     });
     assert.match(JSON.stringify(parsed), /\$\{env:MCP_TOKEN\}/);
+  });
+
+  test("rejects duplicate JSONC properties before last-value parsing", () => {
+    assert.throws(
+      () =>
+        parseMcpProjectConfiguration(
+          new TextEncoder().encode(`{
+            "servers": {
+              "duplicate": { "command": ${JSON.stringify(process.execPath)} },
+              "duplicate": { "command": "/unexpected/override" }
+            }
+          }`)
+        ),
+      (error) =>
+        error instanceof McpConfigurationError &&
+        error.code === "MCP_CONFIG_DUPLICATE"
+    );
+  });
+
+  test("treats resolved environment values as opaque", () => {
+    const configured = configureMcpServers(
+      [
+        {
+          location: "user",
+          configuration: [
+            {
+              name: "opaque-secret",
+              command: process.execPath,
+              env: [{ name: "TOKEN", value: "${env:FIRST}" }],
+            },
+          ],
+        },
+      ],
+      {},
+      { FIRST: "${env:SECOND}", SECOND: "must-not-replace" }
+    );
+
+    assert.deepStrictEqual(configured[0], {
+      name: "opaque-secret",
+      command: process.execPath,
+      args: [],
+      env: [{ name: "TOKEN", value: "${env:SECOND}" }],
+    });
   });
 
   test("applies user, workspace, folder, then project precedence by name", () => {

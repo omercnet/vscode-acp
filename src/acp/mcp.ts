@@ -1,7 +1,12 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import * as acp from "@agentclientprotocol/sdk";
-import { parse, type ParseError } from "jsonc-parser";
+import {
+  getNodeValue,
+  parseTree,
+  type Node as JsonNode,
+  type ParseError,
+} from "jsonc-parser";
 
 export const MCP_SERVERS_SETTING = "vscode-acp.mcpServers";
 export const MCP_PROJECT_CONFIG_PATH = ".vscode/mcp.json";
@@ -97,18 +102,25 @@ export function selectMcpSettingSources(
   const sources: McpConfigurationSource[] = [
     {
       location: `${MCP_SERVERS_SETTING} (user)`,
-      configuration: inspected?.globalValue ?? [],
+      configuration:
+        inspected?.globalValue === undefined ? [] : inspected.globalValue,
     },
   ];
   if (isTrusted) {
     sources.push(
       {
         location: `${MCP_SERVERS_SETTING} (workspace)`,
-        configuration: inspected?.workspaceValue ?? [],
+        configuration:
+          inspected?.workspaceValue === undefined
+            ? []
+            : inspected.workspaceValue,
       },
       {
         location: `${MCP_SERVERS_SETTING} (workspace folder)`,
-        configuration: inspected?.workspaceFolderValue ?? [],
+        configuration:
+          inspected?.workspaceFolderValue === undefined
+            ? []
+            : inspected.workspaceFolderValue,
       }
     );
   }
@@ -133,16 +145,18 @@ export function parseMcpProjectConfiguration(contents: Uint8Array): unknown[] {
     );
   }
   const errors: ParseError[] = [];
-  const parsed = parse(text, errors, {
+  const parsedTree = parseTree(text, errors, {
     allowTrailingComma: true,
     disallowComments: false,
-  }) as unknown;
+  });
   if (errors.length > 0) {
     fail(
       "MCP_CONFIG_MALFORMED",
       `${MCP_PROJECT_CONFIG_PATH} contains invalid JSONC at offset ${errors[0].offset}`
     );
   }
+  if (parsedTree) rejectDuplicateJsonProperties(parsedTree);
+  const parsed = parsedTree ? getNodeValue(parsedTree) : undefined;
 
   const root = requireObject(parsed, MCP_PROJECT_CONFIG_PATH);
   requireKeys(root, MCP_PROJECT_CONFIG_PATH, ["servers"]);
@@ -173,6 +187,31 @@ export function parseMcpProjectConfiguration(contents: Uint8Array): unknown[] {
     return normalized;
   });
 }
+function rejectDuplicateJsonProperties(root: JsonNode): void {
+  const pending = [root];
+  while (pending.length > 0) {
+    const node = pending.pop()!;
+    if (node.type === "object") {
+      const names = new Set<string>();
+      for (const property of node.children ?? []) {
+        const name = property.children?.[0]?.value;
+        if (typeof name === "string") {
+          if (names.has(name)) {
+            fail(
+              "MCP_CONFIG_DUPLICATE",
+              `${MCP_PROJECT_CONFIG_PATH} contains duplicate property ${JSON.stringify(name)} at offset ${property.offset}`
+            );
+          }
+          names.add(name);
+        }
+        const value = property.children?.[1];
+        if (value) pending.push(value);
+      }
+    } else {
+      pending.push(...(node.children ?? []));
+    }
+  }
+}
 
 export function configureMcpServers(
   sources: readonly McpConfigurationSource[],
@@ -193,12 +232,23 @@ export function configureMcpServers(
       merged.set(server.name.toLowerCase(), server);
     }
   }
-  return validateMcpServers(
-    [...merged.values()],
-    capabilities,
-    environment,
-    sensitiveValues
-  );
+  const configured = [...merged.values()];
+  if (configured.length > MAX_SERVERS) {
+    fail(
+      "MCP_CONFIG_MALFORMED",
+      `${MCP_SERVERS_SETTING} supports at most ${MAX_SERVERS} entries after precedence is applied`
+    );
+  }
+  if (
+    Buffer.byteLength(JSON.stringify(configured), "utf8") >
+    MAX_CONFIGURATION_BYTES
+  ) {
+    fail(
+      "MCP_CONFIG_UNSAFE",
+      `${MCP_SERVERS_SETTING} exceeds the ${MAX_CONFIGURATION_BYTES}-byte limit after precedence is applied`
+    );
+  }
+  return configured;
 }
 
 export async function getConfiguredSession(
