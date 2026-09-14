@@ -1061,6 +1061,212 @@ suite("Webview", () => {
           attachmentId: "att-remove",
         });
       });
+
+      test("renders transport type, preview, and accessible image chip label", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "image-preview",
+              uri: "vscode-acp-attachment:///memory/image-preview/pasted.png",
+              name: "pasted.png",
+              mimeType: "image/png",
+              size: 8,
+              source: "memory",
+              kind: "image",
+              transport: "image",
+              previewDataUrl: "data:image/png;base64,iVBORw0KGgo=",
+            },
+          ],
+        });
+
+        const chip = elements.attachmentsBar.querySelector(".attachment-chip");
+        assert.strictEqual(
+          chip?.getAttribute("aria-label"),
+          "Image attachment pasted.png, Image · image/png · 8 B"
+        );
+        assert.strictEqual(
+          chip?.querySelector(".attachment-chip-type")?.textContent,
+          "Image"
+        );
+        assert.strictEqual(
+          chip?.querySelector("img")?.getAttribute("src"),
+          "data:image/png;base64,iVBORw0KGgo="
+        );
+      });
+
+      test("pastes an image only after the agent advertises image support", async () => {
+        const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+        const file = new window.File([png], "pasted.png");
+        const paste = new window.Event("paste", {
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(paste, "clipboardData", {
+          value: { files: [file] },
+        });
+
+        elements.inputEl.dispatchEvent(paste);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.ok(
+          !mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "attachContent"
+            )
+        );
+
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: { image: true, embeddedContext: false },
+        });
+        mockVsCode._clearMessages();
+        let resolveAttached!: (message: unknown) => void;
+        const attachedMessage = new Promise<unknown>((resolve) => {
+          resolveAttached = resolve;
+        });
+        const recordMessage = mockVsCode.postMessage;
+        mockVsCode.postMessage = (message: unknown) => {
+          recordMessage(message);
+          if (
+            typeof message === "object" &&
+            message !== null &&
+            "type" in message &&
+            message.type === "attachContent"
+          ) {
+            resolveAttached(message);
+          }
+        };
+        const supportedPaste = new window.Event("paste", {
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(supportedPaste, "clipboardData", {
+          value: { files: [file] },
+        });
+        elements.inputEl.dispatchEvent(supportedPaste);
+        const attached = await attachedMessage;
+        assert.deepStrictEqual(attached, {
+          type: "attachContent",
+          name: "pasted.png",
+          mimeType: undefined,
+          data: "iVBORw0KGgo=",
+        });
+      });
+
+      test("drops UTF-8 files through the same attachment message path", async () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: { image: false, embeddedContext: true },
+        });
+        let resolveAttached!: (message: unknown) => void;
+        const attachedMessage = new Promise<unknown>((resolve) => {
+          resolveAttached = resolve;
+        });
+        const recordMessage = mockVsCode.postMessage;
+        mockVsCode.postMessage = (message: unknown) => {
+          recordMessage(message);
+          if (
+            typeof message === "object" &&
+            message !== null &&
+            "type" in message &&
+            message.type === "attachContent"
+          ) {
+            resolveAttached(message);
+          }
+        };
+        const file = new window.File(["unsaved context"], "context.txt", {
+          type: "text/plain",
+        });
+        const drop = new window.Event("drop", {
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(drop, "dataTransfer", {
+          value: { files: [file] },
+        });
+
+        elements.inputContainer.dispatchEvent(drop);
+
+        assert.deepStrictEqual(await attachedMessage, {
+          type: "attachContent",
+          name: "context.txt",
+          mimeType: "text/plain",
+          data: Buffer.from("unsaved context").toString("base64"),
+        });
+      });
+
+      test("rejects oversized dropped text before reading it", async () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: { image: false, embeddedContext: true },
+        });
+        mockVsCode._clearMessages();
+        const file = new window.File(
+          [new Uint8Array(1024 * 1024 + 1)],
+          "large.txt",
+          { type: "text/plain" }
+        );
+        const drop = new window.Event("drop", {
+          bubbles: true,
+          cancelable: true,
+        });
+        Object.defineProperty(drop, "dataTransfer", {
+          value: { files: [file] },
+        });
+
+        elements.inputContainer.dispatchEvent(drop);
+        await Promise.resolve();
+
+        assert.ok(
+          !mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "attachContent"
+            )
+        );
+        assert.strictEqual(
+          elements.messagesEl.lastElementChild?.textContent,
+          "large.txt exceeds the 1 MB limit."
+        );
+      });
+
+      test("cancels an in-flight browser file read across session changes", async () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: { image: true, embeddedContext: true },
+        });
+        const internals = controller as unknown as {
+          attachBrowserFiles(files: File[]): Promise<void>;
+        };
+        const file = new window.File(["context"], "context.txt", {
+          type: "text/plain",
+        });
+
+        const attaching = internals.attachBrowserFiles([file]);
+        controller.handleMessage({ type: "sessionTransition", active: true });
+        await attaching;
+
+        assert.ok(
+          !mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "attachContent"
+            )
+        );
+      });
     });
 
     suite("input handling", () => {

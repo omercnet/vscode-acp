@@ -27,6 +27,7 @@ import type {
   LoadSessionRequest,
   McpCapabilities,
   NewSessionRequest,
+  PromptCapabilities,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
@@ -74,6 +75,7 @@ interface MockACPClient {
   loadSession: (params: LoadSessionRequest) => Promise<void>;
   supportsSessionLoad: () => boolean;
   getMcpCapabilities: () => McpCapabilities;
+  getPromptCapabilities: () => PromptCapabilities;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -231,6 +233,9 @@ class TestACPClient implements MockACPClient {
     return false;
   }
   getMcpCapabilities(): McpCapabilities {
+    return {};
+  }
+  getPromptCapabilities(): PromptCapabilities {
     return {};
   }
 
@@ -771,6 +776,7 @@ suite("ChatViewProvider", () => {
         modes: null,
         models: null,
         commands: null,
+        promptCapabilities: {},
       });
     });
 
@@ -803,6 +809,7 @@ suite("ChatViewProvider", () => {
         modes: null,
         models: null,
         commands: null,
+        promptCapabilities: {},
       });
     });
 
@@ -877,7 +884,7 @@ suite("ChatViewProvider", () => {
     assert.ok(!messages.some((message) => message.type === "chatCleared"));
     assert.deepStrictEqual(
       messages.find((message) => message.type === "sessionMetadata"),
-      { type: "sessionMetadata", ...metadata }
+      { type: "sessionMetadata", ...metadata, promptCapabilities: {} }
     );
     assert.deepStrictEqual(messages.at(-1), {
       type: "sessionTransition",
@@ -4117,6 +4124,7 @@ suite("ChatViewProvider", () => {
 
   suite("Attachment lifecycle", () => {
     let originalCreate: PropertyDescriptor;
+    let originalPrepare: PropertyDescriptor;
 
     setup(() => {
       const descriptor = Object.getOwnPropertyDescriptor(
@@ -4125,6 +4133,19 @@ suite("ChatViewProvider", () => {
       );
       assert.ok(descriptor);
       originalCreate = descriptor;
+      const prepareDescriptor = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(prepareDescriptor);
+      originalPrepare = prepareDescriptor;
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: async (attachment: FileAttachment) => ({
+          attachment,
+          inlineBytes: 0,
+        }),
+      });
       Object.defineProperty(attachmentHelpers, "createFileAttachment", {
         configurable: true,
         value: async (uri: vscode.Uri, id: string) => ({
@@ -4136,6 +4157,11 @@ suite("ChatViewProvider", () => {
     });
 
     teardown(() => {
+      Object.defineProperty(
+        attachmentHelpers,
+        "prepareFileAttachment",
+        originalPrepare
+      );
       Object.defineProperty(
         attachmentHelpers,
         "createFileAttachment",
@@ -4229,6 +4255,88 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.sentAttachments.length, 1);
     });
 
+    test("accepts bounded pasted images into the existing draft without echoing payload bytes", () => {
+      class ImageClient extends TestACPClient {
+        getPromptCapabilities(): PromptCapabilities {
+          return { image: true };
+        }
+
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ImageClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, FileAttachment & { payload?: unknown }>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "pasted.png",
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 1);
+      assert.strictEqual(
+        internals.pendingAttachments.values().next().value?.payload !==
+          undefined,
+        true
+      );
+      const delivered = messages.find(
+        (message) => message.type === "filesAttached"
+      ) as { attachments: Array<Record<string, unknown>> } | undefined;
+      assert.ok(delivered);
+      assert.strictEqual("payload" in delivered.attachments[0], false);
+      assert.strictEqual(delivered.attachments[0].transport, "image");
+    });
+
+    test("rejects pasted image bytes when the agent lacks image support", () => {
+      class LinkOnlyClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LinkOnlyClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "pasted.png",
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 0);
+      assert.ok(
+        messages.some(
+          (message) =>
+            message.type === "attachmentError" &&
+            String(message.text).includes("does not advertise image")
+        )
+      );
+    });
+
     test("drops spoofed or non-local replay resource links", () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
@@ -4288,6 +4396,133 @@ suite("ChatViewProvider", () => {
           .map(({ uri, name }) => ({ uri, name })),
         [{ uri: "file:///workspace/real.ts", name: "real.ts" }]
       );
+    });
+
+    test("replays bounded embedded resources and images without retaining prompt payloads", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayMessages: Array<{ attachments: Array<Record<string, unknown>> }>;
+        handleSessionUpdate(notification: SessionNotification): void;
+      };
+      internals.isReplaying = true;
+
+      internals.handleSessionUpdate({
+        sessionId: "test-session",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          messageId: "user-rich",
+          content: {
+            type: "resource",
+            resource: {
+              uri: "file:///workspace/current.ts",
+              mimeType: "text/typescript",
+              text: "const current = true;",
+            },
+          },
+        },
+      } satisfies SessionNotification);
+      internals.handleSessionUpdate({
+        sessionId: "test-session",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          messageId: "user-rich",
+          content: {
+            type: "image",
+            mimeType: "image/png",
+            data: "iVBORw0KGgo=",
+          },
+        },
+      } satisfies SessionNotification);
+
+      assert.deepStrictEqual(
+        internals.replayMessages[0].attachments.map((attachment) => ({
+          name: attachment.name,
+          transport: attachment.transport,
+          hasPayload: "payload" in attachment,
+        })),
+        [
+          { name: "current.ts", transport: "resource", hasPayload: false },
+          {
+            name: internals.replayMessages[0].attachments[1].name,
+            transport: "image",
+            hasPayload: false,
+          },
+        ]
+      );
+    });
+
+    test("does not send a file prepared after the conversation generation changes", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(original);
+      let finishPreparation!: (value: {
+        attachment: FileAttachment;
+        inlineBytes: number;
+      }) => void;
+      const prepared = new Promise<{
+        attachment: FileAttachment;
+        inlineBytes: number;
+      }>((resolve) => {
+        finishPreparation = resolve;
+      });
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: () => prepared,
+      });
+
+      class CapturingClient extends TestACPClient {
+        public sends = 0;
+        isConnected(): boolean {
+          return true;
+        }
+        async sendMessage(): Promise<{ stopReason: string }> {
+          this.sends += 1;
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      try {
+        const client = new CapturingClient();
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          client as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const internals = provider as unknown as {
+          hasSession: boolean;
+          conversationGeneration: number;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(text: string, ids: string[]): Promise<void>;
+        };
+        internals.hasSession = true;
+        const attachment = {
+          id: "race",
+          uri: "file:///workspace/race.ts",
+          name: "race.ts",
+        };
+        internals.pendingAttachments.set(attachment.id, attachment);
+
+        const sending = internals.handleUserMessage("Review", [attachment.id]);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        internals.conversationGeneration += 1;
+        finishPreparation({ attachment, inlineBytes: 0 });
+        await sending;
+
+        assert.strictEqual(client.sends, 0);
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "prepareFileAttachment",
+          original
+        );
+      }
     });
 
     test("drops the attachment draft when the composer webview reloads", async () => {

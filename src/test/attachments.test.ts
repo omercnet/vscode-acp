@@ -4,21 +4,27 @@ import { mkdtemp, rm, symlink, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  AttachmentInputError,
   canonicalFileUri,
   createFileAttachment,
+  createInlineAttachment,
   escapeQuickPickLabel,
   guessMimeType,
   isTrustedWorkspaceFile,
+  prepareFileAttachment,
 } from "../attachments";
+import { workspaceFileCapabilities } from "../acp/workspace-files";
 import {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_MIME_LENGTH,
   MAX_ATTACHMENT_NAME_LENGTH,
   MAX_ATTACHMENT_URI_LENGTH,
+  MAX_IMAGE_BYTES,
   buildPromptContent,
   isAttachmentMetadataValid,
   sanitizeAttachmentLabel,
   type FileAttachment,
+  type PromptAttachment,
 } from "../shared/attachments";
 
 function attachment(
@@ -396,6 +402,79 @@ suite("Resource link attachments", () => {
       ]);
     });
 
+    test("orders embedded resources and images after text", () => {
+      const rich: PromptAttachment[] = [
+        {
+          ...first,
+          source: "file",
+          transport: "resource",
+          payload: { type: "text", text: "const unsaved = true;" },
+        },
+        {
+          id: "image",
+          uri: "vscode-acp-attachment:///memory/image/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          payload: { type: "image", data: "iVBORw0KGgo=" },
+        },
+      ];
+
+      assert.deepStrictEqual(
+        buildPromptContent("Inspect", rich, {
+          embeddedContext: true,
+          image: true,
+        }),
+        [
+          { type: "text", text: "Inspect" },
+          {
+            type: "resource",
+            resource: {
+              uri: first.uri,
+              mimeType: "text/typescript",
+              text: "const unsaved = true;",
+            },
+          },
+          { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+        ]
+      );
+    });
+
+    test("falls back to a resource link and drops memory payloads without capabilities", () => {
+      const blocks = buildPromptContent("Inspect", [
+        {
+          ...first,
+          source: "file",
+          payload: { type: "text", text: "must not leak" },
+        },
+        {
+          id: "image",
+          uri: "vscode-acp-attachment:///memory/image/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          payload: { type: "image", data: "iVBORw0KGgo=" },
+        },
+      ]);
+
+      assert.deepStrictEqual(blocks, [
+        { type: "text", text: "Inspect" },
+        {
+          type: "resource_link",
+          uri: first.uri,
+          name: first.name,
+          mimeType: first.mimeType,
+          size: first.size,
+        },
+      ]);
+      assert.ok(!JSON.stringify(blocks).includes("must not leak"));
+    });
+
     test("supports an attachment-only prompt without an empty text block", () => {
       const blocks = buildPromptContent("", [first]);
 
@@ -440,6 +519,155 @@ suite("Resource link attachments", () => {
 
       const blocks = buildPromptContent("", attachments);
       assert.strictEqual(blocks.length, MAX_ATTACHMENTS);
+    });
+  });
+
+  suite("content preparation", () => {
+    const png = Buffer.from("iVBORw0KGgo=", "base64");
+
+    test("accepts bounded images only when capability and MIME signature agree", () => {
+      const image = createInlineAttachment(
+        {
+          name: "pasted.png",
+          mimeType: "image/png",
+          data: png.toString("base64"),
+        },
+        "image",
+        { image: true },
+        0
+      );
+      assert.strictEqual(image.transport, "image");
+      assert.strictEqual(image.payload?.type, "image");
+
+      assert.throws(
+        () =>
+          createInlineAttachment(
+            {
+              name: "spoofed.png",
+              mimeType: "image/png",
+              data: Buffer.from("not an image").toString("base64"),
+            },
+            "spoofed",
+            { image: true },
+            0
+          ),
+        AttachmentInputError
+      );
+      assert.throws(
+        () =>
+          createInlineAttachment(
+            {
+              name: "unsupported.png",
+              mimeType: "image/png",
+              data: png.toString("base64"),
+            },
+            "unsupported",
+            {},
+            0
+          ),
+        /does not advertise image prompt support/
+      );
+    });
+
+    test("rejects image bytes beyond the strict per-image limit", () => {
+      const oversized = Buffer.alloc(MAX_IMAGE_BYTES + 1);
+      oversized.set(png);
+      assert.throws(
+        () =>
+          createInlineAttachment(
+            {
+              name: "large.png",
+              mimeType: "image/png",
+              data: oversized.toString("base64"),
+            },
+            "large",
+            { image: true },
+            0
+          ),
+        /5 MB or smaller/
+      );
+    });
+
+    test("prepares a selected workspace image as an image prompt", async () => {
+      const workspace = vscode.workspace.workspaceFolders?.[0];
+      assert.ok(workspace);
+      await workspaceFileCapabilities();
+      const dir = await mkdtemp(
+        join(workspace.uri.fsPath, ".attachment-image-test-")
+      );
+      const path = join(dir, "selected.png");
+      try {
+        await writeFile(path, png);
+        const metadata = await createFileAttachment(
+          vscode.Uri.file(path),
+          "selected"
+        );
+        assert.ok(metadata);
+
+        const prepared = await prepareFileAttachment(
+          { ...metadata, source: "file" },
+          { image: true },
+          0,
+          true
+        );
+        assert.ok(prepared);
+        assert.deepStrictEqual(prepared.attachment.payload, {
+          type: "image",
+          data: png.toString("base64"),
+        });
+        assert.strictEqual(prepared.attachment.transport, "image");
+        assert.ok(
+          prepared.attachment.previewDataUrl?.startsWith("data:image/png")
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("embeds the current unsaved editor buffer", async () => {
+      const workspace = vscode.workspace.workspaceFolders?.[0];
+      assert.ok(workspace);
+      await workspaceFileCapabilities();
+      const dir = await mkdtemp(
+        join(workspace.uri.fsPath, ".attachment-test-")
+      );
+      const path = join(dir, "current.ts");
+      try {
+        await writeFile(path, "const saved = true;\n");
+        const uri = vscode.Uri.file(path);
+        const metadata = await createFileAttachment(uri, "current");
+        assert.ok(metadata);
+        const document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document, { preview: true });
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
+          uri,
+          new vscode.Range(
+            document.positionAt(0),
+            document.positionAt(document.getText().length)
+          ),
+          "const unsaved = true;\n"
+        );
+        assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+
+        const prepared = await prepareFileAttachment(
+          { ...metadata, source: "file" },
+          { embeddedContext: true },
+          0
+        );
+        assert.ok(prepared);
+        assert.deepStrictEqual(prepared.attachment.payload, {
+          type: "text",
+          text: "const unsaved = true;\n",
+        });
+        assert.strictEqual(prepared.attachment.transport, "resource");
+        await vscode.commands.executeCommand("workbench.action.files.revert");
+        await vscode.commands.executeCommand(
+          "workbench.action.closeActiveEditor"
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
     });
   });
 });
