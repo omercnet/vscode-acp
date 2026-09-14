@@ -120,10 +120,6 @@ export class MockACPServer {
     return this.initializeRequest;
   }
 
-  getNewSessionRequest(): acp.NewSessionRequest | null {
-    return this.newSessionRequest;
-  }
-
   getPermissionOutcomes(): readonly acp.RequestPermissionOutcome[] {
     return this.permissionOutcomes;
   }
@@ -318,7 +314,6 @@ export class MockACPServer {
   }
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
-    this.newSessionRequest = (params ?? null) as acp.NewSessionRequest | null;
     this.newSessionRequestCount++;
     if (params) {
       this.newSessionRequests.push(params as acp.NewSessionRequest);

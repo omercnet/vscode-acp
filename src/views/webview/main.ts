@@ -1585,6 +1585,7 @@ export class WebviewController {
           this.showThinking();
         }
         break;
+      case "agentError":
       case "error":
         this.hideThinking();
         if (msg.text) this.addMessage(msg.text, "error");

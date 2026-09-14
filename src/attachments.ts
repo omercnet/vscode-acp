@@ -103,17 +103,17 @@ export function escapeQuickPickLabel(text: string): string {
 }
 
 /**
- * Checks that a local file resolves inside a trusted local workspace root.
- * Canonical paths prevent workspace symlinks from granting access outside
- * the workspace boundary.
+ * Resolves a local file to its canonical URI inside a trusted local workspace
+ * root. Returning the resolved target prevents a selected symlink from later
+ * being transported under a misleading workspace path.
  */
-export async function isTrustedWorkspaceFile(
+async function resolveTrustedWorkspaceFile(
   uri: vscode.Uri,
   workspaceFolders = vscode.workspace.workspaceFolders,
   workspaceTrusted = vscode.workspace.isTrusted
-): Promise<boolean> {
+): Promise<vscode.Uri | null> {
   if (!workspaceTrusted || uri.scheme !== "file" || !workspaceFolders) {
-    return false;
+    return null;
   }
 
   try {
@@ -130,14 +130,28 @@ export async function isTrustedWorkspaceFile(
           !relativePath.startsWith(`..${sep}`) &&
           !isAbsolute(relativePath))
       ) {
-        return true;
+        return vscode.Uri.file(candidate);
       }
     }
   } catch {
-    return false;
+    return null;
   }
 
-  return false;
+  return null;
+}
+
+export async function isTrustedWorkspaceFile(
+  uri: vscode.Uri,
+  workspaceFolders = vscode.workspace.workspaceFolders,
+  workspaceTrusted = vscode.workspace.isTrusted
+): Promise<boolean> {
+  return (
+    (await resolveTrustedWorkspaceFile(
+      uri,
+      workspaceFolders,
+      workspaceTrusted
+    )) !== null
+  );
 }
 
 /**
@@ -153,14 +167,17 @@ export async function createFileAttachment(
   workspaceFolders = vscode.workspace.workspaceFolders,
   workspaceTrusted = vscode.workspace.isTrusted
 ): Promise<FileAttachment | null> {
-  if (
-    !(await isTrustedWorkspaceFile(uri, workspaceFolders, workspaceTrusted))
-  ) {
+  const resolvedUri = await resolveTrustedWorkspaceFile(
+    uri,
+    workspaceFolders,
+    workspaceTrusted
+  );
+  if (!resolvedUri) {
     return null;
   }
 
-  const name = basenameFromUriPath(uri);
-  const canonicalUri = canonicalFileUri(uri);
+  const name = basenameFromUriPath(resolvedUri);
+  const canonicalUri = canonicalFileUri(resolvedUri);
 
   if (!isAttachmentMetadataValid(name, canonicalUri)) {
     return null;
@@ -168,7 +185,7 @@ export async function createFileAttachment(
 
   let size: number | undefined;
   try {
-    const stat = await vscode.workspace.fs.stat(uri);
+    const stat = await vscode.workspace.fs.stat(resolvedUri);
     if (stat.type !== vscode.FileType.File) {
       return null;
     }

@@ -593,9 +593,17 @@ suite("Webview", () => {
         assert.strictEqual(elements.inputEl.disabled, false);
 
         controller.handleMessage({ type: "chatCleared" });
-        controller.handleMessage({ type: "error", text: "Unrelated failure" });
+        controller.handleMessage({
+          type: "agentError",
+          text: "Selected file is no longer available",
+        });
         assert.strictEqual(elements.sendBtn.disabled, true);
         assert.strictEqual(elements.attachBtn.disabled, true);
+        assert.ok(
+          elements.messagesEl.textContent?.includes(
+            "Selected file is no longer available"
+          )
+        );
 
         controller.handleMessage({ type: "streamEnd" });
         assert.strictEqual(elements.sendBtn.disabled, false);
@@ -664,6 +672,8 @@ suite("Webview", () => {
         controller.handleMessage({ type: "restoreInput", text: "Resume this" });
 
         assert.strictEqual(elements.inputEl.value, "Typed while connecting");
+      });
+
       test("renders attachment-only messages and treats labels as text", () => {
         controller.handleMessage({
           type: "userMessage",

@@ -610,7 +610,7 @@ suite("ACPClient with Mock Server", () => {
       assert.ok(response.sessionId.startsWith("mock-session-"));
       assert.strictEqual(client.getCurrentSessionId(), response.sessionId);
       assert.deepStrictEqual(
-        mockProcesses.at(-1)?.server.getNewSessionRequest(),
+        mockProcesses.at(-1)?.server.getNewSessionRequests()[0],
         { cwd: "/test/dir", mcpServers: [] }
       );
 

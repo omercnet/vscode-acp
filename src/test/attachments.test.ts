@@ -149,6 +149,17 @@ suite("Resource link attachments", () => {
           ),
           null
         );
+        await rm(insidePath);
+        await symlink(outsidePath, insidePath);
+        assert.strictEqual(
+          await createFileAttachment(
+            vscode.Uri.file(insidePath),
+            "inside-after-replacement",
+            folders,
+            true
+          ),
+          null
+        );
       } finally {
         await rm(root, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });

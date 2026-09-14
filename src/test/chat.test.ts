@@ -978,6 +978,37 @@ suite("ChatViewProvider", () => {
         { type: "sessionTransition", active: false },
       ]);
     });
+
+    test("releases replay state when the agent disconnects", () => {
+      const client = new TestACPClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayGeneration: number | null;
+      };
+      internals.isReplaying = true;
+      internals.replayGeneration = 0;
+
+      client.emitStateChange("disconnected");
+
+      assert.strictEqual(internals.isReplaying, false);
+      assert.strictEqual(internals.replayGeneration, null);
+      assert.deepStrictEqual(
+        messages.find((message) => message.type === "replayFailed"),
+        {
+          type: "replayFailed",
+          text: "The agent disconnected while restoring this session.",
+        }
+      );
+    });
   });
 
   suite("authentication", () => {
@@ -2620,6 +2651,32 @@ suite("ChatViewProvider", () => {
   });
 
   suite("Attachment lifecycle", () => {
+    let originalCreate: PropertyDescriptor;
+
+    setup(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "createFileAttachment"
+      );
+      assert.ok(descriptor);
+      originalCreate = descriptor;
+      Object.defineProperty(attachmentHelpers, "createFileAttachment", {
+        configurable: true,
+        value: async (uri: vscode.Uri, id: string) => ({
+          id,
+          uri: uri.toString(),
+          name: decodeURIComponent(uri.path.split("/").at(-1) ?? ""),
+        }),
+      });
+    });
+
+    teardown(() => {
+      Object.defineProperty(
+        attachmentHelpers,
+        "createFileAttachment",
+        originalCreate
+      );
+    });
     test("does not transport stale attachment ids after chat reset", async () => {
       class CapturingClient extends TestACPClient {
         public sentAttachments: readonly unknown[] = [];
@@ -3019,7 +3076,7 @@ suite("ChatViewProvider", () => {
 
       await internals.handleUserMessage("Review", [attachment.id]);
 
-      assert.strictEqual(
+      assert.deepStrictEqual(
         internals.pendingAttachments.get(attachment.id),
         attachment
       );

@@ -200,6 +200,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnStateChange((state) => {
       if (state === "disconnected" || state === "error") {
+        const interruptedReplay = this.isReplaying;
         this.conversationGeneration++;
         this.hasSession = false;
         this.isReplaying = false;
@@ -210,6 +211,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.activeSessionContext = null;
         this.clearPendingAttachments();
         this.expirePermissionRequests();
+        if (interruptedReplay) {
+          this.postMessage({
+            type: "replayFailed",
+            text: "The agent disconnected while restoring this session.",
+          });
+        }
       }
       this.postMessage({ type: "connectionState", state });
     });
@@ -1424,14 +1431,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const queuedGeneration = this.conversationGeneration;
     let promptStarted = false;
-    const attachments = this.resolveAttachments(attachmentIds);
-    this.postMessage({ type: "userMessage", text, attachments });
+    const selectedAttachments = this.resolveAttachments(attachmentIds);
+    const attachments: FileAttachment[] = [];
     try {
+      for (const selected of selectedAttachments) {
+        const refreshed = await createFileAttachment(
+          vscode.Uri.parse(selected.uri, true),
+          selected.id
+        );
+        if (queuedGeneration !== this.conversationGeneration) {
+          this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+          return;
+        }
+        if (refreshed) {
+          attachments.push(refreshed);
+        }
+      }
+
+      if (selectedAttachments.length > attachments.length) {
+        this.postMessage({
+          type: "agentError",
+          text: "Some selected files are no longer available inside the trusted workspace.",
+        });
+      }
+      if (!text && attachments.length === 0) {
+        this.postMessage({ type: "streamEnd", stopReason: "error" });
+        return;
+      }
+
       await this.ensureSession();
       if (queuedGeneration !== this.conversationGeneration) {
         throw new RequestError(-32800, "Request cancelled");
       }
-      this.postMessage({ type: "userMessage", text });
+      this.postMessage({ type: "userMessage", text, attachments });
       promptStarted = true;
       const promptGeneration = this.conversationGeneration;
       const promptSessionId = this.acpClient.getCurrentSessionId();
