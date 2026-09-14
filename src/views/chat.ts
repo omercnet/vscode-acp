@@ -16,6 +16,11 @@ import {
 import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import { selectAgentPaths } from "../acp/agentPaths";
 import { RequestError } from "@agentclientprotocol/sdk";
+import {
+  openTrustedWorkspaceFile,
+  readOpenedWorkspaceFile,
+  workspaceFileCapabilities,
+} from "../acp/workspace-files";
 import type {
   AuthMethodId,
   SessionNotification,
@@ -164,6 +169,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private attachmentCounter = 0;
   private attachmentPickerActive = false;
   private attachmentDraftVersion = 0;
+  private readonly openWorkspaceFile = openTrustedWorkspaceFile;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -227,6 +233,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.acpClient.setOnStderr((text) => {
       this.handleStderr(text);
     });
+
+    this.acpClient.setFileSystemCapabilities(workspaceFileCapabilities);
 
     this.acpClient.setOnReadTextFile(async (params: ReadTextFileRequest) => {
       return this.handleReadTextFile(params);
@@ -770,17 +778,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleReadTextFile(
     params: ReadTextFileRequest
   ): Promise<ReadTextFileResponse> {
-    const uri = vscode.Uri.file(params.path);
-    const openDoc = vscode.workspace.textDocuments.find(
-      (doc) => doc.uri.fsPath === uri.fsPath
-    );
-
+    const opened = await this.openWorkspaceFile(params.path, "read");
     let content: string;
-    if (openDoc) {
-      content = openDoc.getText();
-    } else {
-      const fileContent = await vscode.workspace.fs.readFile(uri);
-      content = new TextDecoder().decode(fileContent);
+    try {
+      // Read only the descriptor that passed containment. An editor buffer can
+      // hold bytes loaded through an older symlink target and has no stable
+      // file identity that can be compared with this descriptor.
+      content = await readOpenedWorkspaceFile(opened);
+    } finally {
+      await opened.fileHandle.close();
     }
 
     if (params.line !== undefined || params.limit !== undefined) {
@@ -797,9 +803,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleWriteTextFile(
     params: WriteTextFileRequest
   ): Promise<WriteTextFileResponse> {
-    const uri = vscode.Uri.file(params.path);
-    const content = new TextEncoder().encode(params.content);
-    await vscode.workspace.fs.writeFile(uri, content);
+    const opened = await this.openWorkspaceFile(params.path, "write");
+    try {
+      await opened.fileHandle.writeFile(
+        new TextEncoder().encode(params.content)
+      );
+    } finally {
+      await opened.fileHandle.close();
+    }
     return {};
   }
 

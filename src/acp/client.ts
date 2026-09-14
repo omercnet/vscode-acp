@@ -211,6 +211,10 @@ type ReadTextFileCallback = (
 type WriteTextFileCallback = (
   params: acp.WriteTextFileRequest
 ) => Promise<acp.WriteTextFileResponse>;
+type FileSystemCapabilitiesCallback = () => Promise<{
+  readTextFile: boolean;
+  writeTextFile: boolean;
+}>;
 type CreateTerminalCallback = (
   params: acp.CreateTerminalRequest
 ) => Promise<acp.CreateTerminalResponse>;
@@ -255,6 +259,8 @@ export class ACPClient {
     acp.SessionConfigOption[]
   >();
   private pendingModeBySession = new Map<acp.SessionId, acp.SessionModeId>();
+  private fileSystemCapabilitiesHandler: FileSystemCapabilitiesCallback | null =
+    null;
   private connectionGeneration = 0;
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
@@ -364,6 +370,9 @@ export class ACPClient {
   setOnWriteTextFile(callback: WriteTextFileCallback): void {
     this.writeTextFileHandler = callback;
   }
+  setFileSystemCapabilities(callback: FileSystemCapabilitiesCallback): void {
+    this.fileSystemCapabilitiesHandler = callback;
+  }
 
   setOnCreateTerminal(callback: CreateTerminalCallback): void {
     this.createTerminalHandler = callback;
@@ -406,6 +415,10 @@ export class ACPClient {
           "Install it on the extension host PATH or configure an absolute executable path."
       );
     }
+
+    const availableFileSystemCapabilities = this.fileSystemCapabilitiesHandler
+      ? await this.fileSystemCapabilitiesHandler()
+      : { readTextFile: true, writeTextFile: true };
 
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
@@ -506,6 +519,9 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.fs.readTextFile, ({ params }) => {
           this.requireActiveSession(params.sessionId);
+          if (!availableFileSystemCapabilities.readTextFile) {
+            throw new Error("readTextFile is unavailable on this host");
+          }
           if (this.readTextFileHandler) {
             return this.readTextFileHandler(params);
           }
@@ -513,6 +529,9 @@ export class ACPClient {
         })
         .onRequest(acp.methods.client.fs.writeTextFile, ({ params }) => {
           this.requireActiveSession(params.sessionId);
+          if (!availableFileSystemCapabilities.writeTextFile) {
+            throw new Error("writeTextFile is unavailable on this host");
+          }
           if (this.writeTextFileHandler) {
             return this.writeTextFileHandler(params);
           }
@@ -557,11 +576,14 @@ export class ACPClient {
       this.connection = connection;
 
       const clientCapabilities: acp.ClientCapabilities = {};
-      if (this.readTextFileHandler || this.writeTextFileHandler) {
-        clientCapabilities.fs = {
-          readTextFile: this.readTextFileHandler !== null,
-          writeTextFile: this.writeTextFileHandler !== null,
-        };
+      const readTextFile =
+        availableFileSystemCapabilities.readTextFile &&
+        this.readTextFileHandler !== null;
+      const writeTextFile =
+        availableFileSystemCapabilities.writeTextFile &&
+        this.writeTextFileHandler !== null;
+      if (readTextFile || writeTextFile) {
+        clientCapabilities.fs = { readTextFile, writeTextFile };
       }
       if (
         this.createTerminalHandler &&

@@ -135,4 +135,36 @@ suite("Client capabilities", () => {
       `expected allow_once approval, got ${JSON.stringify(streamed)}`
     );
   });
+
+  test("omits unsupported filesystem capabilities", async () => {
+    client.setOnReadTextFile(async () => ({ content: "unreachable" }));
+    client.setOnWriteTextFile(async () => ({}));
+    client.setFileSystemCapabilities(async () => ({
+      readTextFile: false,
+      writeTextFile: false,
+    }));
+
+    await client.connect();
+
+    assert.deepStrictEqual(
+      mockProcess.server.getInitializeRequest()?.clientCapabilities,
+      {}
+    );
+  });
+
+  test("advertises portable reads without unsafe writes", async () => {
+    client.setOnReadTextFile(async () => ({ content: "available" }));
+    client.setOnWriteTextFile(async () => ({}));
+    client.setFileSystemCapabilities(async () => ({
+      readTextFile: true,
+      writeTextFile: false,
+    }));
+
+    await client.connect();
+
+    assert.deepStrictEqual(
+      mockProcess.server.getInitializeRequest()?.clientCapabilities,
+      { fs: { readTextFile: true, writeTextFile: false } }
+    );
+  });
 });
