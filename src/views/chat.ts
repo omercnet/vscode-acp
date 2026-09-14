@@ -1598,6 +1598,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private processExists(processId: number): boolean {
+    try {
+      process.kill(processId, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  private async waitForProcessExit(processId: number): Promise<boolean> {
+    const deadline = Date.now() + TERMINAL_TERMINATION_GRACE_MS;
+    while (this.processExists(processId)) {
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
   private processGroupExists(processGroupId: number): boolean {
     try {
       process.kill(-processGroupId, 0);
@@ -1626,15 +1646,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const windowsRoot =
       process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
     const taskkill = join(windowsRoot, "System32", "taskkill.exe");
-    if (
+    // taskkill reports an error for a leader that already exited, so the tree
+    // is judged by whether the processes are gone, never by the exit code.
+    if (this.processExists(processId)) {
       await this.runTerminationCommand(taskkill, [
         "/pid",
         String(processId),
         "/T",
         "/F",
-      ])
-    ) {
-      return true;
+      ]);
+      if (await this.waitForProcessExit(processId)) {
+        return true;
+      }
     }
 
     // taskkill cannot traverse from a parent that already exited. Windows
@@ -1658,13 +1681,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
       "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
     ].join(";");
-    return this.runTerminationCommand(powershell, [
+    await this.runTerminationCommand(powershell, [
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
       "-Command",
       script,
     ]);
+    return this.waitForProcessExit(processId);
   }
 
   private async terminateTerminalProcess(

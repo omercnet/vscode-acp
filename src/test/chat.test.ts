@@ -2911,6 +2911,39 @@ suite("ChatViewProvider", () => {
       });
     });
 
+    test("releases a terminal whose process already exited", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('done')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      await terminalProvider.handleWaitForTerminalExit({
+        sessionId: "test-session",
+        terminalId,
+      });
+
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId,
+      });
+      assert.strictEqual(terminalProvider.terminals.size, 0);
+    });
+
     test("does not spawn when cleanup wins the PTY preflight race", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
