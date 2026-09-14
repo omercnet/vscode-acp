@@ -24,6 +24,7 @@ import {
   noFollowFlag,
   openTrustedWorkspaceFile,
   readOpenedWorkspaceFile,
+  writeOpenedWorkspaceFile,
   WORKSPACE_FILE_ACCESS_DENIED,
   WORKSPACE_FILE_TOO_LARGE,
   workspaceFileCapabilities,
@@ -103,7 +104,10 @@ suite("Trusted workspace file access", () => {
       "descriptor"
     );
     try {
-      await created.fileHandle.writeFile("created");
+      await writeOpenedWorkspaceFile(
+        created,
+        new TextEncoder().encode("created")
+      );
     } finally {
       await created.fileHandle.close();
     }
@@ -116,11 +120,44 @@ suite("Trusted workspace file access", () => {
       "descriptor"
     );
     try {
-      await truncated.fileHandle.writeFile("new");
+      await writeOpenedWorkspaceFile(
+        truncated,
+        new TextEncoder().encode("new")
+      );
     } finally {
       await truncated.fileHandle.close();
     }
     assert.strictEqual(await readFile(createdPath, "utf8"), "new");
+  });
+
+  test("leaves an authorized file unchanged when a pre-write check fails", async function () {
+    if (!capabilities.writeTextFile) {
+      this.skip();
+    }
+    const filePath = path.join(workspaceRoot, "conflict.txt");
+    await writeFile(filePath, "user content");
+    const opened = await openTrustedWorkspaceFile(
+      filePath,
+      "write",
+      context,
+      "descriptor"
+    );
+    try {
+      await assert.rejects(
+        () =>
+          writeOpenedWorkspaceFile(
+            opened,
+            new TextEncoder().encode("agent content"),
+            async () => {
+              throw new Error("conflict");
+            }
+          ),
+        /conflict/
+      );
+    } finally {
+      await opened.fileHandle.close();
+    }
+    assert.strictEqual(await readFile(filePath, "utf8"), "user content");
   });
 
   test("denies portable writes instead of racing path verification", async () => {

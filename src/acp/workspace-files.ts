@@ -655,9 +655,11 @@ function toAccessError(error: unknown, requestPath: string): unknown {
 
 /**
  * Opens an ACP path only when it stays inside a trusted local workspace folder
- * through canonicalization and through the open itself. ACP exposes filesystem
- * paths rather than URIs, so non-file and virtual workspace providers are
- * denied rather than coerced into a local path.
+ * through canonicalization and through the open itself. Write opens do not
+ * truncate an existing file; callers must use `writeOpenedWorkspaceFile` after
+ * their own conflict checks. ACP exposes filesystem paths rather than URIs, so
+ * non-file and virtual workspace providers are denied rather than coerced into
+ * a local path.
  */
 export async function openTrustedWorkspaceFile(
   requestPath: string,
@@ -738,10 +740,6 @@ export async function openTrustedWorkspaceFile(
       if (operation === "read" && byteLength > MAX_WORKSPACE_FILE_BYTES) {
         throw new WorkspaceFileTooLargeError();
       }
-      if (operation === "write") {
-        // Truncation is deferred until the descriptor is proven contained.
-        await fileHandle.truncate(0);
-      }
       return {
         requestUri,
         canonicalPath,
@@ -758,6 +756,20 @@ export async function openTrustedWorkspaceFile(
 
   throw new WorkspaceFileAccessDeniedError();
 }
+/**
+ * Replaces an already-authorized file. The optional check runs before the
+ * first destructive operation, so a rejected editor conflict preserves bytes.
+ */
+export async function writeOpenedWorkspaceFile(
+  opened: OpenedWorkspaceFile,
+  content: Uint8Array,
+  beforeWrite?: () => Promise<void>
+): Promise<void> {
+  await beforeWrite?.();
+  await opened.fileHandle.truncate(0);
+  await opened.fileHandle.writeFile(content);
+}
+
 /** Reads at most the advertised ACP file limit, including concurrent growth. */
 export async function readOpenedWorkspaceFile(
   opened: OpenedWorkspaceFile

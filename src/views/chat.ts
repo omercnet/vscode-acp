@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
-import { realpath } from "fs/promises";
+import { realpath, stat } from "fs/promises";
 import { isAbsolute, join, relative, resolve } from "path";
 import {
   ACPClient,
@@ -26,7 +26,9 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import {
   openTrustedWorkspaceFile,
   readOpenedWorkspaceFile,
+  writeOpenedWorkspaceFile,
   workspaceFileCapabilities,
+  type OpenedWorkspaceFile,
 } from "../acp/workspace-files";
 import type {
   AuthMethodId,
@@ -55,6 +57,9 @@ import {
   isAttachmentMetadataValid,
   type FileAttachment,
 } from "../shared/attachments";
+
+export const DIRTY_EDITOR_WRITE_CONFLICT =
+  "ACP write refused because the file has unsaved editor changes. Save or revert the file, then retry.";
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
@@ -1179,13 +1184,45 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return { content };
   }
 
+  private async assertNoDirtyEditor(
+    opened: OpenedWorkspaceFile
+  ): Promise<void> {
+    const openedStats = await opened.fileHandle.stat();
+    for (const document of vscode.workspace.textDocuments) {
+      if (!document.isDirty || document.uri.scheme !== "file") {
+        continue;
+      }
+      let documentPath: string;
+      let documentStats;
+      try {
+        [documentPath, documentStats] = await Promise.all([
+          realpath(document.uri.fsPath),
+          stat(document.uri.fsPath),
+        ]);
+      } catch {
+        continue;
+      }
+      if (
+        documentPath === opened.canonicalPath ||
+        (openedStats.ino !== 0 &&
+          documentStats.ino !== 0 &&
+          openedStats.ino === documentStats.ino &&
+          openedStats.dev === documentStats.dev)
+      ) {
+        throw new Error(DIRTY_EDITOR_WRITE_CONFLICT);
+      }
+    }
+  }
+
   private async handleWriteTextFile(
     params: WriteTextFileRequest
   ): Promise<WriteTextFileResponse> {
     const opened = await this.openWorkspaceFile(params.path, "write");
     try {
-      await opened.fileHandle.writeFile(
-        new TextEncoder().encode(params.content)
+      await writeOpenedWorkspaceFile(
+        opened,
+        new TextEncoder().encode(params.content),
+        () => this.assertNoDirtyEditor(opened)
       );
     } finally {
       await opened.fileHandle.close();

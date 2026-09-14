@@ -6,13 +6,19 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  open,
+  readFile,
   realpath,
   rm,
   writeFile,
 } from "fs/promises";
 import { tmpdir } from "os";
 import { isAbsolute, join } from "path";
-import { buildWindowsBatchCommandLine, ChatViewProvider } from "../views/chat";
+import {
+  buildWindowsBatchCommandLine,
+  ChatViewProvider,
+  DIRTY_EDITOR_WRITE_CONFLICT,
+} from "../views/chat";
 import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
@@ -102,6 +108,11 @@ interface TestableCapabilityHandlers {
     line?: number;
     limit?: number;
   }): Promise<{ content: string }>;
+  handleWriteTextFile(params: {
+    sessionId: string;
+    path: string;
+    content: string;
+  }): Promise<Record<string, never>>;
   appendTerminalOutput(terminal: TestManagedTerminal, text: string): void;
   handleTerminalOutput(params: {
     sessionId: string;
@@ -2382,6 +2393,93 @@ suite("ChatViewProvider", () => {
             "workbench.action.closeActiveEditor"
           );
         }
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    });
+
+    test("writes clean documents but preserves dirty editor changes", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const testProvider = provider as unknown as TestableCapabilityHandlers;
+      const sandbox = await realpath(
+        await mkdtemp(join(tmpdir(), "vscode-acp-chat-write-"))
+      );
+      const workspaceRoot = join(sandbox, "workspace");
+      const filePath = join(workspaceRoot, "notes.txt");
+      const uri = vscode.Uri.file(filePath);
+      const savedContent = "saved content";
+      const userContent = "unsaved user edit";
+      const agentContent = "agent replacement";
+      let document: vscode.TextDocument | undefined;
+
+      try {
+        await mkdir(workspaceRoot);
+        await writeFile(filePath, savedContent);
+        Object.defineProperty(provider, "openWorkspaceFile", {
+          value: async () => {
+            const fileHandle = await open(filePath, "r+");
+            return {
+              requestUri: uri,
+              canonicalPath: filePath,
+              canonicalRootPath: workspaceRoot,
+              fileHandle,
+              strategy: "descriptor" as const,
+              byteLength: (await fileHandle.stat()).size,
+            };
+          },
+        });
+
+        document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document, { preview: true });
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(
+          uri,
+          new vscode.Range(0, 0, document.lineCount, 0),
+          userContent
+        );
+        await vscode.workspace.applyEdit(edit);
+
+        await assert.rejects(
+          () =>
+            testProvider.handleWriteTextFile({
+              sessionId: "session",
+              path: filePath,
+              content: agentContent,
+            }),
+          (error: unknown) =>
+            error instanceof Error &&
+            error.message === DIRTY_EDITOR_WRITE_CONFLICT
+        );
+        assert.strictEqual(await readFile(filePath, "utf8"), savedContent);
+        assert.strictEqual(document.getText(), userContent);
+        assert.strictEqual(document.isDirty, true);
+
+        const restore = new vscode.WorkspaceEdit();
+        restore.replace(
+          uri,
+          new vscode.Range(0, 0, document.lineCount, 0),
+          savedContent
+        );
+        await vscode.workspace.applyEdit(restore);
+        await document.save();
+
+        await testProvider.handleWriteTextFile({
+          sessionId: "session",
+          path: filePath,
+          content: agentContent,
+        });
+        assert.strictEqual(await readFile(filePath, "utf8"), agentContent);
+        assert.strictEqual(document.isDirty, false);
+      } finally {
+        if (document?.isDirty) {
+          await document.save();
+        }
+        await vscode.commands.executeCommand(
+          "workbench.action.closeActiveEditor"
+        );
         await rm(sandbox, { recursive: true, force: true });
       }
     });
