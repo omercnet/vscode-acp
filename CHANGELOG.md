@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.5.0](https://github.com/omercnet/vscode-acp/compare/v1.4.0...v1.5.0) (2026-09-14)
+
+
+### Features
+
+* **acp:** add authentication handoff ([#105](https://github.com/omercnet/vscode-acp/issues/105)) ([e2705dc](https://github.com/omercnet/vscode-acp/commit/e2705dc3b349dd278f55c05c6afd7e26c07d9707))
+* **acp:** classify structured protocol errors ([#101](https://github.com/omercnet/vscode-acp/issues/101)) ([db9e7df](https://github.com/omercnet/vscode-acp/commit/db9e7dfb1714635b82a0e23e5dc72853861fa448))
+* **acp:** upgrade SDK to 1.4.0 ([#98](https://github.com/omercnet/vscode-acp/issues/98)) ([db08554](https://github.com/omercnet/vscode-acp/commit/db085543418bdf5fac23b075baecb89736a4e302))
+* **chat:** add permission request UI for agent actions ([#84](https://github.com/omercnet/vscode-acp/issues/84)) ([5ee4fab](https://github.com/omercnet/vscode-acp/commit/5ee4fabaced581cd0c77369b163d183a7b4ee2f4))
+* **chat:** add ResourceLink file attachments ([#107](https://github.com/omercnet/vscode-acp/issues/107)) ([64ee2e6](https://github.com/omercnet/vscode-acp/commit/64ee2e67b515c7729d0f7fa5ea565bb542f489b7))
+* configure MCP servers for ACP sessions ([#106](https://github.com/omercnet/vscode-acp/issues/106)) ([eb82ede](https://github.com/omercnet/vscode-acp/commit/eb82ede5edd831e21282fd697ff360f48615643f))
+* **session:** restore persisted ACP conversations ([#103](https://github.com/omercnet/vscode-acp/issues/103)) ([477ef03](https://github.com/omercnet/vscode-acp/commit/477ef03755fa9e3c308b6a7101617476b2ff1e6e))
+
+
+### Bug Fixes
+
+* **acp:** contain ACP filesystem access inside trusted workspace roots ([#108](https://github.com/omercnet/vscode-acp/issues/108)) ([fb51286](https://github.com/omercnet/vscode-acp/commit/fb51286ac96d77826f9a4accad1eb0cf636cfef8))
+* **chat:** serialize session transitions ([#104](https://github.com/omercnet/vscode-acp/issues/104)) ([2f63f22](https://github.com/omercnet/vscode-acp/commit/2f63f22668eb95fd849b3b8cdbac7a2b15e6d025))
+* **security:** gate ACP terminal execution behind honest session-scoped grants ([#109](https://github.com/omercnet/vscode-acp/issues/109)) ([316892e](https://github.com/omercnet/vscode-acp/commit/316892e1cef58e6c03ebe11b2593507f1f8f5696))
+* **security:** prevent Windows agent PATH hijacking ([#110](https://github.com/omercnet/vscode-acp/issues/110)) ([dc34904](https://github.com/omercnet/vscode-acp/commit/dc349042e09325b041ab1574c9bcec90c7803a21))
+* **webview:** render streamed assistant replies once ([#102](https://github.com/omercnet/vscode-acp/issues/102)) ([5dd0fcf](https://github.com/omercnet/vscode-acp/commit/5dd0fcf5c64d33fe9e46e05ae1eb4ca2e5485405))
+
 ## [1.4.0](https://github.com/omercnet/vscode-acp/compare/v1.3.0...v1.4.0) (2026-02-28)
 
 
