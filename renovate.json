@@ -1,4 +1,41 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>omercnet/renovate-config"]
+  "extends": ["local>omercnet/renovate-config"],
+  "packageRules": [
+    {
+      "description": "Keep major development dependency upgrades isolated",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "{{depName}}",
+      "groupSlug": "{{depNameSanitized}}",
+      "automerge": false
+    },
+    {
+      "description": "Upgrade commitlint packages together",
+      "matchPackageNames": [
+        "@commitlint/cli",
+        "@commitlint/config-conventional"
+      ],
+      "matchUpdateTypes": ["major"],
+      "groupName": "commitlint",
+      "groupSlug": "commitlint"
+    },
+    {
+      "description": "Upgrade jsdom and its types together",
+      "matchPackageNames": ["jsdom", "@types/jsdom"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "jsdom",
+      "groupSlug": "jsdom"
+    },
+    {
+      "description": "Keep Node types aligned with the Node 22 toolchain",
+      "matchPackageNames": ["@types/node"],
+      "allowedVersions": "<23"
+    },
+    {
+      "description": "Defer TypeScript 7 until the ESLint toolchain supports it",
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "<7"
+    }
+  ]
 }
