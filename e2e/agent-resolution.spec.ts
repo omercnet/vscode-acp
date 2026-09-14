@@ -54,7 +54,7 @@ process.stdin.on("data", (chunk) => {
           update: {
             sessionUpdate: "agent_message_chunk",
             messageId: "agent-1",
-            content: { type: "text", text: "${label} running from " + __filename },
+            content: { type: "text", text: "${label} running from " + __filename.replace(/\\\\/g, "/") },
           },
         },
       });
@@ -159,7 +159,7 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
       frame
         .locator(".message.assistant")
         .filter({ hasText: "TRUSTED-AGENT running from" })
-    ).toContainText(dirname(TRUSTED_AGENT));
+    ).toContainText(dirname(TRUSTED_AGENT).replace(/\\/g, "/"));
     await expect(frame.getByText("MALICIOUS-WORKSPACE-AGENT")).toHaveCount(0);
 
     await window.waitForTimeout(500);
