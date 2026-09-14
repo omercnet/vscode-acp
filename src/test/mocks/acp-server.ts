@@ -638,10 +638,18 @@ export class MockACPServer {
     });
   }
 
-  private async demoPermission(sessionId: string): Promise<void> {
+  private async demoPermission(
+    sessionId: string,
+    rawInput?: Record<string, unknown>
+  ): Promise<void> {
     const permission = (await this.requestClient("session/request_permission", {
       sessionId,
-      toolCall: { toolCallId: "tool-1", title: "Write file", kind: "edit" },
+      toolCall: {
+        toolCallId: "tool-1",
+        title: "Write file",
+        kind: "edit",
+        ...(rawInput && { rawInput }),
+      },
       options: [
         { optionId: "always", name: "Always allow", kind: "allow_always" },
         { optionId: "once", name: "Allow once", kind: "allow_once" },
@@ -663,7 +671,12 @@ export class MockACPServer {
 
   private async demoCapabilities(sessionId: string): Promise<void> {
     const terminalId = "mock-terminal";
-    await this.demoPermission(sessionId);
+    await this.demoPermission(sessionId, {
+      command: "echo",
+      args: ["capability"],
+      cwd: "/workspace",
+      env: [],
+    });
     await this.requestClient("fs/read_text_file", {
       sessionId,
       path: "/workspace/input.ts",

@@ -1063,6 +1063,21 @@ kbd {
   color: var(--vscode-foreground);
 }
 
+.permission-warning {
+  margin: 0 0 12px 0;
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--vscode-inputValidation-warningBackground);
+  border: 1px solid var(--vscode-inputValidation-warningBorder);
+  color: var(--vscode-foreground);
+}
+
+.permission-warning[hidden] {
+  display: none;
+}
+
 .permission-content {
   margin: 0 0 16px 0;
   padding: 10px;
@@ -1116,6 +1131,13 @@ kbd {
 .permission-option-btn:disabled {
   opacity: 0.55;
   cursor: wait;
+}
+
+.permission-option-btn:first-child:disabled,
+.permission-option-btn:disabled:hover {
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-disabledForeground);
+  border-color: var(--vscode-panel-border);
 }
 
 .option-label {

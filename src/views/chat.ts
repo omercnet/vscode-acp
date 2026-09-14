@@ -1,5 +1,8 @@
 import * as vscode from "vscode";
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
+import { createHash, randomUUID } from "crypto";
+import { realpath } from "fs/promises";
+import { isAbsolute, join, relative, resolve } from "path";
 import {
   ACPClient,
   describeACPError,
@@ -13,7 +16,11 @@ import {
   getFirstAvailableAgent,
   type AgentDiscoveryOptions,
 } from "../acp/agents";
-import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
+import {
+  createAgentEnvironment,
+  resolveAgentCommand,
+  type AgentCommandResolutionOptions,
+} from "../acp/agentCommand";
 import { selectAgentPaths } from "../acp/agentPaths";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
@@ -121,8 +128,11 @@ interface WebviewMessage {
 
 interface ManagedTerminal {
   id: string;
+  sessionId: string;
+  generation: number;
   terminal?: vscode.Terminal;
-  proc: ReturnType<typeof spawn> | null;
+  proc: ChildProcess | null;
+  processId: number | null;
   output: string;
   outputByteLimit: number | null;
   truncated: boolean;
@@ -130,6 +140,357 @@ interface ManagedTerminal {
   signal: string | null;
   exitPromise: Promise<void>;
   exitResolve: () => void;
+  waitAbortPromise: Promise<void>;
+  waitAbortResolve: () => void;
+  waitPending: boolean;
+  closing: boolean;
+  terminationPromise: Promise<boolean> | null;
+}
+
+interface TerminalExecutable {
+  args: string[];
+  command: string;
+}
+
+interface TerminalLaunchDescriptor extends TerminalExecutable {
+  cwd: string;
+  env: Record<string, string>;
+}
+
+interface PreparedTerminalLaunch extends TerminalExecutable {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  descriptor: TerminalLaunchDescriptor;
+  outputByteLimit: number | null;
+}
+
+const SAFE_INHERITED_ENVIRONMENT_NAMES = [
+  "COLORTERM",
+  "ComSpec",
+  "HOME",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LANG",
+  "LC_ALL",
+  "LOCALAPPDATA",
+  "PATH",
+  "PATHEXT",
+  "SystemRoot",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USERPROFILE",
+  "WINDIR",
+] as const;
+
+const MAX_TERMINAL_PERMISSION_BYTES = 3000;
+const MAX_TERMINAL_PERMISSION_ARGUMENTS = 50;
+const MAX_TERMINAL_PERMISSION_VALUE_LENGTH = 1024;
+const TERMINAL_CONTROL_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/u;
+
+/**
+ * Ceiling for retained terminal output when the agent supplies no
+ * `outputByteLimit`. Without it a single approved long-running command can
+ * grow an unbounded string in the extension host.
+ */
+const MAX_TERMINAL_OUTPUT_BYTES = 1_048_576;
+/** Concurrent prompts an agent can force onto the user before we fail closed. */
+const MAX_PENDING_PERMISSION_REQUESTS = 16;
+/** Upper bound on retained grants so approvals cannot grow without limit. */
+const MAX_TERMINAL_GRANTS = 64;
+/** Small fixed envelope for one untrusted permission prompt. */
+const MAX_PERMISSION_OPTIONS = 4;
+const MAX_PERMISSION_OPTION_VALUE_LENGTH = 256;
+const MAX_PERMISSION_PAYLOAD_BYTES = 32_768;
+const MAX_PERMISSION_PAYLOAD_VALUE_LENGTH = 4096;
+const MAX_PERMISSION_PAYLOAD_ENTRIES = 100;
+const MAX_PERMISSION_PAYLOAD_DEPTH = 5;
+const SENSITIVE_PERMISSION_KEYS =
+  /authorization|credential|key|password|secret|token/i;
+/**
+ * `cmd.exe` truncates command lines beyond 8191 characters, so anything close
+ * to that ceiling is refused rather than silently altered.
+ */
+const MAX_WINDOWS_COMMAND_LINE = 8000;
+/** Live child processes one session may hold open at a time. */
+const MAX_ACTIVE_TERMINALS = 8;
+const TERMINAL_TERMINATION_GRACE_MS = 1000;
+
+/**
+ * Fields the user actually reviews in the permission modal. A grant is only
+ * ever derived from a payload that contains nothing else.
+ */
+const REVIEWABLE_TERMINAL_KEYS: Record<string, true> = {
+  command: true,
+  args: true,
+  cwd: true,
+  env: true,
+};
+/**
+ * Fields `terminal/create` may add on the wire. `sessionId` is bound through
+ * the hash input and `outputByteLimit` only caps retained output, so neither
+ * can widen what the user approved.
+ */
+const CREATE_TERMINAL_KEYS: Record<string, true> = {
+  ...REVIEWABLE_TERMINAL_KEYS,
+  sessionId: true,
+  outputByteLimit: true,
+};
+const PERMISSION_OPTION_KINDS: Record<string, true> = {
+  allow_once: true,
+  allow_always: true,
+  reject_once: true,
+  reject_always: true,
+};
+
+function isWithinWorkspaceRoot(candidate: string, root: string): boolean {
+  const pathFromRoot = relative(root, candidate);
+  return (
+    pathFromRoot === "" ||
+    (!pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot))
+  );
+}
+
+function isSupportedPermissionOption(option: unknown): option is {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+} {
+  if (!option || typeof option !== "object") {
+    return false;
+  }
+  const candidate = option as Record<string, unknown>;
+  return (
+    typeof candidate.optionId === "string" &&
+    candidate.optionId.length > 0 &&
+    candidate.optionId.length <= MAX_PERMISSION_OPTION_VALUE_LENGTH &&
+    !TERMINAL_CONTROL_CHARACTERS.test(candidate.optionId) &&
+    typeof candidate.name === "string" &&
+    candidate.name.length <= MAX_PERMISSION_OPTION_VALUE_LENGTH &&
+    !TERMINAL_CONTROL_CHARACTERS.test(candidate.name) &&
+    typeof candidate.kind === "string" &&
+    PERMISSION_OPTION_KINDS[candidate.kind] === true
+  );
+}
+
+function isBoundedPermissionPayload(value: unknown): boolean {
+  let entries = 0;
+  const visit = (candidate: unknown, depth: number): boolean => {
+    if (depth > MAX_PERMISSION_PAYLOAD_DEPTH) {
+      return false;
+    }
+    if (typeof candidate === "string") {
+      return candidate.length <= MAX_PERMISSION_PAYLOAD_VALUE_LENGTH;
+    }
+    if (
+      candidate === null ||
+      typeof candidate === "boolean" ||
+      typeof candidate === "number"
+    ) {
+      return true;
+    }
+    if (typeof candidate !== "object") {
+      return false;
+    }
+    const values = Array.isArray(candidate)
+      ? candidate
+      : Object.values(candidate as Record<string, unknown>);
+    if (values.length > MAX_TERMINAL_PERMISSION_ARGUMENTS) {
+      return false;
+    }
+    entries += values.length;
+    return (
+      entries <= MAX_PERMISSION_PAYLOAD_ENTRIES &&
+      values.every((entry) => visit(entry, depth + 1))
+    );
+  };
+
+  if (!visit(value, 0)) {
+    return false;
+  }
+  try {
+    const serialized = JSON.stringify(value);
+    return (
+      typeof serialized === "string" &&
+      Buffer.byteLength(serialized, "utf8") <= MAX_PERMISSION_PAYLOAD_BYTES
+    );
+  } catch {
+    return false;
+  }
+}
+
+function permissionPayloadHasHiddenValues(value: unknown): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return Object.entries(value as Record<string, unknown>).some(
+    ([key, entry]) =>
+      SENSITIVE_PERMISSION_KEYS.test(key) ||
+      key === "value" ||
+      permissionPayloadHasHiddenValues(entry)
+  );
+}
+
+function terminalLaunchDescriptor(
+  command: string,
+  args: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv
+): TerminalLaunchDescriptor {
+  return {
+    args: [...args],
+    command,
+    cwd,
+    env: Object.fromEntries(
+      Object.entries(env)
+        .filter((entry): entry is [string, string] => entry[1] !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+    ),
+  };
+}
+
+function terminalLaunchKey(
+  sessionId: string,
+  descriptor: TerminalLaunchDescriptor
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ descriptor, sessionId }))
+    .digest("base64url");
+}
+
+/**
+ * Canonical, collision-resistant identity of a terminal request.
+ *
+ * The same canonical form is hashed for the reviewed payload and for the
+ * later `terminal/create`, so a grant can only be redeemed by a byte-identical
+ * command, argument vector, cwd, and empty environment inside the same
+ * session. `allowedKeys` differs between the two call sites because the wire
+ * request carries transport fields the reviewed payload never has.
+ */
+function terminalPermissionKey(
+  sessionId: string,
+  value: unknown,
+  allowedKeys: Record<string, true> = REVIEWABLE_TERMINAL_KEYS
+): string | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const request = value as Record<string, unknown>;
+  const keys = Object.keys(request);
+  if (
+    keys.some((key) => allowedKeys[key] !== true) ||
+    typeof request.command !== "string" ||
+    request.command.length === 0 ||
+    request.command.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+    TERMINAL_CONTROL_CHARACTERS.test(request.command) ||
+    (request.cwd !== undefined &&
+      request.cwd !== null &&
+      (typeof request.cwd !== "string" ||
+        request.cwd.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+        TERMINAL_CONTROL_CHARACTERS.test(request.cwd))) ||
+    (request.args !== undefined &&
+      (!Array.isArray(request.args) ||
+        request.args.length > MAX_TERMINAL_PERMISSION_ARGUMENTS ||
+        request.args.some(
+          (arg) =>
+            typeof arg !== "string" ||
+            arg.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+            TERMINAL_CONTROL_CHARACTERS.test(arg)
+        ))) ||
+    (request.env !== undefined &&
+      (!Array.isArray(request.env) || request.env.length > 0))
+  ) {
+    return null;
+  }
+
+  const serialized = JSON.stringify({
+    args: request.args ?? [],
+    command: request.command,
+    cwd: request.cwd ?? null,
+    env: [],
+    sessionId,
+  });
+  if (Buffer.byteLength(serialized, "utf8") > MAX_TERMINAL_PERMISSION_BYTES) {
+    return null;
+  }
+  return createHash("sha256").update(serialized).digest("base64url");
+}
+
+/**
+ * Quotes a `.cmd`/`.bat` invocation for `cmd.exe /d /s /c`.
+ *
+ * Exported so the quoting rules are verifiable on every platform, not only on
+ * the Windows runner. Metacharacters are rejected rather than escaped because
+ * `cmd.exe` has no escape that survives every parsing stage, and an
+ * over-length line is rejected because `cmd.exe` silently truncates at 8191
+ * characters, which would run something other than what the user reviewed.
+ */
+export function buildWindowsBatchCommandLine(
+  candidate: string,
+  args: string[]
+): string {
+  const parts = [candidate, ...args];
+  if (parts.some((value) => /["&|<>()^%!]/.test(value))) {
+    throw new Error("Windows batch command contains unsupported characters.");
+  }
+  const commandLine = parts.map((value) => `"${value}"`).join(" ");
+  if (commandLine.length > MAX_WINDOWS_COMMAND_LINE) {
+    throw new Error("Windows batch command line is too long.");
+  }
+  return commandLine;
+}
+
+async function resolveTerminalExecutable(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  workspaceRoots: string[],
+  options: AgentCommandResolutionOptions
+): Promise<TerminalExecutable> {
+  const resolutionOptions: AgentCommandResolutionOptions = {
+    ...options,
+    env,
+    excludedDirectories: [
+      ...(options.excludedDirectories ?? []),
+      ...workspaceRoots,
+    ],
+  };
+  const executable = resolveAgentCommand(command, args, resolutionOptions);
+  if (executable) {
+    return { command: executable.command, args: executable.args };
+  }
+
+  // Arbitrary explicit batch files cannot be decoded like npm shims. They are
+  // still safe to launch through cmd.exe when both paths are absolute and the
+  // reviewed argv contains no cmd metacharacters.
+  if (
+    process.platform === "win32" &&
+    isAbsolute(command) &&
+    /\.(cmd|bat)$/i.test(command)
+  ) {
+    const candidate = await realpath(command);
+    const commandLine = buildWindowsBatchCommandLine(candidate, args);
+    const commandProcessor = resolveAgentCommand(
+      env.ComSpec ??
+        join(
+          env.SystemRoot ?? env.WINDIR ?? "C:\\Windows",
+          "System32",
+          "cmd.exe"
+        ),
+      [],
+      resolutionOptions
+    );
+    if (commandProcessor) {
+      return {
+        command: commandProcessor.command,
+        args: ["/d", "/s", "/c", `"${commandLine}"`],
+      };
+    }
+  }
+
+  throw new Error("Terminal command is unavailable.");
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
@@ -153,13 +514,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private activePromptGeneration: number | null = null;
   private replayGeneration: number | null = null;
   private terminals: Map<string, ManagedTerminal> = new Map();
-  private terminalCounter = 0;
+  private retiringTerminals = new Set<ManagedTerminal>();
+  private terminalGeneration = 0;
+  private pendingTerminalCreates = 0;
+  /**
+   * Redeemable terminal grants keyed by the exact raw request identity. The
+   * resolved descriptor binds the effective executable, argv, cwd, and env;
+   * uses counts independently approved allow_once decisions.
+   */
+  private terminalPermissionGrants = new Map<
+    string,
+    { descriptorKey: string; persistent: boolean; uses: number }
+  >();
+  private permissionEpoch = 0;
   private permissionRequests: Map<
     string,
     {
       resolve: (response: RequestPermissionResponse) => void;
       timeoutId: NodeJS.Timeout;
       optionIds: Set<string>;
+      epoch: number;
     }
   > = new Map();
   private readonly permissionRequestTimeoutMs = 60000;
@@ -216,6 +590,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.sessionStart = null;
         this.activeSessionContext = null;
         this.clearPendingAttachments();
+        // A dropped agent leaves its child processes running and its terminal
+        // handles reachable if the next session reuses the same id, so the
+        // whole capability is torn down with the connection.
+        void this.disposeTerminals();
         this.expirePermissionRequests();
         if (interruptedReplay) {
           this.postMessage({
@@ -610,6 +988,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const hadRestoredModeModel = this.hasRestoredModeModel;
       const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
+      await this.disposeTerminals();
       this.isReplaying = true;
       this.replayGeneration = generation;
       this.replayMessages = [];
@@ -813,130 +1192,352 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     return {};
   }
+  private async prepareTerminalLaunch(
+    params: CreateTerminalRequest
+  ): Promise<PreparedTerminalLaunch> {
+    if (!vscode.workspace.isTrusted) {
+      throw new Error("Terminal execution requires a trusted workspace.");
+    }
+    if (
+      typeof params.command !== "string" ||
+      params.command.length === 0 ||
+      params.command.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+      TERMINAL_CONTROL_CHARACTERS.test(params.command)
+    ) {
+      throw new Error("Terminal command is invalid.");
+    }
+
+    const args = params.args ?? [];
+    if (
+      !Array.isArray(args) ||
+      args.length > MAX_TERMINAL_PERMISSION_ARGUMENTS ||
+      args.some(
+        (arg) =>
+          typeof arg !== "string" ||
+          arg.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+          TERMINAL_CONTROL_CHARACTERS.test(arg)
+      )
+    ) {
+      throw new Error("Terminal arguments are invalid.");
+    }
+    if ((params.env?.length ?? 0) > 0) {
+      throw new Error("Terminal environment overrides are not supported.");
+    }
+
+    const outputByteLimit = params.outputByteLimit ?? null;
+    if (
+      outputByteLimit !== null &&
+      (!Number.isSafeInteger(outputByteLimit) || outputByteLimit < 0)
+    ) {
+      throw new Error("Terminal output limit is invalid.");
+    }
+
+    const localRoots = (vscode.workspace.workspaceFolders ?? []).filter(
+      (folder) => folder.uri.scheme === "file"
+    );
+    if (localRoots.length === 0) {
+      throw new Error("Terminal execution requires a local workspace folder.");
+    }
+    if (
+      params.cwd !== null &&
+      params.cwd !== undefined &&
+      (typeof params.cwd !== "string" ||
+        !isAbsolute(params.cwd) ||
+        params.cwd.length > MAX_TERMINAL_PERMISSION_VALUE_LENGTH ||
+        TERMINAL_CONTROL_CHARACTERS.test(params.cwd))
+    ) {
+      throw new Error("Terminal working directory must be an absolute path.");
+    }
+
+    const requestedCwd = params.cwd ?? localRoots[0].uri.fsPath;
+    const [cwd, ...roots] = await Promise.all([
+      realpath(resolve(requestedCwd)),
+      ...localRoots.map((folder) => realpath(resolve(folder.uri.fsPath))),
+    ]);
+    if (!roots.some((root) => isWithinWorkspaceRoot(cwd, root))) {
+      throw new Error(
+        "Terminal working directory must be inside a local workspace folder."
+      );
+    }
+
+    const resolutionOptions: AgentCommandResolutionOptions = {
+      ...this.getAgentResolutionOptions(),
+      env: process.env,
+      excludedDirectories: roots,
+    };
+    const inherited = createAgentEnvironment(resolutionOptions);
+    const env: NodeJS.ProcessEnv = {};
+    for (const name of SAFE_INHERITED_ENVIRONMENT_NAMES) {
+      const sourceName =
+        process.platform === "win32"
+          ? Object.keys(inherited).find(
+              (candidate) => candidate.toLowerCase() === name.toLowerCase()
+            )
+          : name;
+      if (sourceName && inherited[sourceName] !== undefined) {
+        env[name] = inherited[sourceName];
+      }
+    }
+    const executable = await resolveTerminalExecutable(
+      params.command,
+      args,
+      env,
+      roots,
+      resolutionOptions
+    );
+    const descriptor = terminalLaunchDescriptor(
+      executable.command,
+      executable.args,
+      cwd,
+      env
+    );
+    if (!isBoundedPermissionPayload(descriptor)) {
+      throw new Error("Terminal launch description is too large to review.");
+    }
+    return {
+      args: executable.args,
+      command: executable.command,
+      cwd,
+      env,
+      descriptor,
+      outputByteLimit,
+    };
+  }
 
   private async handleCreateTerminal(
     params: CreateTerminalRequest
   ): Promise<CreateTerminalResponse> {
-    const terminalId = `term-${++this.terminalCounter}-${Date.now()}`;
+    const permissionKey = terminalPermissionKey(
+      params.sessionId,
+      params,
+      CREATE_TERMINAL_KEYS
+    );
+    // This raw-key check happens before filesystem work. The resolved launch
+    // descriptor is checked after preparation and again immediately at spawn.
+    if (!permissionKey || !this.terminalPermissionGrants.has(permissionKey)) {
+      throw new Error(
+        "Terminal execution requires an approved permission request."
+      );
+    }
+    if (
+      this.terminals.size +
+        this.retiringTerminals.size +
+        this.pendingTerminalCreates >=
+      MAX_ACTIVE_TERMINALS
+    ) {
+      throw new Error("Too many ACP terminals are already running.");
+    }
 
-    let exitResolve: () => void = () => {};
-    const exitPromise = new Promise<void>((resolve) => {
-      exitResolve = resolve;
-    });
-
-    const managedTerminal: ManagedTerminal = {
-      id: terminalId,
-      proc: null,
-      output: "",
-      outputByteLimit: params.outputByteLimit ?? null,
-      truncated: false,
-      exitCode: null,
-      signal: null,
-      exitPromise,
-      exitResolve,
-    };
-
-    const writeEmitter = new vscode.EventEmitter<string>();
-    const closeEmitter = new vscode.EventEmitter<number | void>();
-
-    const pty: vscode.Pseudoterminal = {
-      onDidWrite: writeEmitter.event,
-      onDidClose: closeEmitter.event,
-      open: () => {
-        const workspaceCwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const cwd =
-          params.cwd && params.cwd.trim() !== ""
-            ? params.cwd
-            : workspaceCwd ||
-              process.env.HOME ||
-              process.env.USERPROFILE ||
-              process.cwd();
-
-        const proc = spawn(params.command, params.args || [], {
-          cwd,
-          env: {
-            ...process.env,
-            ...(params.env?.reduce(
-              (acc, e) => ({ ...acc, [e.name]: e.value }),
-              {}
-            ) || {}),
-          },
-          shell: true,
-        });
-
-        managedTerminal.proc = proc;
-
-        proc.stdout?.on("data", (data: Buffer) => {
-          const text = data.toString();
-          writeEmitter.fire(text.replace(/\n/g, "\r\n"));
-          this.appendTerminalOutput(managedTerminal, text);
-        });
-
-        proc.stderr?.on("data", (data: Buffer) => {
-          const text = data.toString();
-          writeEmitter.fire(text.replace(/\n/g, "\r\n"));
-          this.appendTerminalOutput(managedTerminal, text);
-        });
-
-        proc.on("close", (code: number | null, signal: string | null) => {
-          managedTerminal.exitCode = code;
-          managedTerminal.signal = signal;
-          managedTerminal.exitResolve();
-          closeEmitter.fire(code ?? 0);
-        });
-
-        proc.on("error", (err: Error) => {
-          writeEmitter.fire(`\r\nError: ${err.message}\r\n`);
-          managedTerminal.exitCode = 1;
-          managedTerminal.exitResolve();
-          closeEmitter.fire(1);
-        });
-      },
-      close: () => {
-        if (managedTerminal.proc && !managedTerminal.proc.killed) {
-          try {
-            managedTerminal.proc.kill();
-          } catch {}
+    this.pendingTerminalCreates++;
+    let reservationHeld = true;
+    try {
+      const launch = await this.prepareTerminalLaunch(params);
+      const grant = this.terminalPermissionGrants.get(permissionKey);
+      const descriptorKey = terminalLaunchKey(
+        params.sessionId,
+        launch.descriptor
+      );
+      if (!grant || grant.descriptorKey !== descriptorKey) {
+        throw new Error(
+          "Terminal execution requires an approved permission request."
+        );
+      }
+      if (!grant.persistent) {
+        if (grant.uses <= 1) {
+          this.terminalPermissionGrants.delete(permissionKey);
+        } else {
+          grant.uses--;
         }
-      },
-    };
+      }
 
-    const terminal = vscode.window.createTerminal({
-      name: `ACP: ${params.command}`,
-      pty,
-    });
+      console.log("[Chat] Creating approved ACP terminal");
+      const terminalId = `term-${randomUUID()}`;
 
-    managedTerminal.terminal = terminal;
-    this.terminals.set(terminalId, managedTerminal);
+      let exitResolve: () => void = () => {};
+      const exitPromise = new Promise<void>((resolve) => {
+        exitResolve = resolve;
+      });
+      let waitAbortResolve: () => void = () => {};
+      const waitAbortPromise = new Promise<void>((resolve) => {
+        waitAbortResolve = resolve;
+      });
 
-    terminal.show(true);
+      const managedTerminal: ManagedTerminal = {
+        id: terminalId,
+        sessionId: params.sessionId,
+        generation: this.terminalGeneration,
+        proc: null,
+        processId: null,
+        output: "",
+        outputByteLimit: launch.outputByteLimit,
+        truncated: false,
+        exitCode: null,
+        signal: null,
+        exitPromise,
+        exitResolve,
+        waitAbortPromise,
+        waitAbortResolve,
+        waitPending: false,
+        closing: false,
+        terminationPromise: null,
+      };
 
-    return { terminalId };
+      const writeEmitter = new vscode.EventEmitter<string>();
+      const closeEmitter = new vscode.EventEmitter<number | void>();
+      const approvedDescriptorKey = descriptorKey;
+
+      const pty: vscode.Pseudoterminal = {
+        onDidWrite: writeEmitter.event,
+        onDidClose: closeEmitter.event,
+        open: async () => {
+          if (!vscode.workspace.isTrusted || managedTerminal.closing) {
+            writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
+            managedTerminal.exitCode = 1;
+            managedTerminal.exitResolve();
+            closeEmitter.fire(1);
+            return;
+          }
+
+          let currentLaunch: PreparedTerminalLaunch;
+          try {
+            currentLaunch = await this.prepareTerminalLaunch(params);
+            if (
+              !vscode.workspace.isTrusted ||
+              managedTerminal.closing ||
+              managedTerminal.generation !== this.terminalGeneration ||
+              this.terminals.get(terminalId) !== managedTerminal ||
+              terminalLaunchKey(params.sessionId, currentLaunch.descriptor) !==
+                approvedDescriptorKey
+            ) {
+              throw new Error("Terminal launch changed after approval.");
+            }
+          } catch {
+            writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
+            managedTerminal.exitCode = 1;
+            managedTerminal.exitResolve();
+            closeEmitter.fire(1);
+            return;
+          }
+
+          let proc: ChildProcess;
+          try {
+            proc = spawn(currentLaunch.command, currentLaunch.args, {
+              cwd: currentLaunch.cwd,
+              env: currentLaunch.env,
+              shell: false,
+              windowsHide: true,
+              detached: process.platform !== "win32",
+            });
+          } catch {
+            writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
+            this.appendTerminalOutput(
+              managedTerminal,
+              "\nFailed to start ACP terminal.\n"
+            );
+            managedTerminal.exitCode = 1;
+            managedTerminal.exitResolve();
+            closeEmitter.fire(1);
+            return;
+          }
+
+          managedTerminal.proc = proc;
+          managedTerminal.processId = proc.pid ?? null;
+
+          proc.stdout?.on("data", (data: Buffer) => {
+            const text = data.toString();
+            writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+            this.appendTerminalOutput(managedTerminal, text);
+          });
+
+          proc.stderr?.on("data", (data: Buffer) => {
+            const text = data.toString();
+            writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+            this.appendTerminalOutput(managedTerminal, text);
+          });
+
+          proc.on("close", (code: number | null, signal: string | null) => {
+            managedTerminal.exitCode = code;
+            managedTerminal.signal = signal;
+            managedTerminal.exitResolve();
+            closeEmitter.fire(code ?? 0);
+          });
+
+          proc.on("error", () => {
+            writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
+            this.appendTerminalOutput(
+              managedTerminal,
+              "\nFailed to start ACP terminal.\n"
+            );
+            managedTerminal.exitCode = 1;
+            managedTerminal.exitResolve();
+            closeEmitter.fire(1);
+          });
+        },
+        close: () => {
+          void this.terminateTerminalProcess(managedTerminal);
+        },
+      };
+
+      const terminal = vscode.window.createTerminal({
+        name: "ACP terminal",
+        pty,
+      });
+
+      managedTerminal.terminal = terminal;
+      this.terminals.set(terminalId, managedTerminal);
+      this.pendingTerminalCreates--;
+      reservationHeld = false;
+      terminal.show(true);
+      return { terminalId };
+    } finally {
+      if (reservationHeld) {
+        this.pendingTerminalCreates--;
+      }
+    }
   }
 
   private appendTerminalOutput(terminal: ManagedTerminal, text: string): void {
     terminal.output += text;
-    if (terminal.outputByteLimit !== null) {
-      const byteLength = Buffer.byteLength(terminal.output, "utf8");
-      if (byteLength > terminal.outputByteLimit) {
-        const encoded = Buffer.from(terminal.output, "utf8");
-        let start = encoded.length - terminal.outputByteLimit;
-        while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) {
-          start++;
-        }
-        terminal.output = encoded.subarray(start).toString("utf8");
-        terminal.truncated = true;
+    // An agent that omits `outputByteLimit` must not be able to grow the
+    // extension host's heap without bound through a long-running command.
+    const limit = Math.min(
+      terminal.outputByteLimit ?? MAX_TERMINAL_OUTPUT_BYTES,
+      MAX_TERMINAL_OUTPUT_BYTES
+    );
+    const byteLength = Buffer.byteLength(terminal.output, "utf8");
+    if (byteLength > limit) {
+      const encoded = Buffer.from(terminal.output, "utf8");
+      let start = encoded.length - limit;
+      while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) {
+        start++;
       }
+      terminal.output = encoded.subarray(start).toString("utf8");
+      terminal.truncated = true;
     }
+  }
+
+  private getSessionTerminal(
+    terminalId: string,
+    sessionId: string
+  ): ManagedTerminal {
+    const terminal = this.terminals.get(terminalId);
+    if (
+      !terminal ||
+      terminal.sessionId !== sessionId ||
+      terminal.generation !== this.terminalGeneration
+    ) {
+      throw new Error(`Terminal not found: ${terminalId}`);
+    }
+    return terminal;
   }
 
   private async handleTerminalOutput(
     params: TerminalOutputRequest
   ): Promise<TerminalOutputResponse> {
-    const terminal = this.terminals.get(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Terminal not found: ${params.terminalId}`);
-    }
+    const terminal = this.getSessionTerminal(
+      params.terminalId,
+      params.sessionId
+    );
 
     const exitStatus =
       terminal.exitCode !== null
@@ -956,36 +1557,179 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleWaitForTerminalExit(
     params: WaitForTerminalExitRequest
   ): Promise<WaitForTerminalExitResponse> {
-    const terminal = this.terminals.get(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Terminal not found: ${params.terminalId}`);
+    const terminal = this.getSessionTerminal(
+      params.terminalId,
+      params.sessionId
+    );
+    if (terminal.waitPending) {
+      throw new Error("A terminal exit wait is already pending.");
     }
 
-    await terminal.exitPromise;
-
-    return {
-      exitCode: terminal.exitCode,
-      ...(terminal.signal !== null && { signal: terminal.signal }),
-    };
+    terminal.waitPending = true;
+    try {
+      await Promise.race([terminal.exitPromise, terminal.waitAbortPromise]);
+      return {
+        exitCode: terminal.exitCode,
+        ...(terminal.signal !== null && { signal: terminal.signal }),
+      };
+    } finally {
+      terminal.waitPending = false;
+    }
   }
 
-  private killTerminalProcess(terminal: ManagedTerminal): void {
-    if (terminal.proc && !terminal.proc.killed) {
+  private async runTerminationCommand(
+    command: string,
+    args: string[]
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let child: ChildProcess;
       try {
-        terminal.proc.kill();
-      } catch {}
+        child = spawn(command, args, {
+          shell: false,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      } catch {
+        resolve(false);
+        return;
+      }
+      child.once("error", () => resolve(false));
+      child.once("close", (code) => resolve(code === 0));
+    });
+  }
+
+  private processGroupExists(processGroupId: number): boolean {
+    try {
+      process.kill(-processGroupId, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
     }
+  }
+
+  private async waitForProcessGroupExit(
+    processGroupId: number
+  ): Promise<boolean> {
+    const deadline = Date.now() + TERMINAL_TERMINATION_GRACE_MS;
+    while (this.processGroupExists(processGroupId)) {
+      if (Date.now() >= deadline) {
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    return true;
+  }
+
+  private async terminateWindowsProcessTree(
+    processId: number
+  ): Promise<boolean> {
+    const windowsRoot =
+      process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+    const taskkill = join(windowsRoot, "System32", "taskkill.exe");
+    if (
+      await this.runTerminationCommand(taskkill, [
+        "/pid",
+        String(processId),
+        "/T",
+        "/F",
+      ])
+    ) {
+      return true;
+    }
+
+    // taskkill cannot traverse from a parent that already exited. Windows
+    // preserves ParentProcessId, so a fixed PowerShell program can still find
+    // and stop the orphaned descendants without accepting shell input.
+    const powershell = join(
+      windowsRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe"
+    );
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      `$root=[uint32]${processId}`,
+      "$all=Get-CimInstance Win32_Process",
+      "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
+      "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
+      "$queue.Enqueue($root)",
+      "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
+      "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+      "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
+    ].join(";");
+    return this.runTerminationCommand(powershell, [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
+    ]);
+  }
+
+  private async terminateTerminalProcess(
+    terminal: ManagedTerminal
+  ): Promise<boolean> {
+    if (terminal.terminationPromise) {
+      return terminal.terminationPromise;
+    }
+
+    terminal.closing = true;
+    terminal.waitAbortResolve();
+    terminal.terminationPromise = (async () => {
+      const processId = terminal.processId ?? terminal.proc?.pid ?? null;
+      if (!processId) {
+        terminal.exitCode = terminal.exitCode ?? 1;
+        terminal.exitResolve();
+        return true;
+      }
+
+      if (process.platform === "win32") {
+        const terminated = await this.terminateWindowsProcessTree(processId);
+        if (terminated) {
+          terminal.signal = "SIGKILL";
+        }
+        return terminated;
+      }
+
+      if (!this.processGroupExists(processId)) {
+        return true;
+      }
+      try {
+        process.kill(-processId, "SIGTERM");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          return false;
+        }
+      }
+      terminal.signal = "SIGTERM";
+      if (await this.waitForProcessGroupExit(processId)) {
+        return true;
+      }
+
+      try {
+        process.kill(-processId, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+          return false;
+        }
+      }
+      terminal.signal = "SIGKILL";
+      return this.waitForProcessGroupExit(processId);
+    })();
+    return terminal.terminationPromise;
   }
 
   private async handleKillTerminalCommand(
     params: KillTerminalRequest
   ): Promise<KillTerminalResponse> {
-    const terminal = this.terminals.get(params.terminalId);
-    if (!terminal) {
-      throw new Error(`Terminal not found: ${params.terminalId}`);
+    const terminal = this.getSessionTerminal(
+      params.terminalId,
+      params.sessionId
+    );
+    if (!(await this.terminateTerminalProcess(terminal))) {
+      throw new Error("Failed to terminate ACP terminal process tree.");
     }
-
-    this.killTerminalProcess(terminal);
     terminal.terminal?.dispose();
     return {};
   }
@@ -993,21 +1737,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleReleaseTerminal(
     params: ReleaseTerminalRequest
   ): Promise<ReleaseTerminalResponse> {
-    const terminal = this.terminals.get(params.terminalId);
-    if (!terminal) {
-      return {};
+    const terminal = this.getSessionTerminal(
+      params.terminalId,
+      params.sessionId
+    );
+    if (!(await this.terminateTerminalProcess(terminal))) {
+      throw new Error("Failed to terminate ACP terminal process tree.");
     }
-
-    this.killTerminalProcess(terminal);
     terminal.terminal?.dispose();
     this.terminals.delete(params.terminalId);
     return {};
   }
 
+  private storeTerminalPermissionGrant(
+    key: string,
+    descriptorKey: string,
+    persistent: boolean
+  ): void {
+    const existing = this.terminalPermissionGrants.get(key);
+    if (existing?.descriptorKey === descriptorKey) {
+      if (existing.persistent || persistent) {
+        existing.persistent = true;
+        existing.uses = 0;
+        return;
+      }
+      const units = Array.from(this.terminalPermissionGrants.values()).reduce(
+        (total, grant) => total + (grant.persistent ? 1 : grant.uses),
+        0
+      );
+      if (units < MAX_TERMINAL_GRANTS) {
+        existing.uses++;
+      }
+      return;
+    }
+
+    if (existing) {
+      this.terminalPermissionGrants.delete(key);
+    }
+    let units = Array.from(this.terminalPermissionGrants.values()).reduce(
+      (total, grant) => total + (grant.persistent ? 1 : grant.uses),
+      0
+    );
+    while (units >= MAX_TERMINAL_GRANTS) {
+      const oldest = this.terminalPermissionGrants.keys().next();
+      if (oldest.done) {
+        return;
+      }
+      const evicted = this.terminalPermissionGrants.get(oldest.value);
+      this.terminalPermissionGrants.delete(oldest.value);
+      units -= evicted?.persistent ? 1 : (evicted?.uses ?? 0);
+    }
+    this.terminalPermissionGrants.set(key, {
+      descriptorKey,
+      persistent,
+      uses: persistent ? 0 : 1,
+    });
+  }
+
   private async handleRequestPermission(
     params: RequestPermissionRequest
   ): Promise<RequestPermissionResponse> {
-    if (!this.view) {
+    console.log("[Chat] Permission request:", params.toolCall?.toolCallId);
+
+    const requestView = this.view;
+    if (!requestView) {
       console.log("[Chat] No webview available, cancelling permission request");
       return { outcome: { outcome: "cancelled" } };
     }
@@ -1018,13 +1811,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return { outcome: { outcome: "cancelled" } };
     }
 
-    if (!params.options || params.options.length === 0) {
-      console.log("[Chat] No options provided, cancelling permission request");
+    const rawInput = params.toolCall?.rawInput;
+    if (
+      !Array.isArray(params.options) ||
+      params.options.length === 0 ||
+      params.options.length > MAX_PERMISSION_OPTIONS ||
+      !params.options.every(isSupportedPermissionOption) ||
+      (rawInput !== undefined && !isBoundedPermissionPayload(rawInput))
+    ) {
+      console.log("[Chat] Invalid permission payload, cancelling request");
+      return { outcome: { outcome: "cancelled" } };
+    }
+    const originalOptionIds = new Set(
+      params.options.map((option) => option.optionId)
+    );
+    const optionKinds = new Set(params.options.map((option) => option.kind));
+    if (
+      originalOptionIds.size !== params.options.length ||
+      optionKinds.size !== params.options.length
+    ) {
+      console.log("[Chat] Duplicate permission options, cancelling request");
       return { outcome: { outcome: "cancelled" } };
     }
 
-    const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    if (this.permissionRequests.size >= MAX_PENDING_PERMISSION_REQUESTS) {
+      console.log("[Chat] Too many pending permission requests, cancelling");
+      return { outcome: { outcome: "cancelled" } };
+    }
 
+    const requestId = `perm-${randomUUID()}`;
+    const epoch = this.permissionEpoch;
     const response = new Promise<RequestPermissionResponse>((resolve) => {
       const timeoutId = setTimeout(() => {
         if (this.permissionRequests.delete(requestId)) {
@@ -1037,11 +1853,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.permissionRequests.set(requestId, {
         resolve,
         timeoutId,
-        optionIds: new Set(params.options.map((opt) => opt.optionId)),
+        optionIds: originalOptionIds,
+        epoch,
       });
     });
 
-    const cancelUndeliveredRequest = (error?: unknown): void => {
+    const cancelRequest = (error?: unknown): void => {
       if (error) {
         console.error("[Chat] Failed to deliver permission request", error);
       }
@@ -1053,39 +1870,111 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     };
 
-    // The view is kept alive while hidden, so a prompt posted to a collapsed
-    // sidebar is delivered but never seen and would silently expire. Reveal it
-    // without stealing focus from the editor.
+    const rawPermissionKey = terminalPermissionKey(params.sessionId, rawInput);
+    let grantablePermissionKey = rawPermissionKey;
+    let descriptorKey: string | null = null;
+    let reviewContent = rawInput;
+    if (rawPermissionKey) {
+      try {
+        const launch = await this.prepareTerminalLaunch({
+          sessionId: params.sessionId,
+          ...(rawInput as Omit<CreateTerminalRequest, "sessionId">),
+        });
+        descriptorKey = terminalLaunchKey(params.sessionId, launch.descriptor);
+        reviewContent = launch.descriptor;
+      } catch {
+        grantablePermissionKey = null;
+      }
+    }
+
+    if (
+      !this.permissionRequests.has(requestId) ||
+      epoch !== this.permissionEpoch ||
+      this.view !== requestView ||
+      this.acpClient.getCurrentSessionId() !== params.sessionId
+    ) {
+      cancelRequest();
+      return response;
+    }
+
+    const presentedOptions = permissionPayloadHasHiddenValues(reviewContent)
+      ? params.options.filter(
+          (option) =>
+            option.kind === "reject_once" || option.kind === "reject_always"
+        )
+      : params.options;
+    if (presentedOptions.length === 0) {
+      cancelRequest();
+      return response;
+    }
+    const pending = this.permissionRequests.get(requestId);
+    if (!pending) {
+      return response;
+    }
+    pending.optionIds = new Set(
+      presentedOptions.map((option) => option.optionId)
+    );
+
     try {
-      this.view.show?.(true);
+      requestView.show?.(true);
     } catch (error) {
       console.error("[Chat] Failed to reveal the chat view", error);
     }
 
     try {
-      const delivery = this.view.webview.postMessage({
+      const delivery = requestView.webview.postMessage({
         type: "permissionRequest",
         requestId,
-        title: params.toolCall?.title || "Permission Required",
-        rawInput: params.toolCall?.rawInput,
-        options: params.options.map((opt) => ({
-          id: opt.optionId,
-          label: opt.name,
+        title: "Agent requests permission",
+        executable: grantablePermissionKey !== null,
+        rawInput: reviewContent,
+        options: presentedOptions.map((option) => ({
+          id: option.optionId,
+          kind: option.kind,
         })),
       });
       void Promise.resolve(delivery).then(
         (delivered) => {
           if (!delivered) {
-            cancelUndeliveredRequest();
+            cancelRequest();
           }
         },
-        (error) => cancelUndeliveredRequest(error)
+        (error) => cancelRequest(error)
       );
     } catch (error) {
-      cancelUndeliveredRequest(error);
+      cancelRequest(error);
     }
 
-    return response;
+    const decision = await response;
+    if (
+      epoch !== this.permissionEpoch ||
+      this.acpClient.getCurrentSessionId() !== params.sessionId
+    ) {
+      return { outcome: { outcome: "cancelled" } };
+    }
+    const outcome = decision.outcome;
+    if (outcome.outcome === "selected") {
+      const option = params.options.find(
+        (candidate) => candidate.optionId === outcome.optionId
+      );
+      if (
+        (option?.kind === "reject_once" || option?.kind === "reject_always") &&
+        rawPermissionKey
+      ) {
+        this.terminalPermissionGrants.delete(rawPermissionKey);
+      } else if (
+        (option?.kind === "allow_once" || option?.kind === "allow_always") &&
+        grantablePermissionKey &&
+        descriptorKey
+      ) {
+        this.storeTerminalPermissionGrant(
+          grantablePermissionKey,
+          descriptorKey,
+          option.kind === "allow_always"
+        );
+      }
+    }
+    return decision;
   }
 
   private handlePermissionResponse(message: WebviewMessage): void {
@@ -1114,7 +2003,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private expirePermissionRequests(): void {
+  private cancelPendingPermissionRequests(): void {
     for (const [requestId, pending] of this.permissionRequests.entries()) {
       clearTimeout(pending.timeoutId);
       this.postMessage({ type: "permissionRequestExpired", requestId });
@@ -1123,18 +2012,53 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.permissionRequests.clear();
   }
 
-  public dispose(): void {
-    for (const terminal of this.terminals.values()) {
-      this.killTerminalProcess(terminal);
-      try {
-        terminal.terminal?.dispose();
-      } catch {}
+  private expirePermissionRequests(): void {
+    this.permissionEpoch++;
+    this.cancelPendingPermissionRequests();
+    this.terminalPermissionGrants.clear();
+  }
+
+  private expireTurnPermissions(): void {
+    this.permissionEpoch++;
+    this.cancelPendingPermissionRequests();
+    this.clearOneUseTerminalGrants();
+  }
+
+  private clearOneUseTerminalGrants(): void {
+    for (const [key, grant] of this.terminalPermissionGrants) {
+      if (!grant.persistent) {
+        this.terminalPermissionGrants.delete(key);
+      }
     }
+  }
+
+  private async disposeTerminals(): Promise<void> {
+    this.terminalGeneration++;
+    const terminals = Array.from(this.terminals.values());
     this.terminals.clear();
+    for (const terminal of terminals) {
+      terminal.closing = true;
+      this.retiringTerminals.add(terminal);
+    }
+    await Promise.all(
+      terminals.map(async (terminal) => {
+        const terminated = await this.terminateTerminalProcess(terminal);
+        if (!terminated) {
+          return;
+        }
+        try {
+          terminal.terminal?.dispose();
+        } catch {}
+        this.retiringTerminals.delete(terminal);
+      })
+    );
+  }
+
+  public dispose(): void {
+    void this.disposeTerminals();
     this.mcpSecretRedactor.clear();
     this.activeSessionContext = null;
     this.clearPendingAttachments();
-
     this.expirePermissionRequests();
     this.configurationSubscription.dispose();
     this.workspaceTrustSubscription.dispose();
@@ -1548,12 +2472,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.activePromptGeneration === queuedGeneration) {
         this.activePromptGeneration = null;
       }
+      this.expireTurnPermissions();
     }
   }
 
   private handleAgentChange(agentId: string): void {
     const agent = this.getConfiguredAgent(agentId);
     if (agent) {
+      this.expirePermissionRequests();
+      void this.disposeTerminals();
       this.acpClient.setAgent(agent);
       this.mcpSecretRedactor.clear();
       this.conversationGeneration++;
@@ -1601,10 +2528,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleNewChat(): Promise<void> {
-    this.expirePermissionRequests();
     this.streamingText = "";
 
     if (!this.acpClient.isConnected() && !this.sessionTransition) {
+      this.expirePermissionRequests();
+      await this.disposeTerminals();
       this.conversationGeneration++;
       this.isReplaying = false;
       this.replayGeneration = null;
@@ -1623,6 +2551,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
+      this.expirePermissionRequests();
+      await this.disposeTerminals();
       this.conversationGeneration++;
       this.isReplaying = false;
       this.replayGeneration = null;
@@ -1912,6 +2842,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-content" tabindex="-1">
     <div class="permission-modal-content">
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
+      <p class="permission-warning" id="permission-warning" role="alert" hidden></p>
       <pre class="permission-content" id="permission-content"></pre>
       <div class="permission-options" role="group" aria-label="Permission options"></div>
       <button class="permission-cancel-btn" type="button">Cancel</button>

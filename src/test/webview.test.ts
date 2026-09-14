@@ -2,6 +2,7 @@ import * as assert from "assert";
 import { JSDOM, DOMWindow } from "jsdom";
 import {
   escapeHtml,
+  formatPermissionContent,
   getToolsHtml,
   updateSelectLabel,
   getElements,
@@ -86,6 +87,7 @@ function createWebviewHTML(): string {
   <div id="permission-modal" class="permission-modal" role="dialog" aria-modal="true" aria-labelledby="permission-title" aria-describedby="permission-content" tabindex="-1">
     <div class="permission-modal-content">
       <h3 class="permission-title" id="permission-title">Permission Required</h3>
+      <p class="permission-warning" id="permission-warning" role="alert" hidden></p>
       <pre class="permission-content" id="permission-content"></pre>
       <div class="permission-options" role="group" aria-label="Permission options"></div>
       <button class="permission-cancel-btn" type="button">Cancel</button>
@@ -2138,30 +2140,86 @@ suite("Webview", () => {
       mockVsCode._clearMessages();
     });
 
-    test("showPermissionModal displays modal with options", () => {
+    test("uses extension-defined labels and sanitizes agent permission details", () => {
       const options = [
-        { id: "allow", label: "Allow" },
-        { id: "deny", label: "Deny" },
+        { id: "allow", kind: "allow_once" as const, label: "Always approve" },
+        { id: "deny", kind: "reject_once" as const, label: "Execute now" },
       ];
 
       controller.showPermissionModal(
         "req-123",
-        "File Access",
-        "Read /path/to/file",
+        "<fake dialog>",
+        {
+          command: "npm\u001b[2J test\u202epdf.exe\u200b",
+          env: [{ name: "API_TOKEN", value: "top-secret" }],
+          authorization: "Bearer top-secret",
+        },
         options
       );
 
       const modal = document.getElementById("permission-modal");
       assert.ok(modal?.classList.contains("visible"));
+      assert.strictEqual(
+        modal?.querySelector(".permission-title")?.textContent,
+        "Agent requests permission"
+      );
+      assert.strictEqual(
+        modal?.querySelector(".option-label")?.textContent,
+        "Allow once"
+      );
+      const details = modal?.querySelector(".permission-content")?.textContent;
+      assert.ok(details?.includes("\\u001b"));
+      assert.ok(details?.includes("\\u202e"));
+      assert.ok(!details?.includes("top-secret"));
+      assert.ok(details?.includes("\\u200b"));
+    });
 
-      const title = modal?.querySelector(".permission-title");
-      assert.strictEqual(title?.textContent, "File Access");
+    test("marks every truncated permission detail explicitly", () => {
+      const formatted = formatPermissionContent({
+        valueText: "x".repeat(4097),
+      });
+      assert.ok(formatted.includes("[truncated]"));
+    });
 
-      const content = modal?.querySelector(".permission-content");
-      assert.strictEqual(content?.textContent, "Read /path/to/file");
+    test("states that an executable request starts a process and scopes 'always' to the session", () => {
+      controller.showPermissionModal(
+        "req-exec",
+        undefined,
+        { command: "rm", args: ["-rf", "build"] },
+        [
+          { id: "once", kind: "allow_once" as const },
+          { id: "always", kind: "allow_always" as const },
+        ],
+        true
+      );
 
-      const optionBtns = modal?.querySelectorAll(".permission-option-btn");
-      assert.strictEqual(optionBtns?.length, 2);
+      const modal = document.getElementById("permission-modal");
+      const warning = modal?.querySelector(
+        ".permission-warning"
+      ) as HTMLElement;
+      assert.strictEqual(warning.hidden, false);
+      assert.strictEqual(
+        warning.textContent,
+        "Approving runs this program on your machine with your permissions."
+      );
+      assert.deepStrictEqual(
+        Array.from(modal?.querySelectorAll(".option-label") ?? []).map(
+          (label) => label.textContent
+        ),
+        ["Allow once", "Always allow in this session"]
+      );
+    });
+
+    test("hides the execution warning for a request that cannot start a process", () => {
+      controller.showPermissionModal("req-plain", undefined, { path: "a.ts" }, [
+        { id: "once", kind: "allow_once" as const },
+      ]);
+
+      const warning = document
+        .getElementById("permission-modal")
+        ?.querySelector(".permission-warning") as HTMLElement;
+      assert.strictEqual(warning.hidden, true);
+      assert.strictEqual(warning.textContent, "");
     });
 
     test("showPermissionModal handles object content", () => {
@@ -2252,6 +2310,33 @@ suite("Webview", () => {
       ]);
     });
 
+    test("keeps approval locked until overflowing details are reviewed", () => {
+      const content = document.querySelector(
+        ".permission-content"
+      ) as HTMLElement;
+      Object.defineProperties(content, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: 400 },
+        scrollTop: { configurable: true, value: 0, writable: true },
+      });
+      controller.showPermissionModal(
+        "req-scroll",
+        "Run command",
+        { command: "/usr/bin/node", args: ["--version"] },
+        [{ id: "allow", label: "Allow", kind: "allow_once" }],
+        true
+      );
+      const button = document.querySelector(
+        ".permission-option-btn"
+      ) as HTMLButtonElement;
+
+      releasePermissionGuard();
+      assert.strictEqual(button.disabled, true);
+      content.scrollTop = 300;
+      content.dispatchEvent(new dom.window.Event("scroll"));
+      assert.strictEqual(button.disabled, false);
+    });
+
     test("denial stays available while the options are still guarded", () => {
       controller.showPermissionModal("req-deny", "Write File", "c", [
         { id: "allow_always", label: "Allow Always" },
@@ -2318,7 +2403,7 @@ suite("Webview", () => {
       assert.ok(modal?.classList.contains("visible"));
 
       const title = modal?.querySelector(".permission-title");
-      assert.strictEqual(title?.textContent, "Execute Command");
+      assert.strictEqual(title?.textContent, "Agent requests permission");
     });
 
     test("queues a concurrent request and shows it after the first is cancelled", () => {
@@ -2331,13 +2416,13 @@ suite("Webview", () => {
 
       const modal = document.getElementById("permission-modal");
       let title = modal?.querySelector(".permission-title");
-      assert.strictEqual(title?.textContent, "First");
+      assert.strictEqual(title?.textContent, "Agent requests permission");
       assert.ok(modal?.classList.contains("visible"));
 
       controller.cancelPermission();
 
       title = modal?.querySelector(".permission-title");
-      assert.strictEqual(title?.textContent, "Second");
+      assert.strictEqual(title?.textContent, "Agent requests permission");
       assert.ok(modal?.classList.contains("visible"));
 
       assert.deepStrictEqual(mockVsCode._getMessages(), [
@@ -2359,7 +2444,7 @@ suite("Webview", () => {
       );
       assert.strictEqual(
         document.activeElement,
-        modal?.querySelector(".permission-option-btn")
+        modal?.querySelector(".permission-cancel-btn")
       );
       controller.cancelPermission();
     });
@@ -2380,7 +2465,7 @@ suite("Webview", () => {
 
       const modal = document.getElementById("permission-modal");
       const title = modal?.querySelector(".permission-title");
-      assert.strictEqual(title?.textContent, "Second");
+      assert.strictEqual(title?.textContent, "Agent requests permission");
       assert.ok(modal?.classList.contains("visible"));
 
       assert.deepStrictEqual(mockVsCode._getMessages(), [
@@ -2414,7 +2499,7 @@ suite("Webview", () => {
       ]);
       assert.strictEqual(
         document.querySelector(".permission-title")?.textContent,
-        "Second"
+        "Agent requests permission"
       );
 
       controller.hidePermissionModal();
@@ -2457,7 +2542,7 @@ suite("Webview", () => {
       assert.ok(modal?.classList.contains("visible"));
       assert.strictEqual(
         modal?.querySelector(".permission-title")?.textContent,
-        "First"
+        "Agent requests permission"
       );
 
       controller.cancelPermission();
@@ -2533,7 +2618,7 @@ suite("Webview", () => {
       ]);
     });
 
-    test("Tab wraps focus from the last to the first focusable element", () => {
+    test("Tab stays on cancel while approval controls are locked", () => {
       controller.showPermissionModal("req-1", "First", "c1", [
         { id: "a", label: "A" },
         { id: "b", label: "B" },
@@ -2543,10 +2628,6 @@ suite("Webview", () => {
       const cancelBtn = modal.querySelector(
         ".permission-cancel-btn"
       ) as HTMLButtonElement;
-      const firstOptionBtn = modal.querySelector(
-        ".permission-option-btn"
-      ) as HTMLButtonElement;
-
       cancelBtn.focus();
       const event = new dom.window.KeyboardEvent("keydown", {
         key: "Tab",
@@ -2555,7 +2636,7 @@ suite("Webview", () => {
       });
       document.dispatchEvent(event);
 
-      assert.strictEqual(document.activeElement, firstOptionBtn);
+      assert.strictEqual(document.activeElement, cancelBtn);
     });
 
     test("Shift+Tab wraps focus from the first to the last focusable element", () => {
