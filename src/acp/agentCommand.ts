@@ -337,34 +337,68 @@ function resolveNativeExecutable(
   return undefined;
 }
 
-const SHIM_LOCAL_TOKEN = /^%dp0%[\\/](.+)$/i;
+const SHIM_VARIABLE = /^%([A-Za-z_][A-Za-z0-9_]*)%$/;
+const SHIM_LOCAL_PATH = /^%~?dp0%?[\\/](.+)$/i;
 const SHIM_UNSAFE_TOKEN = /[%&|<>^"]/;
 
-function resolveShimInterpreter(
-  contents: string,
-  shimDirectory: string,
-  context: ResolutionContext,
-  explicit: boolean
+interface ShimContext {
+  assignments: Map<string, string[]>;
+  directory: string;
+  context: ResolutionContext;
+  explicit: boolean;
+}
+
+/**
+ * Resolves one shim token. `SET "NAME=value"` bindings are followed in file
+ * order, which is how npm expresses "use the bundled interpreter, otherwise
+ * fall back to PATH". Anything else fails the resolution closed.
+ */
+function resolveShimToken(
+  token: string,
+  shim: ShimContext,
+  requireExecutable: boolean,
+  visited: Set<string>
 ): string | undefined {
-  const localProgram = contents.match(/SET\s+"_prog=%dp0%[\\/]([^"%]+)"/i)?.[1];
-  const local = localProgram
-    ? canonicalFile(
-        win32.resolve(shimDirectory, localProgram),
-        context,
-        true,
-        explicit
-      )
-    : undefined;
-  if (local) {
-    return local;
+  const value = token.trim();
+
+  const variable = SHIM_VARIABLE.exec(value);
+  if (variable) {
+    const name = variable[1].toLowerCase();
+    if (visited.has(name)) {
+      return undefined;
+    }
+    visited.add(name);
+    for (const assigned of shim.assignments.get(name) ?? []) {
+      const resolved = resolveShimToken(
+        assigned,
+        shim,
+        requireExecutable,
+        visited
+      );
+      if (resolved) {
+        return resolved;
+      }
+    }
+    visited.delete(name);
+    return undefined;
   }
 
-  const fallbackPrograms = [...contents.matchAll(/SET\s+"_prog=([^"%]+)"/gi)];
-  const fallbackProgram =
-    fallbackPrograms[fallbackPrograms.length - 1]?.[1]?.trim();
-  return fallbackProgram
-    ? resolveNativeExecutable(fallbackProgram, context)
-    : undefined;
+  const local = SHIM_LOCAL_PATH.exec(value);
+  if (local) {
+    return SHIM_UNSAFE_TOKEN.test(local[1])
+      ? undefined
+      : canonicalFile(
+          win32.resolve(shim.directory, local[1]),
+          shim.context,
+          requireExecutable,
+          shim.explicit
+        );
+  }
+
+  if (!requireExecutable || value === "" || SHIM_UNSAFE_TOKEN.test(value)) {
+    return undefined;
+  }
+  return resolveNativeExecutable(value, shim.context);
 }
 
 /**
@@ -386,7 +420,7 @@ function resolveWindowsCommandShim(
   const invocationLine = contents
     .split(/\r?\n/)
     .reverse()
-    .find((line) => line.includes("%*") && /%dp0%[\\/]/i.test(line));
+    .find((line) => line.includes("%*"));
   if (!invocationLine) {
     return undefined;
   }
@@ -395,40 +429,47 @@ function resolveWindowsCommandShim(
   const tokens = [...invocation.matchAll(/"([^"]*)"|(\S+)/g)].map(
     (match) => match[1] ?? match[2]
   );
-  const programIndex = tokens.findIndex(
-    (token) => token === "%_prog%" || SHIM_LOCAL_TOKEN.test(token)
-  );
-  if (programIndex < 0) {
-    return undefined;
+  const shim: ShimContext = {
+    assignments: new Map(),
+    directory: win32.dirname(shimPath),
+    context,
+    explicit,
+  };
+  for (const assignment of contents.matchAll(
+    /SET\s+"([A-Za-z_][A-Za-z0-9_]*)=([^"]*)"/gi
+  )) {
+    const name = assignment[1].toLowerCase();
+    const values = shim.assignments.get(name);
+    if (values) {
+      values.push(assignment[2]);
+    } else {
+      shim.assignments.set(name, [assignment[2]]);
+    }
   }
 
-  const shimDirectory = win32.dirname(shimPath);
-  const program =
-    tokens[programIndex] === "%_prog%"
-      ? resolveShimInterpreter(contents, shimDirectory, context, explicit)
-      : canonicalFile(
-          win32.resolve(
-            shimDirectory,
-            SHIM_LOCAL_TOKEN.exec(tokens[programIndex])?.[1] ?? ""
-          ),
-          context,
-          true,
-          explicit
-        );
+  // npm's package shims prefix the invocation with `endLocal & goto ... &
+  // title %COMSPEC%`, so the interpreter is the first token that names an
+  // executable this resolver trusts, not simply the first variable.
+  let programIndex = -1;
+  let program: string | undefined;
+  for (const [index, token] of tokens.entries()) {
+    if (!SHIM_VARIABLE.test(token) && !SHIM_LOCAL_PATH.test(token)) {
+      continue;
+    }
+    program = resolveShimToken(token, shim, true, new Set<string>());
+    if (program) {
+      programIndex = index;
+      break;
+    }
+  }
   if (!program) {
     return undefined;
   }
 
   const shimArguments: string[] = [];
   for (const token of tokens.slice(programIndex + 1)) {
-    const local = SHIM_LOCAL_TOKEN.exec(token);
-    if (local) {
-      const file = canonicalFile(
-        win32.resolve(shimDirectory, local[1]),
-        context,
-        false,
-        explicit
-      );
+    if (SHIM_VARIABLE.test(token) || SHIM_LOCAL_PATH.test(token)) {
+      const file = resolveShimToken(token, shim, false, new Set<string>());
       if (!file) {
         return undefined;
       }

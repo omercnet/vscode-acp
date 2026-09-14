@@ -209,6 +209,89 @@ suite("agent command resolution", () => {
     });
   });
 
+  test("unwraps the npm CLI shim that Node installs for npx", () => {
+    const shim = [
+      ":: Created by npm, please don't edit manually.",
+      "@ECHO OFF",
+      "SETLOCAL",
+      'SET "NODE_EXE=%~dp0\\node.exe"',
+      'IF NOT EXIST "%NODE_EXE%" (',
+      '  SET "NODE_EXE=node"',
+      ")",
+      'SET "NPM_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npm-cli.js"',
+      'SET "NPX_CLI_JS=%~dp0\\node_modules\\npm\\bin\\npx-cli.js"',
+      'FOR /F "delims=" %%V IN (\'"%NODE_EXE%" "%NPM_CLI_JS%" prefix -g\') DO SET "NPM_PREFIX_NPX_CLI_JS=%%V\\node_modules\\npm\\bin\\npx-cli.js"',
+      'IF EXIST "%NPM_PREFIX_NPX_CLI_JS%" (',
+      '  SET "NPX_CLI_JS=%NPM_PREFIX_NPX_CLI_JS%"',
+      ")",
+      '"%NODE_EXE%" "%NPX_CLI_JS%" %*',
+    ].join("\r\n");
+    const result = resolveAgentCommand(
+      "npx",
+      ["@zed-industries/claude-code-acp"],
+      {
+        platform: "win32",
+        env: {
+          Path: "C:\\workspace;C:\\Program Files\\nodejs",
+          PATHEXT: ".COM;.EXE;.BAT;.CMD",
+        },
+        excludedDirectories: ["C:\\workspace"],
+        fileSystem: fakeFileSystem("win32", {
+          "C:\\workspace\\npx.cmd": "malicious",
+          "C:\\Program Files\\nodejs\\npx.cmd": shim,
+          "C:\\Program Files\\nodejs\\node.exe": true,
+          "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js": true,
+        }),
+      }
+    );
+
+    assert.deepStrictEqual(result, {
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: [
+        "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
+        "@zed-industries/claude-code-acp",
+      ],
+      cwd: "C:\\Program Files\\nodejs",
+      source: "Windows command shim",
+    });
+  });
+
+  test("unwraps the package shim npm writes into node_modules/.bin", () => {
+    const shim = [
+      "@ECHO off",
+      "GOTO start",
+      ":find_dp0",
+      "SET dp0=%~dp0",
+      "EXIT /b",
+      ":start",
+      "SETLOCAL",
+      "CALL :find_dp0",
+      'IF EXIST "%dp0%\\node.exe" (',
+      '  SET "_prog=%dp0%\\node.exe"',
+      ") ELSE (",
+      '  SET "_prog=node"',
+      "  SET PATHEXT=%PATHEXT:;.JS;=;%",
+      ")",
+      'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\..\\opencode\\bin\\cli.js" %*',
+    ].join("\r\n");
+    const result = resolveAgentCommand("opencode", ["acp"], {
+      platform: "win32",
+      env: { Path: "C:\\tools\\node_modules\\.bin", PATHEXT: ".EXE;.CMD" },
+      fileSystem: fakeFileSystem("win32", {
+        "C:\\tools\\node_modules\\.bin\\opencode.cmd": shim,
+        "C:\\tools\\node_modules\\.bin\\node.exe": true,
+        "C:\\tools\\node_modules\\opencode\\bin\\cli.js": true,
+      }),
+    });
+
+    assert.deepStrictEqual(result, {
+      command: "C:\\tools\\node_modules\\.bin\\node.exe",
+      args: ["C:\\tools\\node_modules\\opencode\\bin\\cli.js", "acp"],
+      cwd: "C:\\tools\\node_modules\\.bin",
+      source: "Windows command shim",
+    });
+  });
+
   test("allows an explicit absolute executable chosen by the user", () => {
     const result = resolveAgentCommand(
       "C:\\workspace\\tools\\opencode.exe",
