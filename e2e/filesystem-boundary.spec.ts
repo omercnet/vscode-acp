@@ -3,6 +3,7 @@ import {
   expect,
   _electron as electron,
   type Page,
+  type Frame,
 } from "@playwright/test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
@@ -142,20 +143,43 @@ async function launchHost(deniedPath: string) {
   });
 }
 
-async function focusChat(window: Page) {
+async function focusChat(window: Page): Promise<Frame> {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
-  await window.waitForTimeout(3000);
+  await expect(window.getByRole("tab", { name: "VSCode ACP" })).toBeVisible({
+    timeout: 30000,
+  });
   await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
-  await window.waitForTimeout(500);
-  await window.keyboard.type("ACP: Start Chat");
-  await window.waitForTimeout(300);
-  await window.keyboard.press("Enter");
-  await window.waitForTimeout(3000);
-  return window
-    .frameLocator("iframe.webview")
-    .first()
-    .frameLocator("#active-frame");
+  const commandInput = window.locator(".quick-input-widget input");
+  await expect(commandInput).toBeVisible({ timeout: 30000 });
+  await commandInput.fill(">ACP: Start Chat");
+  const command = window
+    .locator('.quick-input-list [role="option"]')
+    .filter({ hasText: "ACP: Start Chat" })
+    .first();
+  await expect(command).toBeVisible({ timeout: 30000 });
+  await commandInput.press("Enter");
+
+  await expect
+    .poll(
+      async () => {
+        for (const frame of window.frames()) {
+          if ((await frame.locator("#input").count()) > 0) {
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: 30000 }
+    )
+    .toBe(true);
+
+  for (const frame of window.frames()) {
+    if ((await frame.locator("#input").count()) > 0) {
+      return frame;
+    }
+  }
+  throw new Error("ACP chat frame disappeared after becoming ready");
 }
 
 test("allows workspace filesystem access and blocks escapes in an Extension Development Host", async () => {
@@ -172,7 +196,7 @@ test("allows workspace filesystem access and blocks escapes in an Extension Deve
   try {
     const window = await host.firstWindow();
     const frame = await focusChat(window);
-    await expect(frame.locator("#connect-btn")).toBeHidden();
+    await expect(frame.locator("#connect-btn")).toBeHidden({ timeout: 30000 });
     await frame.locator("#input").fill("Exercise filesystem boundary");
     await frame.locator("#input").press("Enter");
 

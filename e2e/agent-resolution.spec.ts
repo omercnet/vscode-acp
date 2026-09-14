@@ -122,22 +122,32 @@ async function launchRestrictedHost() {
 async function focusChat(window: Page): Promise<Frame> {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
-  await window.waitForTimeout(3000);
+  await expect(window.getByRole("tab", { name: "VSCode ACP" })).toBeVisible({
+    timeout: 30000,
+  });
   await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
-  await window.waitForTimeout(500);
-  await window.keyboard.type("ACP: Start Chat");
-  await window.waitForTimeout(300);
-  await window.keyboard.press("Enter");
+  const commandInput = window.locator(".quick-input-widget input");
+  await expect(commandInput).toBeVisible({ timeout: 30000 });
+  await commandInput.fill(">ACP: Start Chat");
+  const command = window
+    .locator('.quick-input-list [role="option"]')
+    .filter({ hasText: "ACP: Start Chat" })
+    .first();
+  await expect(command).toBeVisible({ timeout: 30000 });
+  await commandInput.press("Enter");
 
   await expect
-    .poll(async () => {
-      for (const frame of window.frames()) {
-        if ((await frame.locator("#input").count()) > 0) {
-          return true;
+    .poll(
+      async () => {
+        for (const frame of window.frames()) {
+          if ((await frame.locator("#input").count()) > 0) {
+            return true;
+          }
         }
-      }
-      return false;
-    })
+        return false;
+      },
+      { timeout: 30000 }
+    )
     .toBe(true);
 
   for (const frame of window.frames()) {
@@ -150,6 +160,7 @@ async function focusChat(window: Page): Promise<Frame> {
 
 test("ignores a workspace executable override in Restricted Mode", async ({}, testInfo) => {
   await rm(DEMO_DIR, { recursive: true, force: true });
+  await rm(USER_DATA_DIR, { recursive: true, force: true });
   await mkdir(join(WORKSPACE_DIR, ".vscode"), { recursive: true });
   await mkdir(join(WORKSPACE_DIR, "tools"), { recursive: true });
   await mkdir(join(DEMO_DIR, "trusted-install", "bin"), { recursive: true });
@@ -165,7 +176,7 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
   try {
     const window = await host.firstWindow();
     const frame = await focusChat(window);
-    await expect(frame.locator("#connect-btn")).toBeHidden();
+    await expect(frame.locator("#connect-btn")).toBeHidden({ timeout: 30000 });
     await frame.locator("#input").fill("Which executable is running you?");
     await frame.locator("#input").press("Enter");
 
@@ -184,5 +195,6 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
   } finally {
     await host.close();
     await rm(DEMO_DIR, { recursive: true, force: true });
+    await rm(USER_DATA_DIR, { recursive: true, force: true });
   }
 });
