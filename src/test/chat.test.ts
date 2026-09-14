@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { EventEmitter, once } from "events";
+import { EventEmitter } from "events";
 import * as vscode from "vscode";
 import {
   chmod,
@@ -321,6 +321,61 @@ function createFakeWebview(
   };
 }
 
+interface PostedPermissionRequest extends Record<string, unknown> {
+  requestId: string;
+}
+
+async function waitForPermissionRequest(
+  webview: FakeWebview,
+  index: number,
+  decision: Promise<RequestPermissionResponse>
+): Promise<PostedPermissionRequest> {
+  const eventName = `message:${index}`;
+  const existing = webview.messages[index];
+  let listener: ((message: Record<string, unknown>) => void) | undefined;
+  const posted = existing
+    ? Promise.resolve(existing)
+    : new Promise<Record<string, unknown>>((resolve) => {
+        listener = resolve;
+        webview.messageEvents.once(eventName, listener);
+      });
+
+  let waiting = true;
+  const prematureSettlement = new Promise<Record<string, unknown>>(
+    (_, reject) => {
+      void decision.then(
+        (outcome) => {
+          if (waiting) {
+            reject(
+              new assert.AssertionError({
+                message: `permission request settled before posting: ${JSON.stringify(outcome)}`,
+              })
+            );
+          }
+        },
+        (error) => {
+          if (waiting) {
+            reject(error);
+          }
+        }
+      );
+    }
+  );
+
+  try {
+    const message = await Promise.race([posted, prematureSettlement]);
+    if (typeof message.requestId !== "string") {
+      assert.fail("permission request must include a string request id");
+    }
+    return message as PostedPermissionRequest;
+  } finally {
+    waiting = false;
+    if (listener) {
+      webview.messageEvents.off(eventName, listener);
+    }
+  }
+}
+
 function makePermissionRequest(
   overrides: Partial<RequestPermissionRequest> = {}
 ): RequestPermissionRequest {
@@ -413,23 +468,12 @@ async function decideTerminalRequest(
       ],
     })
   );
-  const postedMessage = webview.messages[pendingCount];
-  const posted = await Promise.race([
-    postedMessage
-      ? Promise.resolve(postedMessage)
-      : once(webview.messageEvents, `message:${pendingCount}`).then(
-          ([message]) => message as Record<string, unknown>
-        ),
-    decision.then((outcome) => {
-      assert.fail(
-        `permission request settled before posting: ${JSON.stringify(outcome)}`
-      );
-    }),
-  ]);
+  const posted = await waitForPermissionRequest(
+    webview,
+    pendingCount,
+    decision
+  );
   const requestId = posted.requestId;
-  if (typeof requestId !== "string") {
-    assert.fail("permission request must include a string request id");
-  }
   provider.handlePermissionResponse({ requestId, optionId: decisionId });
   assert.deepStrictEqual(await decision, {
     outcome: { outcome: "selected", optionId: decisionId },
@@ -3642,6 +3686,7 @@ suite("ChatViewProvider", () => {
         terminalPermissionGrants: Map<string, unknown>;
       };
       testProvider.view = fakeWebview.view;
+      const messageIndex = fakeWebview.messages.length;
       const permission = testProvider.handleRequestPermission(
         makePermissionRequest({
           toolCall: {
@@ -3650,18 +3695,13 @@ suite("ChatViewProvider", () => {
           },
         })
       );
-      for (
-        let attempt = 0;
-        fakeWebview.messages.length === 0 && attempt < 100;
-        attempt++
-      ) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-      const requestId = fakeWebview.messages[0]?.requestId;
+      const { requestId } = await waitForPermissionRequest(
+        fakeWebview,
+        messageIndex,
+        permission
+      );
       testProvider.expireTurnPermissions();
-      if (typeof requestId === "string") {
-        testProvider.handlePermissionResponse({ requestId, optionId: "allow" });
-      }
+      testProvider.handlePermissionResponse({ requestId, optionId: "allow" });
 
       assert.deepStrictEqual(await permission, {
         outcome: { outcome: "cancelled" },
@@ -3714,6 +3754,7 @@ suite("ChatViewProvider", () => {
         terminalPermissionGrants: Map<string, unknown>;
       };
       testProvider.view = fakeWebview.view;
+      const messageIndex = fakeWebview.messages.length;
       const permission = testProvider.handleRequestPermission(
         makePermissionRequest({
           toolCall: {
@@ -3727,17 +3768,11 @@ suite("ChatViewProvider", () => {
           },
         })
       );
-      for (
-        let attempt = 0;
-        fakeWebview.messages.length === 0 && attempt < 100;
-        attempt++
-      ) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-      const requestId = fakeWebview.messages[0]?.requestId;
-      if (typeof requestId !== "string") {
-        assert.fail("permission request must include a string request id");
-      }
+      const { requestId } = await waitForPermissionRequest(
+        fakeWebview,
+        messageIndex,
+        permission
+      );
       acpClient.currentSessionId = "replacement-session";
       testProvider.handlePermissionResponse({ requestId, optionId: "allow" });
 
