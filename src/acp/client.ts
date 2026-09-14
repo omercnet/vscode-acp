@@ -1,6 +1,7 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
+import { buildPromptContent, type FileAttachment } from "../shared/attachments";
 import {
   type AgentConfig,
   getDefaultAgent,
@@ -1002,11 +1003,19 @@ export class ACPClient {
     }
   }
 
-  async sendMessage(message: string): Promise<acp.PromptResponse> {
+  async sendMessage(
+    message: string,
+    attachments?: readonly FileAttachment[]
+  ): Promise<acp.PromptResponse> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
     if (!connection || !sessionId) {
       throw new Error("No active session");
+    }
+
+    const content = buildPromptContent(message, attachments ?? []);
+    if (content.length === 0) {
+      throw new Error("Cannot send an empty prompt");
     }
 
     const prompt = { connection, sessionId };
@@ -1016,7 +1025,7 @@ export class ACPClient {
         acp.methods.agent.session.prompt,
         {
           sessionId,
-          prompt: [{ type: "text", text: message }],
+          prompt: content,
         }
       );
       console.log(`[ACP] Prompt completed: ${response.stopReason}`);

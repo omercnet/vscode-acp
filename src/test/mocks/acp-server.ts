@@ -95,6 +95,8 @@ export class MockACPServer {
   private sessionCounter = 0;
   private demoMode: DemoMode;
 
+  public lastPrompt: unknown[] = [];
+
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
@@ -576,6 +578,8 @@ export class MockACPServer {
       return;
     }
 
+    this.lastPrompt = Array.isArray(params?.prompt) ? params.prompt : [];
+
     const protocolError =
       PROTOCOL_ERRORS[this.demoMode as ProtocolErrorDemoMode];
     if (protocolError) {
@@ -872,8 +876,8 @@ export interface MockChildProcess extends EventEmitter {
   stderr: Readable;
   pid: number;
   killed: boolean;
-  kill: () => boolean;
   server: MockACPServer;
+  kill: () => boolean;
 }
 
 export function createMockProcess(
@@ -881,6 +885,11 @@ export function createMockProcess(
 ): MockChildProcess {
   const server = new MockACPServer(demoMode);
   const mockProcess = new EventEmitter() as MockChildProcess;
+
+  Object.defineProperty(mockProcess, "server", {
+    value: server,
+    writable: false,
+  });
 
   Object.defineProperty(mockProcess, "stdin", {
     value: server.stdin,
@@ -892,10 +901,6 @@ export function createMockProcess(
   });
   Object.defineProperty(mockProcess, "stderr", {
     value: server.stderr,
-    writable: false,
-  });
-  Object.defineProperty(mockProcess, "server", {
-    value: server,
     writable: false,
   });
   Object.defineProperty(mockProcess, "pid", { value: 99999, writable: false });

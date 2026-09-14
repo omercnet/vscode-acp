@@ -485,9 +485,15 @@ body {
   padding: 8px var(--container-padding);
   border-top: 1px solid var(--vscode-panel-border);
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   flex-shrink: 0;
   position: relative;
+}
+
+#input-row {
+  display: flex;
+  gap: 8px;
 }
 
 /* Command Autocomplete */
@@ -596,9 +602,78 @@ body {
   max-height: 120px;
 }
 
+#attach-btn {
+  align-self: flex-end;
+  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 1;
+}
+
 #send {
   padding: 8px 16px;
   align-self: flex-end;
+}
+
+/* Attachments Bar */
+#attachments-bar {
+  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+#attachments-bar.visible {
+  display: flex;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 220px;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.attachment-chip-icon {
+  flex-shrink: 0;
+}
+
+.attachment-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip-remove {
+  flex-shrink: 0;
+  padding: 0 2px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+
+.attachment-chip-remove:hover {
+  opacity: 1;
+}
+
+/* Attachments rendered inside a sent message */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.message-attachments .attachment-chip {
+  border: 1px solid var(--vscode-contrastBorder, transparent);
 }
 
 /* Options Bar */

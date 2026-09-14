@@ -37,6 +37,12 @@ import type {
   RequestPermissionResponse,
   NewSessionRequest,
 } from "@agentclientprotocol/sdk";
+import { createFileAttachment, pickAttachmentUris } from "../attachments";
+import {
+  MAX_ATTACHMENTS,
+  isAttachmentMetadataValid,
+  type FileAttachment,
+} from "../shared/attachments";
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
@@ -62,6 +68,7 @@ interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
   text: string;
+  attachments: FileAttachment[];
 }
 
 interface AuthenticationPickItem extends vscode.QuickPickItem {
@@ -91,7 +98,9 @@ interface WebviewMessage {
     | "copyMessage"
     | "permissionResponse"
     | "selectSession"
-    | "deleteSession";
+    | "deleteSession"
+    | "requestAttachFiles"
+    | "removeAttachment";
   text?: string;
   agentId?: string;
   modeId?: string;
@@ -100,6 +109,9 @@ interface WebviewMessage {
   sessionId?: string;
   optionId?: string;
   cancelled?: boolean;
+  attachmentIds?: string[];
+  attachmentId?: string;
+  attachmentCount?: number;
 }
 
 interface ManagedTerminal {
@@ -133,6 +145,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private sessionTransitionInputPaused = false;
   private activeSessionContext: SessionContext | null = null;
   private conversationGeneration = 0;
+  private activePromptGeneration: number | null = null;
+  private replayGeneration: number | null = null;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
   private permissionRequests: Map<
@@ -146,6 +160,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly permissionRequestTimeoutMs = 60000;
   private readonly configurationSubscription: vscode.Disposable;
   private readonly workspaceTrustSubscription: vscode.Disposable;
+  private pendingAttachments: Map<string, FileAttachment> = new Map();
+  private attachmentCounter = 0;
+  private attachmentPickerActive = false;
+  private attachmentDraftVersion = 0;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -182,11 +200,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.acpClient.setOnStateChange((state) => {
       if (state === "disconnected" || state === "error") {
+        const interruptedReplay = this.isReplaying;
+        this.conversationGeneration++;
         this.hasSession = false;
+        this.isReplaying = false;
+        this.replayGeneration = null;
+        this.replayMessages = [];
         this.connectionStart = null;
         this.sessionStart = null;
         this.activeSessionContext = null;
+        this.clearPendingAttachments();
         this.expirePermissionRequests();
+        if (interruptedReplay) {
+          this.postMessage({
+            type: "replayFailed",
+            text: "The agent disconnected while restoring this session.",
+          });
+        }
       }
       this.postMessage({ type: "connectionState", state });
     });
@@ -270,8 +300,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
       switch (message.type) {
         case "sendMessage":
-          if (message.text) {
-            await this.handleUserMessage(message.text);
+          if (message.text || (message.attachmentIds?.length ?? 0) > 0) {
+            await this.handleUserMessage(
+              message.text ?? "",
+              message.attachmentIds
+            );
           }
           break;
         case "selectAgent":
@@ -317,7 +350,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.handleDeleteStoredSession(message.sessionId);
           }
           break;
+        case "requestAttachFiles":
+          await this.handleRequestAttachFiles(message.attachmentCount ?? 0);
+          break;
+        case "removeAttachment":
+          this.pendingAttachments.delete(message.attachmentId ?? "");
+          break;
         case "ready":
+          // A freshly loaded composer starts with an empty attachment bar;
+          // drop any draft the previous webview instance owned so its files
+          // do not keep consuming the per-prompt budget invisibly.
+          this.clearPendingAttachments();
           this.postMessage({
             type: "connectionState",
             state: this.acpClient.getState(),
@@ -557,8 +600,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
-      this.conversationGeneration++;
+      const generation = ++this.conversationGeneration;
+      this.expirePermissionRequests();
       this.isReplaying = true;
+      this.replayGeneration = generation;
       this.replayMessages = [];
       this.postMessage({ type: "replayStart" });
 
@@ -572,6 +617,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ...this.getSessionParameters(session.cwd, resource),
         };
         await this.acpClient.loadSession(request);
+        if (generation !== this.conversationGeneration) {
+          return;
+        }
         this.activeSessionContext = {
           cwd: session.cwd,
           configurationResource: session.configurationResource,
@@ -593,17 +641,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           console.warn("[Chat] Failed to update session metadata:", error)
         );
         this.isReplaying = false;
+        this.replayGeneration = null;
+        this.clearPendingAttachments();
         this.postMessage({
           type: "replayComplete",
           messages: this.replayMessages.map((message) => ({
             role: message.role,
             text: message.text,
+            ...(message.attachments.length > 0
+              ? { attachments: message.attachments }
+              : {}),
           })),
         });
         this.replayMessages = [];
         this.sendSessionMetadata();
       } catch (error) {
+        if (generation !== this.conversationGeneration) {
+          return;
+        }
+
         this.isReplaying = false;
+        this.replayGeneration = null;
         this.replayMessages = [];
         this.hasSession = hadSession;
         this.hasRestoredModeModel = hadRestoredModeModel;
@@ -618,12 +676,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
   }
-
-  private appendReplayChunk(
+  private findOrCreateReplayMessage(
     role: ReplayMessage["role"],
-    messageId: string | null | undefined,
-    text: string
-  ): void {
+    messageId: string | null | undefined
+  ): ReplayMessage {
     const previous = this.replayMessages.at(-1);
     if (
       previous &&
@@ -632,11 +688,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         messageId === undefined ||
         previous.messageId === messageId)
     ) {
-      previous.text += text;
-      return;
+      return previous;
     }
 
-    this.replayMessages.push({ role, messageId: messageId ?? null, text });
+    const message: ReplayMessage = {
+      role,
+      messageId: messageId ?? null,
+      text: "",
+      attachments: [],
+    };
+    this.replayMessages.push(message);
+    return message;
+  }
+
+  private appendReplayChunk(
+    role: ReplayMessage["role"],
+    messageId: string | null | undefined,
+    text: string
+  ): void {
+    this.findOrCreateReplayMessage(role, messageId).text += text;
+  }
+
+  private appendReplayAttachment(
+    messageId: string | null | undefined,
+    content: Extract<
+      SessionNotification["update"],
+      { sessionUpdate: "user_message_chunk" }
+    >["content"] & { type: "resource_link" }
+  ): void {
+    if (
+      !isAttachmentMetadataValid(
+        content.name,
+        content.uri,
+        content.mimeType ?? undefined,
+        content.size ?? undefined
+      )
+    ) {
+      return;
+    }
+    const message = this.findOrCreateReplayMessage("user", messageId);
+    if (message.attachments.length >= MAX_ATTACHMENTS) {
+      return;
+    }
+    message.attachments.push({
+      id: this.nextAttachmentId(),
+      uri: content.uri,
+      name: content.name,
+      ...(content.mimeType ? { mimeType: content.mimeType } : {}),
+      ...(content.size !== undefined && content.size !== null
+        ? { size: content.size }
+        : {}),
+    });
   }
 
   private stderrBuffer = "";
@@ -1020,6 +1122,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.terminals.clear();
     this.mcpSecretRedactor.clear();
     this.activeSessionContext = null;
+    this.clearPendingAttachments();
 
     this.expirePermissionRequests();
     this.configurationSubscription.dispose();
@@ -1028,6 +1131,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private handleSessionUpdate(notification: SessionNotification): void {
     const update = notification.update;
+    const updateGeneration = this.isReplaying
+      ? this.replayGeneration
+      : this.activePromptGeneration;
+    if (
+      updateGeneration !== null &&
+      updateGeneration !== this.conversationGeneration
+    ) {
+      return;
+    }
     console.log("[Chat] Session update received:", update.sessionUpdate);
 
     if (this.isReplaying) {
@@ -1041,6 +1153,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           update.messageId,
           update.content.text
         );
+      } else if (
+        update.sessionUpdate === "user_message_chunk" &&
+        update.content.type === "resource_link"
+      ) {
+        this.appendReplayAttachment(update.messageId, update.content);
       }
       return;
     }
@@ -1300,24 +1417,70 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.sessionStart;
   }
 
-  private async handleUserMessage(text: string): Promise<void> {
+  private async handleUserMessage(
+    text: string,
+    attachmentIds?: string[]
+  ): Promise<void> {
+    if (this.isReplaying && !this.sessionTransition) {
+      this.postMessage({
+        type: "agentError",
+        text: "Wait for the conversation to finish restoring before sending.",
+      });
+      return;
+    }
+
     const queuedGeneration = this.conversationGeneration;
     let promptStarted = false;
+    const selectedAttachments = this.resolveAttachments(attachmentIds);
+    const attachments: FileAttachment[] = [];
     try {
+      for (const selected of selectedAttachments) {
+        const refreshed = await createFileAttachment(
+          vscode.Uri.parse(selected.uri, true),
+          selected.id
+        );
+        if (queuedGeneration !== this.conversationGeneration) {
+          this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+          return;
+        }
+        if (refreshed) {
+          attachments.push(refreshed);
+        }
+      }
+
+      if (selectedAttachments.length > attachments.length) {
+        this.postMessage({
+          type: "agentError",
+          text: "Some selected files are no longer available inside the trusted workspace.",
+        });
+      }
+      if (!text && attachments.length === 0) {
+        this.postMessage({ type: "streamEnd", stopReason: "error" });
+        return;
+      }
+
       await this.ensureSession();
       if (queuedGeneration !== this.conversationGeneration) {
         throw new RequestError(-32800, "Request cancelled");
       }
-      this.postMessage({ type: "userMessage", text });
+      this.postMessage({ type: "userMessage", text, attachments });
       promptStarted = true;
       const promptGeneration = this.conversationGeneration;
       const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
       this.stderrBuffer = "";
       this.postMessage({ type: "streamStart" });
+      this.activePromptGeneration = promptGeneration;
       console.log("[Chat] Sending message to ACP...");
-      const response = await this.acpClient.sendMessage(text);
+      const response = await this.acpClient.sendMessage(text, attachments);
       console.log(`[Chat] Prompt completed: ${response.stopReason}`);
+      if (
+        promptGeneration !== this.conversationGeneration ||
+        promptSessionId !== this.acpClient.getCurrentSessionId()
+      ) {
+        this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+        return;
+      }
 
       if (this.streamingText.length === 0) {
         console.warn("[Chat] No streaming text received from agent");
@@ -1336,23 +1499,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
         });
       }
-      if (
-        promptGeneration === this.conversationGeneration &&
-        promptSessionId === this.acpClient.getCurrentSessionId()
-      ) {
-        void this.saveCurrentSession(text).catch((error) =>
-          console.warn("[Chat] Failed to save session metadata:", error)
-        );
-      }
+      const preview =
+        text || attachments.map((attachment) => attachment.name).join(", ");
+      void this.saveCurrentSession(preview).catch((error) =>
+        console.warn("[Chat] Failed to save session metadata:", error)
+      );
       this.streamingText = "";
     } catch (error) {
       if (!promptStarted) {
         this.postMessage({ type: "restoreInput", text });
       }
+      if (queuedGeneration === this.conversationGeneration) {
+        for (const attachment of attachments) {
+          if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
+            break;
+          }
+          this.pendingAttachments.set(attachment.id, attachment);
+        }
+        if (attachments.length > 0) {
+          this.postMessage({ type: "filesAttached", attachments });
+        }
+      }
       const { kind } = describeACPError(error);
       if (kind === "cancelled") {
         console.log("[Chat] Prompt cancelled");
-      } else {
+      } else if (queuedGeneration === this.conversationGeneration) {
         this.postACPError("Error in handleUserMessage", error);
       }
       this.postMessage({
@@ -1362,19 +1533,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.streamingText = "";
       this.stderrBuffer = "";
+    } finally {
+      if (this.activePromptGeneration === queuedGeneration) {
+        this.activePromptGeneration = null;
+      }
     }
   }
 
   private handleAgentChange(agentId: string): void {
     const agent = this.getConfiguredAgent(agentId);
     if (agent) {
-      this.expirePermissionRequests();
       this.acpClient.setAgent(agent);
       this.mcpSecretRedactor.clear();
       this.conversationGeneration++;
+      this.isReplaying = false;
+      this.replayGeneration = null;
+      this.replayMessages = [];
+      this.expirePermissionRequests();
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
       this.activeSessionContext = null;
+      this.clearPendingAttachments();
       this.postMessage({ type: "agentChanged", agentId });
       this.postMessage({ type: "sessionMetadata", modes: null, models: null });
     }
@@ -1416,9 +1595,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (!this.acpClient.isConnected() && !this.sessionTransition) {
       this.conversationGeneration++;
+      this.isReplaying = false;
+      this.replayGeneration = null;
+      this.replayMessages = [];
       this.hasSession = false;
       this.hasRestoredModeModel = false;
       this.activeSessionContext = null;
+      this.clearPendingAttachments();
       this.postMessage({ type: "chatCleared" });
       this.postMessage({ type: "sessionMetadata", modes: null, models: null });
       this.settleSessionLock();
@@ -1430,6 +1613,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
       this.conversationGeneration++;
+      this.isReplaying = false;
+      this.replayGeneration = null;
+      this.replayMessages = [];
 
       try {
         await this.ensureConnection();
@@ -1446,6 +1632,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           configurationResource: workspaceFolder?.uri.toString(),
         };
         this.hasRestoredModeModel = false;
+        this.clearPendingAttachments();
         this.postMessage({ type: "chatCleared" });
         this.sendSessionMetadata();
       } catch (error) {
@@ -1460,7 +1647,124 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private handleClearChat(): void {
     this.expirePermissionRequests();
+    this.clearPendingAttachments();
     this.postMessage({ type: "chatCleared" });
+  }
+
+  private resolveAttachments(attachmentIds?: string[]): FileAttachment[] {
+    if (!attachmentIds || attachmentIds.length === 0) {
+      this.clearPendingAttachments();
+      return [];
+    }
+    const resolved: FileAttachment[] = [];
+    const seen = new Set<string>();
+    for (const id of attachmentIds.slice(0, MAX_ATTACHMENTS)) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      const attachment = this.pendingAttachments.get(id);
+      if (attachment) {
+        resolved.push(attachment);
+      }
+    }
+    this.clearPendingAttachments();
+    return resolved;
+  }
+
+  private clearPendingAttachments(): void {
+    this.pendingAttachments.clear();
+    this.attachmentDraftVersion += 1;
+  }
+
+  private nextAttachmentId(): string {
+    this.attachmentCounter += 1;
+    return `att-${this.attachmentCounter}-${Date.now()}`;
+  }
+
+  private async handleRequestAttachFiles(currentCount: number): Promise<void> {
+    if (this.attachmentPickerActive) {
+      return;
+    }
+
+    const draftVersion = this.attachmentDraftVersion;
+    const generation = this.conversationGeneration;
+
+    const reportedCount = Number.isFinite(currentCount)
+      ? Math.max(0, Math.floor(currentCount))
+      : 0;
+    const attachmentCount = Math.max(
+      reportedCount,
+      this.pendingAttachments.size
+    );
+    const remaining = MAX_ATTACHMENTS - attachmentCount;
+    if (remaining <= 0) {
+      this.postMessage({
+        type: "attachmentLimitReached",
+        max: MAX_ATTACHMENTS,
+      });
+      return;
+    }
+
+    this.attachmentPickerActive = true;
+    try {
+      const uris = await pickAttachmentUris(remaining);
+      if (
+        uris.length === 0 ||
+        generation !== this.conversationGeneration ||
+        draftVersion !== this.attachmentDraftVersion
+      ) {
+        return;
+      }
+
+      const attachments: FileAttachment[] = [];
+      let skippedCount = 0;
+      const pendingUris = new Set(
+        Array.from(
+          this.pendingAttachments.values(),
+          (attachment) => attachment.uri
+        )
+      );
+      for (let index = 0; index < uris.length; index += 1) {
+        if (
+          generation !== this.conversationGeneration ||
+          draftVersion !== this.attachmentDraftVersion ||
+          this.pendingAttachments.size >= MAX_ATTACHMENTS
+        ) {
+          skippedCount += uris.length - index;
+          break;
+        }
+        const attachment = await createFileAttachment(
+          uris[index],
+          this.nextAttachmentId()
+        );
+        if (
+          generation !== this.conversationGeneration ||
+          draftVersion !== this.attachmentDraftVersion
+        ) {
+          return;
+        }
+        if (
+          !attachment ||
+          this.pendingAttachments.size >= MAX_ATTACHMENTS ||
+          pendingUris.has(attachment.uri)
+        ) {
+          skippedCount += 1;
+          continue;
+        }
+        this.pendingAttachments.set(attachment.id, attachment);
+        pendingUris.add(attachment.uri);
+        attachments.push(attachment);
+      }
+
+      if (attachments.length > 0 || skippedCount > 0) {
+        this.postMessage({ type: "filesAttached", attachments, skippedCount });
+      }
+    } catch (error) {
+      console.error("[Chat] Failed to attach files:", error);
+    } finally {
+      this.attachmentPickerActive = false;
+    }
   }
 
   private sendSessionMetadata(): void {
@@ -1571,16 +1875,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   
   <div id="input-container">
     <div id="command-autocomplete" role="listbox" aria-label="Slash commands"></div>
-    <textarea 
-      id="input" 
-      rows="1" 
-      placeholder="Ask your agent... (type / for commands)" 
-      aria-label="Message input"
-      aria-describedby="input-hint"
-      aria-autocomplete="list"
-      aria-controls="command-autocomplete"
-    ></textarea>
-    <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
+    <div id="attachments-bar" role="list" aria-label="Attached files"></div>
+    <div id="input-row">
+      <textarea
+        id="input"
+        rows="1"
+        placeholder="Ask your agent... (/ for commands)"
+        aria-label="Message input"
+        aria-describedby="input-hint"
+        aria-autocomplete="list"
+        aria-controls="command-autocomplete"
+      ></textarea>
+      <button id="attach-btn" aria-label="Attach files" title="Attach files">📎</button>
+      <button id="send" aria-label="Send message" title="Send (Enter)">Send</button>
+    </div>
   </div>
   <span id="input-hint" class="sr-only" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
