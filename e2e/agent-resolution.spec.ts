@@ -2,6 +2,7 @@ import {
   test,
   expect,
   _electron as electron,
+  type Frame,
   type Page,
 } from "@playwright/test";
 import { mkdir, rm, writeFile } from "fs/promises";
@@ -118,7 +119,7 @@ async function launchRestrictedHost() {
   });
 }
 
-async function focusChat(window: Page) {
+async function focusChat(window: Page): Promise<Frame> {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
   await window.waitForTimeout(3000);
@@ -127,11 +128,24 @@ async function focusChat(window: Page) {
   await window.keyboard.type("ACP: Start Chat");
   await window.waitForTimeout(300);
   await window.keyboard.press("Enter");
-  await window.waitForTimeout(3000);
-  return window
-    .frameLocator("iframe.webview")
-    .first()
-    .frameLocator("#active-frame");
+
+  await expect
+    .poll(async () => {
+      for (const frame of window.frames()) {
+        if ((await frame.locator("#input").count()) > 0) {
+          return true;
+        }
+      }
+      return false;
+    })
+    .toBe(true);
+
+  for (const frame of window.frames()) {
+    if ((await frame.locator("#input").count()) > 0) {
+      return frame;
+    }
+  }
+  throw new Error("ACP chat frame disappeared after becoming ready");
 }
 
 test("ignores a workspace executable override in Restricted Mode", async ({}, testInfo) => {

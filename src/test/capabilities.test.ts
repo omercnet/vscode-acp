@@ -107,7 +107,7 @@ suite("Client capabilities", () => {
     });
 
     await client.connect();
-    await client.newSession("/workspace");
+    await client.newSession({ cwd: "/workspace", mcpServers: [] });
     assert.deepStrictEqual(
       mockProcess.server.getInitializeRequest()?.clientCapabilities,
       {

@@ -3,11 +3,15 @@ import * as vscode from "vscode";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ChatViewProvider } from "../views/chat";
+import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
 import type {
   AuthMethod,
   AuthMethodId,
+  LoadSessionRequest,
+  McpCapabilities,
+  NewSessionRequest,
   RequestPermissionRequest,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
@@ -41,10 +45,11 @@ interface MockACPClient {
   setOnRequestPermission: (callback: any) => void;
   isConnected: () => boolean;
   connect: () => Promise<void>;
-  newSession: (dir: string) => Promise<void>;
+  newSession: (params: NewSessionRequest) => Promise<void>;
   sendMessage: (text: string) => Promise<{ stopReason: string }>;
-  loadSession: (sessionId: string, dir: string) => Promise<void>;
+  loadSession: (params: LoadSessionRequest) => Promise<void>;
   supportsSessionLoad: () => boolean;
+  getMcpCapabilities: () => McpCapabilities;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -185,17 +190,20 @@ class TestACPClient implements MockACPClient {
     return false;
   }
   async connect(): Promise<void> {}
-  async newSession(): Promise<void> {}
+  async newSession(_params: NewSessionRequest): Promise<void> {}
   async sendMessage(): Promise<{ stopReason: string }> {
     return { stopReason: "end_turn" };
   }
 
-  async loadSession(_sessionId: string, _dir: string): Promise<void> {
+  async loadSession(_params: LoadSessionRequest): Promise<void> {
     throw new Error("Session loading is unavailable");
   }
 
   supportsSessionLoad(): boolean {
     return false;
+  }
+  getMcpCapabilities(): McpCapabilities {
+    return {};
   }
 
   async setMode(modeId: string): Promise<void> {
@@ -786,13 +794,13 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
           this.currentSessionId = null;
           markLoadStarted();
           await new Promise<void>((resolve) => {
             finishLoad = resolve;
           });
-          this.currentSessionId = sessionId;
+          this.currentSessionId = params.sessionId;
         }
 
         async sendMessage(): Promise<{ stopReason: string }> {
@@ -1006,6 +1014,7 @@ suite("ChatViewProvider", () => {
       // Private methods are test seams for the authentication lifecycle.
       const authenticationProvider =
         provider as unknown as AuthenticationTestProvider;
+
       const window = vscode.window as unknown as Record<string, unknown>;
       const descriptor = Object.getOwnPropertyDescriptor(
         vscode.window,
@@ -1055,6 +1064,7 @@ suite("ChatViewProvider", () => {
       class AuthenticationClient extends TestACPClient {
         newSessionCalls = 0;
         authenticatedMethods: string[] = [];
+        requests: NewSessionRequest[] = [];
 
         isConnected(): boolean {
           return true;
@@ -1064,7 +1074,8 @@ suite("ChatViewProvider", () => {
           return [{ id: "browser", name: "Browser sign-in" }];
         }
 
-        async newSession(): Promise<void> {
+        async newSession(request: NewSessionRequest): Promise<void> {
+          this.requests.push(request);
           this.newSessionCalls++;
           if (this.newSessionCalls === 1) {
             throw new RequestError(-32000, "Authentication required");
@@ -1095,6 +1106,11 @@ suite("ChatViewProvider", () => {
       await authenticationProvider.ensureSession();
 
       assert.strictEqual(client.newSessionCalls, 2);
+      assert.strictEqual(client.requests[0], client.requests[1]);
+      assert.deepStrictEqual(client.requests[0], {
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
       assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
       assert.strictEqual(authenticationProvider.hasSession, true);
     });
@@ -1414,6 +1430,94 @@ suite("ChatViewProvider", () => {
     });
   });
 
+  test("redacts MCP secrets from stderr, logs, and error messages", () => {
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      acpClient as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const secret = "session-secret-value";
+    const messages: Array<Record<string, unknown>> = [];
+    const logs: string[] = [];
+    Object.defineProperty(provider, "postMessage", {
+      value: (message: Record<string, unknown>) => messages.push(message),
+    });
+    const redactor = Reflect.get(
+      provider,
+      "mcpSecretRedactor"
+    ) as McpSecretRedactor;
+    redactor.add([secret]);
+    const originalConsoleError = console.error;
+    console.error = (...values: unknown[]) => logs.push(values.join(" "));
+
+    try {
+      const handleStderr = Reflect.get(provider, "handleStderr") as (
+        this: ChatViewProvider,
+        text: string
+      ) => void;
+      handleStderr.call(
+        provider,
+        'ProviderError:\ndata: {providerID: "session-'
+      );
+      handleStderr.call(provider, 'secret-value", modelID: "model"}');
+      const postACPError = Reflect.get(provider, "postACPError") as (
+        this: ChatViewProvider,
+        context: string,
+        error: unknown
+      ) => void;
+      postACPError.call(provider, "Session failed", new Error(secret));
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    const visibleOutput = JSON.stringify(messages);
+    const bufferedStderr = Reflect.get(provider, "stderrBuffer") as string;
+    assert.ok(!visibleOutput.includes(secret));
+    assert.ok(!logs.join("\n").includes(secret));
+    assert.ok(!bufferedStderr.includes(secret));
+    assert.match(visibleOutput, /\[redacted\]/);
+  });
+
+  test("redacts session creation errors without losing RequestError identity", async () => {
+    const secret = "session-secret-value";
+    class SecretErrorClient extends TestACPClient {
+      isConnected(): boolean {
+        return true;
+      }
+
+      async newSession(): Promise<void> {
+        throw new RequestError(-32000, `Agent echoed ${secret}`, {
+          token: secret,
+        });
+      }
+    }
+
+    const provider = new ChatViewProvider(
+      mockExtensionUri,
+      new SecretErrorClient() as unknown as ACPClient,
+      memento as unknown as vscode.Memento
+    );
+    const redactor = Reflect.get(
+      provider,
+      "mcpSecretRedactor"
+    ) as McpSecretRedactor;
+    redactor.add([secret]);
+    const handleConnect = Reflect.get(provider, "handleConnect") as (
+      this: ChatViewProvider
+    ) => Promise<void>;
+
+    await assert.rejects(
+      () => handleConnect.call(provider),
+      (error) => {
+        assert.ok(error instanceof RequestError);
+        assert.strictEqual(error.code, -32000);
+        assert.strictEqual(error.message, "Agent echoed [redacted]");
+        assert.strictEqual(error.data, undefined);
+        return true;
+      }
+    );
+  });
+
   test("ends a cancelled prompt without an error card", async () => {
     class CancellingClient extends TestACPClient {
       isConnected(): boolean {
@@ -1466,11 +1570,60 @@ suite("ChatViewProvider", () => {
 
     assert.deepStrictEqual(messages.at(-1), {
       type: "agentError",
-      text: "Model not found: openai/missing",
+      text: "Agent reported an error. See the Extension Host log for details.",
     });
   });
 
   suite("Session history", () => {
+    test("preserves the loaded session MCP resource when saving", async () => {
+      class LoadingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const remoteResource =
+        "vscode-remote://ssh-remote+host/workspace-folder-b";
+      const workspaceState = new TestMemento();
+      const session = {
+        sessionId: "restored-session",
+        agentId: "test-agent",
+        cwd: "/workspace-folder-b",
+        configurationResource: remoteResource,
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Stored in folder B",
+        messageCount: 1,
+      };
+      await workspaceState.update("vscode-acp.sessionHistory", [session]);
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LoadingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        loadStoredSession(value: typeof session): Promise<void>;
+        saveCurrentSession(preview?: string): Promise<void>;
+      };
+
+      await sessionProvider.loadStoredSession(session);
+      await sessionProvider.saveCurrentSession("Continued in folder B");
+
+      const [saved] = workspaceState.get<
+        Array<{ cwd: string; configurationResource?: string }>
+      >("vscode-acp.sessionHistory")!;
+      assert.strictEqual(saved.cwd, session.cwd);
+      assert.strictEqual(saved.configurationResource, remoteResource);
+    });
     test("persists active session metadata in workspace state", async () => {
       const workspaceState = new TestMemento();
       const provider = new ChatViewProvider(
@@ -1592,7 +1745,8 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          const sessionId = params.sessionId;
           this.currentSessionId = sessionId;
           this.emitSessionUpdate({
             sessionId,
@@ -1676,7 +1830,8 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          const sessionId = params.sessionId;
           this.currentSessionId = sessionId;
           this.emitSessionUpdate({
             sessionId,
@@ -1757,8 +1912,8 @@ suite("ChatViewProvider", () => {
           return { stopReason: "end_turn" };
         }
 
-        async loadSession(sessionId: string): Promise<void> {
-          this.currentSessionId = sessionId;
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
         }
       }
 
@@ -1820,7 +1975,7 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(restored?.messageCount, 2);
     });
 
-    test("keeps the visible session state when loading fails", async () => {
+    test("rolls back load and preserves typed errors while redacting", async () => {
       class FailingLoadClient extends TestACPClient {
         isConnected(): boolean {
           return true;
@@ -1831,7 +1986,9 @@ suite("ChatViewProvider", () => {
         }
 
         async loadSession(): Promise<void> {
-          throw new RequestError(-32000, "Sign in to continue");
+          throw new RequestError(-32000, "Sign in with session-secret-value", {
+            token: "session-secret-value",
+          });
         }
       }
 
@@ -1840,6 +1997,11 @@ suite("ChatViewProvider", () => {
         new FailingLoadClient() as unknown as ACPClient,
         memento as unknown as vscode.Memento
       );
+      const redactor = Reflect.get(
+        provider,
+        "mcpSecretRedactor"
+      ) as McpSecretRedactor;
+      redactor.add(["session-secret-value"]);
       const messages: Array<Record<string, unknown>> = [];
       Object.defineProperty(provider, "postMessage", {
         value: (message: Record<string, unknown>) => messages.push(message),
@@ -1869,7 +2031,13 @@ suite("ChatViewProvider", () => {
             preview: "Previous conversation",
             messageCount: 1,
           }),
-        /Sign in to continue/
+        (error) => {
+          assert.ok(error instanceof RequestError);
+          assert.strictEqual(error.code, -32000);
+          assert.strictEqual(error.message, "Sign in with [redacted]");
+          assert.strictEqual(error.data, undefined);
+          return true;
+        }
       );
 
       assert.strictEqual(sessionProvider.hasSession, true);
@@ -1877,7 +2045,7 @@ suite("ChatViewProvider", () => {
         messages.find((message) => message.type === "replayFailed"),
         {
           type: "replayFailed",
-          text: "Authentication required: Sign in to continue",
+          text: "Authentication required: Sign in with [redacted]",
         }
       );
       assert.ok(!messages.some((message) => message.type === "replayComplete"));

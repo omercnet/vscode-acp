@@ -21,6 +21,7 @@ export type ProtocolErrorDemoMode =
 export type AuthenticationDemoMode =
   | "authentication"
   | "authentication-failure"
+  | "authentication-mcp"
   | "authentication-terminal"
   | "authentication-unknown-type";
 
@@ -32,6 +33,7 @@ export type AuthenticationDemoMode =
 const AUTH_METHODS_BY_DEMO_MODE: Partial<Record<DemoMode, unknown[]>> = {
   authentication: [{ id: "browser", name: "Browser sign-in" }],
   "authentication-failure": [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-mcp": [{ id: "browser", name: "Browser sign-in" }],
   "authentication-terminal": [
     { id: "terminal", name: "Terminal sign-in", type: "terminal" },
   ],
@@ -69,6 +71,7 @@ export type DemoMode =
   | "invalid-version"
   | "late-permission"
   | "load"
+  | "mcp-transports"
   | "load-failure"
   | "no-initialize"
   | "session-isolation"
@@ -108,6 +111,8 @@ export class MockACPServer {
   private authenticated = false;
   private authenticationRequests: string[] = [];
   private newSessionRequestCount = 0;
+  private newSessionRequests: acp.NewSessionRequest[] = [];
+  private loadSessionRequests: acp.LoadSessionRequest[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -119,6 +124,13 @@ export class MockACPServer {
 
   getClosedSessionIds(): readonly string[] {
     return this.closedSessionIds;
+  }
+  getNewSessionRequests(): readonly acp.NewSessionRequest[] {
+    return this.newSessionRequests;
+  }
+
+  getLoadSessionRequests(): readonly acp.LoadSessionRequest[] {
+    return this.loadSessionRequests;
   }
 
   getAuthenticationRequests(): readonly string[] {
@@ -212,7 +224,13 @@ export class MockACPServer {
                 : acp.PROTOCOL_VERSION,
             agentCapabilities: {
               loadSession:
-                this.demoMode === "load" || this.demoMode === "load-failure",
+                this.demoMode === "load" ||
+                this.demoMode === "load-failure" ||
+                this.demoMode === "authentication-mcp",
+              ...(this.demoMode === "mcp-transports" ||
+              this.demoMode === "authentication-mcp"
+                ? { mcpCapabilities: { http: true, sse: true } }
+                : {}),
               ...(this.demoMode === "session-close" ||
               this.demoMode === "session-close-hangs"
                 ? { sessionCapabilities: { close: {} } }
@@ -281,7 +299,11 @@ export class MockACPServer {
       this.sendError(id, -32000, "Authentication failed");
       return;
     }
-    if (this.demoMode !== "authentication" || methodId !== "browser") {
+    if (
+      (this.demoMode !== "authentication" &&
+        this.demoMode !== "authentication-mcp") ||
+      methodId !== "browser"
+    ) {
       this.sendError(id, -32602, "Unsupported authentication method");
       return;
     }
@@ -291,9 +313,13 @@ export class MockACPServer {
 
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
     this.newSessionRequestCount++;
+    if (params) {
+      this.newSessionRequests.push(params as acp.NewSessionRequest);
+    }
     if (
       (this.demoMode === "authentication" ||
-        this.demoMode === "authentication-failure") &&
+        this.demoMode === "authentication-failure" ||
+        this.demoMode === "authentication-mcp") &&
       !this.authenticated
     ) {
       this.sendError(id, -32000, "Authentication required");
@@ -462,6 +488,9 @@ export class MockACPServer {
     id: number,
     params?: Record<string, unknown>
   ): void {
+    if (params) {
+      this.loadSessionRequests.push(params as acp.LoadSessionRequest);
+    }
     if (this.demoMode === "load-failure") {
       this.sendError(id, -32000, "Session load failed");
       return;

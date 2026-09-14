@@ -19,6 +19,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **🔄 Streaming Responses** — Watch the AI think in real-time
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
+- **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user or workspace settings
 
 ## Requirements
 
@@ -100,6 +101,35 @@ in that case.
   }
 }
 ```
+
+### MCP Servers
+
+Configure `vscode-acp.mcpServers` in user or workspace settings. Dedicated project configuration files are not read yet; that remaining source is tracked in [#112](https://github.com/omercnet/vscode-acp/issues/112). Stdio is always available; HTTP and SSE entries require the selected agent to advertise the matching ACP capability. Commands must use absolute executable paths, and remote transports require HTTPS URLs without credentials or fragments.
+
+```json
+{
+  "vscode-acp.mcpServers": [
+    {
+      "name": "filesystem",
+      "command": "/usr/bin/node",
+      "args": ["/absolute/path/to/server.js"],
+      "env": [{ "name": "API_KEY", "value": "${env:MCP_API_KEY}" }]
+    },
+    {
+      "type": "http",
+      "name": "remote-tools",
+      "url": "https://tools.example.com/mcp",
+      "headers": [
+        { "name": "Authorization", "value": "Bearer ${env:MCP_API_TOKEN}" }
+      ]
+    }
+  ]
+}
+```
+
+Environment references are resolved only when a session is created or loaded. Resolved values are sent to the agent for that request and are not written back to VS Code settings or extension state. The same validated request is reused unchanged for one authentication retry. Invalid entries fail closed with a classified setting path such as `[MCP_CONFIG_UNSAFE] vscode-acp.mcpServers[0].command ...`.
+
+![Configured MCP server flow](screenshots/mcp-config-flow.png)
 
 ## Development
 

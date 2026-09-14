@@ -45,9 +45,10 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "Workspace-defined agent executable paths are disabled until the workspace is trusted.",
+      "description": "Workspace-defined agent executable paths and MCP server configuration are disabled until the workspace is trusted.",
       "restrictedConfigurations": [
-        "vscode-acp.agentPaths"
+        "vscode-acp.agentPaths",
+        "vscode-acp.mcpServers"
       ]
     },
     "virtualWorkspaces": true
@@ -164,6 +165,170 @@
             "type": "string"
           },
           "markdownDescription": "Absolute executable paths keyed by agent ID. User-defined paths remain available in Restricted Mode; workspace-defined paths require Workspace Trust."
+        },
+        "vscode-acp.mcpServers": {
+          "type": "array",
+          "scope": "resource",
+          "default": [],
+          "markdownDescription": "MCP servers connected when ACP sessions are created or loaded. Use `${env:NAME}` only in environment variable and HTTP header values; references are resolved when a session starts.",
+          "items": {
+            "oneOf": [
+              {
+                "title": "Stdio MCP server",
+                "type": "object",
+                "required": [
+                  "name",
+                  "command"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "stdio"
+                    ],
+                    "default": "stdio"
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute path to the MCP server executable."
+                  },
+                  "args": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "value"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "title": "HTTP MCP server",
+                "type": "object",
+                "required": [
+                  "type",
+                  "name",
+                  "url"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "http"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "description": "HTTPS URL for the MCP server."
+                  },
+                  "headers": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "value"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "title": "SSE MCP server",
+                "type": "object",
+                "required": [
+                  "type",
+                  "name",
+                  "url"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "sse"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https://",
+                    "description": "HTTPS URL for the deprecated SSE transport."
+                  },
+                  "headers": {
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name",
+                        "value"
+                      ],
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "value": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
         },
         "vscode-acp.sessions.autoSave": {
           "type": "boolean",
