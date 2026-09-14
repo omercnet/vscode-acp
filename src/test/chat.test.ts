@@ -2998,7 +2998,7 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(terminalProvider.terminals.size, 0);
     });
 
-    test("does not spawn when cleanup wins the PTY preflight race", async () => {
+    test("does not spawn when cleanup wins the launch preflight race", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
@@ -3044,21 +3044,25 @@ suite("ChatViewProvider", () => {
         return launch;
       };
 
-      const { terminalId } = await terminalProvider.handleCreateTerminal({
+      const create = terminalProvider.handleCreateTerminal({
         sessionId: "test-session",
         ...request,
       });
-      const tracked = terminalProvider.terminals.get(terminalId) as unknown as {
+      await openStarted;
+      const tracked = Array.from(
+        terminalProvider.terminals.values()
+      )[0] as unknown as {
         proc: unknown;
       };
-      await openStarted;
       const cleanup = terminalProvider.disposeTerminals();
       releaseOpen();
+      const { terminalId } = await create;
       await Promise.all([cleanup, openPrepared]);
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       assert.strictEqual(tracked.proc, null);
       assert.strictEqual(terminalProvider.terminals.size, 0);
+      assert.ok(terminalId.startsWith("term-"));
       terminalProvider.prepareTerminalLaunch = prepare;
     });
 

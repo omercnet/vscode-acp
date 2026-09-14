@@ -1389,90 +1389,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const pty: vscode.Pseudoterminal = {
         onDidWrite: writeEmitter.event,
         onDidClose: closeEmitter.event,
-        open: async () => {
-          if (!vscode.workspace.isTrusted || managedTerminal.closing) {
-            writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
-            managedTerminal.exitCode = 1;
-            managedTerminal.exitResolve();
-            closeEmitter.fire(1);
-            return;
-          }
-
-          let currentLaunch: PreparedTerminalLaunch;
-          try {
-            currentLaunch = await this.prepareTerminalLaunch(params);
-            if (
-              !vscode.workspace.isTrusted ||
-              managedTerminal.closing ||
-              managedTerminal.generation !== this.terminalGeneration ||
-              this.terminals.get(terminalId) !== managedTerminal ||
-              terminalLaunchKey(params.sessionId, currentLaunch.descriptor) !==
-                approvedDescriptorKey
-            ) {
-              throw new Error("Terminal launch changed after approval.");
-            }
-          } catch {
-            writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
-            managedTerminal.exitCode = 1;
-            managedTerminal.exitResolve();
-            closeEmitter.fire(1);
-            return;
-          }
-
-          let proc: ChildProcess;
-          try {
-            proc = spawn(currentLaunch.command, currentLaunch.args, {
-              cwd: currentLaunch.cwd,
-              env: currentLaunch.env,
-              shell: false,
-              windowsHide: true,
-              detached: process.platform !== "win32",
-            });
-          } catch {
-            writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
-            this.appendTerminalOutput(
-              managedTerminal,
-              "\nFailed to start ACP terminal.\n"
-            );
-            managedTerminal.exitCode = 1;
-            managedTerminal.exitResolve();
-            closeEmitter.fire(1);
-            return;
-          }
-
-          managedTerminal.proc = proc;
-          managedTerminal.processId = proc.pid ?? null;
-
-          proc.stdout?.on("data", (data: Buffer) => {
-            const text = data.toString();
-            writeEmitter.fire(text.replace(/\n/g, "\r\n"));
-            this.appendTerminalOutput(managedTerminal, text);
-          });
-
-          proc.stderr?.on("data", (data: Buffer) => {
-            const text = data.toString();
-            writeEmitter.fire(text.replace(/\n/g, "\r\n"));
-            this.appendTerminalOutput(managedTerminal, text);
-          });
-
-          proc.on("close", (code: number | null, signal: string | null) => {
-            managedTerminal.exitCode = code;
-            managedTerminal.signal = signal;
-            managedTerminal.exitResolve();
-            closeEmitter.fire(code ?? 0);
-          });
-
-          proc.on("error", () => {
-            writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
-            this.appendTerminalOutput(
-              managedTerminal,
-              "\nFailed to start ACP terminal.\n"
-            );
-            managedTerminal.exitCode = 1;
-            managedTerminal.exitResolve();
-            closeEmitter.fire(1);
-          });
-        },
+        open: () => {},
         close: () => {
           void this.terminateTerminalProcess(managedTerminal);
         },
@@ -1488,6 +1405,88 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.pendingTerminalCreates--;
       reservationHeld = false;
       terminal.show(true);
+      if (!vscode.workspace.isTrusted || managedTerminal.closing) {
+        writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
+        managedTerminal.exitCode = 1;
+        managedTerminal.exitResolve();
+        closeEmitter.fire(1);
+        return { terminalId };
+      }
+
+      let currentLaunch: PreparedTerminalLaunch;
+      try {
+        currentLaunch = await this.prepareTerminalLaunch(params);
+        if (
+          !vscode.workspace.isTrusted ||
+          managedTerminal.closing ||
+          managedTerminal.generation !== this.terminalGeneration ||
+          this.terminals.get(terminalId) !== managedTerminal ||
+          terminalLaunchKey(params.sessionId, currentLaunch.descriptor) !==
+            approvedDescriptorKey
+        ) {
+          throw new Error("Terminal launch changed after approval.");
+        }
+      } catch {
+        writeEmitter.fire("\r\nTerminal execution was denied.\r\n");
+        managedTerminal.exitCode = 1;
+        managedTerminal.exitResolve();
+        closeEmitter.fire(1);
+        return { terminalId };
+      }
+
+      let proc: ChildProcess;
+      try {
+        proc = spawn(currentLaunch.command, currentLaunch.args, {
+          cwd: currentLaunch.cwd,
+          env: currentLaunch.env,
+          shell: false,
+          windowsHide: true,
+          detached: process.platform !== "win32",
+        });
+      } catch {
+        writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
+        this.appendTerminalOutput(
+          managedTerminal,
+          "\nFailed to start ACP terminal.\n"
+        );
+        managedTerminal.exitCode = 1;
+        managedTerminal.exitResolve();
+        closeEmitter.fire(1);
+        return { terminalId };
+      }
+
+      managedTerminal.proc = proc;
+      managedTerminal.processId = proc.pid ?? null;
+
+      proc.stdout?.on("data", (data: Buffer) => {
+        const text = data.toString();
+        writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+        this.appendTerminalOutput(managedTerminal, text);
+      });
+
+      proc.stderr?.on("data", (data: Buffer) => {
+        const text = data.toString();
+        writeEmitter.fire(text.replace(/\n/g, "\r\n"));
+        this.appendTerminalOutput(managedTerminal, text);
+      });
+
+      proc.on("close", (code: number | null, signal: string | null) => {
+        managedTerminal.exitCode = code;
+        managedTerminal.signal = signal;
+        managedTerminal.exitResolve();
+        closeEmitter.fire(code ?? 0);
+      });
+
+      proc.on("error", () => {
+        writeEmitter.fire("\r\nFailed to start ACP terminal.\r\n");
+        this.appendTerminalOutput(
+          managedTerminal,
+          "\nFailed to start ACP terminal.\n"
+        );
+        managedTerminal.exitCode = 1;
+        managedTerminal.exitResolve();
+        closeEmitter.fire(1);
+      });
       return { terminalId };
     } finally {
       if (reservationHeld) {
