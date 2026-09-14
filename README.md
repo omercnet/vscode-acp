@@ -75,6 +75,14 @@ When the AI uses tools (like running commands or reading files), you'll see them
 
 Click on any tool to see the command input and output.
 
+## Security model
+VSCode ACP is not a sandbox. If you approve terminal execution, the selected agent gets code-execution authority on your machine.
+
+- Permission prompts are extension-owned. The only always-allow choice is session-scoped, and grants are cleared when the session, agent, chat, or view changes.
+- Terminal execution is gated behind a trusted local workspace. The approval prompt shows the exact effective command, args, cwd, and env; denied requests do not run. Active terminals are capped at 8 and are torn down on disconnect, new chat, agent change, or extension shutdown. Clearing the chat or hiding the view revokes outstanding approvals but does not kill processes already running.
+- File reads are not prompted. Access stays inside trusted local workspace roots. Reads are portable across platforms, reject traversal and symlink escapes, and are capped at 16 MiB. Writes are not prompted either, but they are only advertised where the extension can open a file through a verified descriptor chain, which today means Linux; on macOS and Windows the write capability is never offered and write requests are denied.
+- Agent executables are resolved without shell expansion. Absolute paths and PATH entries are canonicalized, Windows `npm`-generated `.cmd`/`.bat` shims are decoded to the real interpreter and script they invoke, and workspace-level overrides stay disabled until Workspace Trust is granted. In Restricted Mode, only user-level overrides apply.
+
 ## Configuration
 
 The extension auto-detects installed agents from the extension host's `PATH`.
