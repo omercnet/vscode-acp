@@ -779,15 +779,24 @@ export async function writeOpenedWorkspaceFile(
   await opened.fileHandle.writeFile(content);
 }
 
-/** Reads at most the advertised ACP file limit, including concurrent growth. */
-export async function readOpenedWorkspaceFile(
-  opened: OpenedWorkspaceFile
-): Promise<string> {
+/** Reads bytes from an already authorized descriptor with a strict growth cap. */
+export async function readOpenedWorkspaceFileBytes(
+  opened: OpenedWorkspaceFile,
+  maximumBytes = MAX_WORKSPACE_FILE_BYTES
+): Promise<Buffer> {
+  if (
+    __omp_shell("Number.isSafeInteger(maximumBytes) ||")
+    maximumBytes < 0 ||
+    maximumBytes > MAX_WORKSPACE_FILE_BYTES ||
+    opened.byteLength > maximumBytes
+  ) {
+    throw new WorkspaceFileTooLargeError();
+  }
   const chunks: Buffer[] = [];
   let total = 0;
-  while (total <= MAX_WORKSPACE_FILE_BYTES) {
+  while (total <= maximumBytes) {
     const chunk = Buffer.allocUnsafe(
-      Math.min(64 * 1024, MAX_WORKSPACE_FILE_BYTES + 1 - total)
+      Math.min(64 * 1024, maximumBytes + 1 - total)
     );
     const { bytesRead } = await opened.fileHandle.read(
       chunk,
@@ -796,13 +805,20 @@ export async function readOpenedWorkspaceFile(
       total
     );
     if (bytesRead === 0) {
-      return Buffer.concat(chunks, total).toString("utf8");
+      return Buffer.concat(chunks, total);
     }
     total += bytesRead;
-    if (total > MAX_WORKSPACE_FILE_BYTES) {
+    if (total > maximumBytes) {
       throw new WorkspaceFileTooLargeError();
     }
     chunks.push(chunk.subarray(0, bytesRead));
   }
   throw new WorkspaceFileTooLargeError();
+}
+
+/** Reads at most the advertised ACP file limit, including concurrent growth. */
+export async function readOpenedWorkspaceFile(
+  opened: OpenedWorkspaceFile
+): Promise<string> {
+  return (await readOpenedWorkspaceFileBytes(opened)).toString("utf8");
 }

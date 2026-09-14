@@ -2,8 +2,11 @@ import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
 import { Marked } from "marked";
 import {
   MAX_ATTACHMENTS,
+  MAX_EMBEDDED_RESOURCE_BYTES,
+  MAX_IMAGE_BYTES,
   formatByteSize,
-  isAttachmentMetadataValid,
+  isFileAttachmentValid,
+  isSupportedImageAttachment,
   type FileAttachment,
 } from "../../shared/attachments";
 
@@ -149,6 +152,10 @@ export interface ExtensionMessage {
   messages?: ReplayMessage[];
   sessions?: SessionHistoryEntry[];
   sessionId?: string;
+  promptCapabilities?: {
+    image?: boolean;
+    embeddedContext?: boolean;
+  };
   toolCallId?: string;
   name?: string;
   title?: string;
@@ -851,6 +858,8 @@ export class WebviewController {
   private restoreInputFocus = false;
   private promptPending = false;
   private attachments: FileAttachment[] = [];
+  private attachmentReadGeneration = 0;
+  private promptCapabilities = { image: false, embeddedContext: false };
 
   constructor(
     vscode: VsCodeApi,
@@ -934,6 +943,33 @@ export class WebviewController {
           ...(rawLine && { locationLine: Number(rawLine) }),
         });
       }
+    });
+    inputEl.addEventListener("paste", (event) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      void this.attachBrowserFiles(files);
+    });
+
+    this.elements.inputContainer.addEventListener("dragover", (event) => {
+      if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) {
+        event.preventDefault();
+        this.elements.inputContainer.classList.add("attachment-drag-active");
+      }
+    });
+    this.elements.inputContainer.addEventListener("dragleave", () => {
+      this.elements.inputContainer.classList.remove("attachment-drag-active");
+    });
+    this.elements.inputContainer.addEventListener("drop", (event) => {
+      this.elements.inputContainer.classList.remove("attachment-drag-active");
+      const files = Array.from(event.dataTransfer?.files ?? []);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      void this.attachBrowserFiles(files);
     });
 
     inputEl.addEventListener("keydown", (e) => {
@@ -1097,26 +1133,53 @@ export class WebviewController {
     const chip = this.doc.createElement("span");
     chip.className = "attachment-chip";
     chip.setAttribute("role", "listitem");
+    const transport = attachment.transport ?? "resource_link";
+    const transportLabel =
+      transport === "image"
+        ? "Image"
+        : transport === "resource"
+          ? "Embedded"
+          : "Link";
 
-    const details = [attachment.mimeType, formatByteSize(attachment.size)]
+    const details = [
+      transportLabel,
+      attachment.mimeType,
+      formatByteSize(attachment.size),
+    ]
       .filter(Boolean)
       .join(" · ");
-    chip.title = details
-      ? `${attachment.name} · ${details}\n${attachment.uri}`
-      : `${attachment.name}\n${attachment.uri}`;
+    chip.title =
+      attachment.source === "memory"
+        ? `${attachment.name} · ${details}`
+        : `${attachment.name} · ${details}\n${attachment.uri}`;
+    chip.setAttribute(
+      "aria-label",
+      `${transportLabel} attachment ${attachment.name}${details ? `, ${details}` : ""}`
+    );
 
-    const icon = this.doc.createElement("span");
-    icon.className = "attachment-chip-icon";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = "📄";
+    if (attachment.previewDataUrl) {
+      const preview = this.doc.createElement("img");
+      preview.className = "attachment-chip-preview";
+      preview.src = attachment.previewDataUrl;
+      preview.alt = "";
+      preview.setAttribute("aria-hidden", "true");
+      chip.appendChild(preview);
+    } else {
+      const icon = this.doc.createElement("span");
+      icon.className = "attachment-chip-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = "📄";
+      chip.appendChild(icon);
+    }
 
     const name = this.doc.createElement("span");
     name.className = "attachment-chip-name";
-    // Paths and labels are untrusted. DOM text assignment is mandatory here;
-    // never move this value into `innerHTML` or an HTML string template.
     name.textContent = attachment.name;
 
-    chip.append(icon, name);
+    const type = this.doc.createElement("span");
+    type.className = "attachment-chip-type";
+    type.textContent = transportLabel;
+    chip.append(name, type);
 
     if (removable) {
       const remove = this.doc.createElement("button");
@@ -1143,9 +1206,13 @@ export class WebviewController {
     this.updateInputControls();
 
     const atLimit = this.attachments.length >= MAX_ATTACHMENTS;
+    const supportedKinds = [
+      this.promptCapabilities.embeddedContext ? "embedded text" : "file links",
+      this.promptCapabilities.image ? "image prompts" : "image links",
+    ].join(" and ");
     this.elements.attachBtn.title = atLimit
       ? `Attachment limit reached (${MAX_ATTACHMENTS} files)`
-      : "Attach files";
+      : `Attach files (${supportedKinds})`;
     this.elements.attachBtn.setAttribute(
       "aria-label",
       this.elements.attachBtn.title
@@ -1174,10 +1241,96 @@ export class WebviewController {
   }
 
   private clearAttachments(): void {
+    this.attachmentReadGeneration += 1;
     this.attachments = [];
     this.renderAttachments();
   }
 
+  private async attachBrowserFiles(files: File[]): Promise<void> {
+    if (this.inputLocks.size > 0 || this.promptPending) {
+      return;
+    }
+    const generation = this.attachmentReadGeneration;
+    const remaining = MAX_ATTACHMENTS - this.attachments.length;
+    if (remaining <= 0) {
+      this.showSystemMessageOnce(
+        `You can attach up to ${MAX_ATTACHMENTS} files per prompt.`
+      );
+      return;
+    }
+
+    for (const file of files.slice(0, remaining)) {
+      const image = isSupportedImageAttachment(
+        file.name,
+        file.type || undefined
+      );
+      if (image && !this.promptCapabilities.image) {
+        this.showSystemMessageOnce(
+          "The current agent does not advertise image prompt support."
+        );
+        continue;
+      }
+      if (!image && !this.promptCapabilities.embeddedContext) {
+        this.showSystemMessageOnce(
+          "The current agent does not advertise embedded context support."
+        );
+        continue;
+      }
+      const limit = image ? MAX_IMAGE_BYTES : MAX_EMBEDDED_RESOURCE_BYTES;
+      if (file.size > limit) {
+        this.showSystemMessageOnce(
+          `${file.name || "Attachment"} exceeds the ${limit / 1024 / 1024} MB limit.`
+        );
+        continue;
+      }
+
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const view = this.doc.defaultView;
+          if (!view) {
+            reject(new Error("Webview is unavailable"));
+            return;
+          }
+          const reader = new view.FileReader();
+          reader.addEventListener("load", () => {
+            if (typeof reader.result === "string") {
+              resolve(reader.result);
+            } else {
+              reject(new Error("FileReader returned non-string data"));
+            }
+          });
+          reader.addEventListener("error", () => reject(reader.error));
+          reader.readAsDataURL(file);
+        });
+        if (generation !== this.attachmentReadGeneration) {
+          return;
+        }
+        const comma = dataUrl.indexOf(",");
+        if (comma < 0) {
+          throw new Error("FileReader returned malformed data");
+        }
+        this.vscode.postMessage({
+          type: "attachContent",
+          name: file.name || (image ? "Pasted image" : "Dropped file"),
+          mimeType: file.type || undefined,
+          data: dataUrl.slice(comma + 1),
+        });
+      } catch {
+        if (generation !== this.attachmentReadGeneration) {
+          return;
+        }
+        this.showSystemMessageOnce(
+          `${file.name || "Attachment"} could not be read.`
+        );
+      }
+    }
+
+    if (files.length > remaining) {
+      this.showSystemMessageOnce(
+        `You can attach up to ${MAX_ATTACHMENTS} files per prompt.`
+      );
+    }
+  }
   private showSystemMessageOnce(text: string): void {
     const lastMessage = this.elements.messagesEl.lastElementChild;
     if (
@@ -1790,12 +1943,7 @@ export class WebviewController {
           if (
             this.attachments.length >= MAX_ATTACHMENTS ||
             existingUris.has(attachment.uri) ||
-            !isAttachmentMetadataValid(
-              attachment.name,
-              attachment.uri,
-              attachment.mimeType,
-              attachment.size
-            )
+            !isFileAttachmentValid(attachment)
           ) {
             continue;
           }
@@ -1822,6 +1970,12 @@ export class WebviewController {
         this.showSystemMessageOnce(
           `You can attach up to ${msg.max ?? MAX_ATTACHMENTS} files per prompt.`
         );
+        break;
+      case "attachmentError":
+        if (msg.text) this.addMessage(msg.text, "error");
+        break;
+      case "attachmentWarning":
+        if (msg.text) this.showSystemMessageOnce(msg.text);
         break;
       case "streamStart":
         this.currentAssistantText = "";
@@ -1948,6 +2102,9 @@ export class WebviewController {
         this.updateViewState();
         break;
       case "sessionTransition":
+        if (msg.active === true) {
+          this.attachmentReadGeneration += 1;
+        }
         this.setInputLock(
           "session",
           msg.active === true,
@@ -1958,6 +2115,19 @@ export class WebviewController {
       case "connectionState":
         if (msg.state) {
           this.updateStatus(msg.state, msg.agentInfo);
+          if (msg.state === "disconnected" || msg.state === "error") {
+            this.promptCapabilities = {
+              image: false,
+              embeddedContext: false,
+            };
+            this.clearAttachments();
+          } else if (msg.state === "connecting") {
+            this.promptCapabilities = {
+              image: false,
+              embeddedContext: false,
+            };
+            this.renderAttachments();
+          }
           connectBtn.style.display =
             msg.state === "connected" ? "none" : "inline-block";
         }
@@ -2046,6 +2216,11 @@ export class WebviewController {
         this.setInputLock("replay", false);
         break;
       case "sessionMetadata": {
+        this.promptCapabilities = {
+          image: msg.promptCapabilities?.image === true,
+          embeddedContext: msg.promptCapabilities?.embeddedContext === true,
+        };
+        this.renderAttachments();
         const hasModes =
           msg.modes &&
           msg.modes.availableModes &&

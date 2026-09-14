@@ -1,7 +1,10 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
-import { buildPromptContent, type FileAttachment } from "../shared/attachments";
+import {
+  buildPromptContent,
+  type PromptAttachment,
+} from "../shared/attachments";
 import {
   type AgentConfig,
   getDefaultAgent,
@@ -308,6 +311,7 @@ export class ACPClient {
   private supportsSessionLoading = false;
   private loadingSessionId: acp.SessionId | null = null;
   private mcpCapabilities: acp.McpCapabilities = {};
+  private promptCapabilities: acp.PromptCapabilities = {};
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -386,6 +390,9 @@ export class ACPClient {
   }
   getMcpCapabilities(): acp.McpCapabilities {
     return { ...this.mcpCapabilities };
+  }
+  getPromptCapabilities(): acp.PromptCapabilities {
+    return { ...this.promptCapabilities };
   }
 
   setOnStateChange(callback: StateChangeCallback): () => void {
@@ -471,6 +478,7 @@ export class ACPClient {
     this.agentInfo = null;
     this.canCloseSessions = false;
     this.mcpCapabilities = {};
+    this.promptCapabilities = {};
     this.setState("connecting");
 
     try {
@@ -534,6 +542,7 @@ export class ACPClient {
         this.authenticationMethods = [];
         this.loadingSessionId = null;
         this.mcpCapabilities = {};
+        this.promptCapabilities = {};
         this.setState("disconnected");
       });
 
@@ -684,6 +693,13 @@ export class ACPClient {
       this.mcpCapabilities = {
         ...initResponse.agentCapabilities?.mcpCapabilities,
       };
+      this.promptCapabilities = {
+        image:
+          initResponse.agentCapabilities?.promptCapabilities?.image === true,
+        embeddedContext:
+          initResponse.agentCapabilities?.promptCapabilities
+            ?.embeddedContext === true,
+      };
 
       this.setState("connected");
       return initResponse;
@@ -708,6 +724,7 @@ export class ACPClient {
         this.loadingSessionId = null;
         this.authenticationMethods = [];
         this.mcpCapabilities = {};
+        this.promptCapabilities = {};
         this.setState("error");
       }
       throw error;
@@ -1082,7 +1099,7 @@ export class ACPClient {
 
   async sendMessage(
     message: string,
-    attachments?: readonly FileAttachment[]
+    attachments?: readonly PromptAttachment[]
   ): Promise<acp.PromptResponse> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
@@ -1090,7 +1107,11 @@ export class ACPClient {
       throw new Error("No active session");
     }
 
-    const content = buildPromptContent(message, attachments ?? []);
+    const content = buildPromptContent(
+      message,
+      attachments ?? [],
+      this.promptCapabilities
+    );
     if (content.length === 0) {
       throw new Error("Cannot send an empty prompt");
     }
@@ -1150,6 +1171,7 @@ export class ACPClient {
     this.supportsSessionLoading = false;
     this.loadingSessionId = null;
     this.mcpCapabilities = {};
+    this.promptCapabilities = {};
     this.activePrompt = null;
     this.authenticationMethods = [];
     this.setState("disconnected");
