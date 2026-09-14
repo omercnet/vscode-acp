@@ -27,25 +27,29 @@ test.describe("Permission Request Modal", () => {
     await window.waitForTimeout(2000);
     const frame = await getWebviewContentFrame(window);
 
-    // First permission request: simulates the agent asking to write a file.
+    // First request contains hostile-looking terminal input. The real webview
+    // must show trusted labels and redact the supplied environment value.
     await postToWebview(frame, {
       type: "permissionRequest",
       requestId: "demo-req-1",
-      title: "Write File",
+      title: "[ALLOW NOW]",
       rawInput: {
-        path: "src/index.ts",
-        content: "console.log('hello from the agent');\n",
+        command: "npm\u001b[2J test",
+        args: ["--runInBand"],
+        env: [{ name: "API_TOKEN", value: "do-not-display" }],
       },
       options: [
-        { id: "allow_once", label: "Allow Once" },
-        { id: "allow_always", label: "Allow Always" },
-        { id: "reject_once", label: "Reject" },
+        { id: "allow_once", kind: "allow_once" },
+        { id: "allow_always", kind: "allow_always" },
+        { id: "reject_once", kind: "reject_once" },
       ],
     });
 
     const modal = frame.locator("#permission-modal");
     await expect(modal).toHaveClass(/visible/);
-    await expect(frame.locator(".permission-title")).toHaveText("Write File");
+    await expect(frame.locator(".permission-title")).toHaveText(
+      "Agent requests permission"
+    );
     await expect(frame.locator(".permission-option-btn")).toHaveCount(3);
 
     // The prompt opens inert: the dialog, not an approval button, holds focus
@@ -59,6 +63,12 @@ test.describe("Permission Request Modal", () => {
     );
     await expect(frame.locator(".permission-cancel-btn")).toBeEnabled();
 
+    const details = frame.locator(".permission-content");
+    await details.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+
     await expect(frame.locator(".permission-option-btn").first()).toBeEnabled({
       timeout: 1500,
     });
@@ -71,7 +81,7 @@ test.describe("Permission Request Modal", () => {
     // Screenshot 1: the permission prompt itself.
     if (sidebar) {
       await window.screenshot({
-        path: join(SCREENSHOTS_DIR, "permission-modal-request.png"),
+        path: join(SCREENSHOTS_DIR, "terminal-permission-allowed.png"),
         clip: {
           x: sidebar.x,
           y: sidebar.y,
@@ -81,7 +91,7 @@ test.describe("Permission Request Modal", () => {
       });
     } else {
       await window.screenshot({
-        path: join(SCREENSHOTS_DIR, "permission-modal-request.png"),
+        path: join(SCREENSHOTS_DIR, "terminal-permission-allowed.png"),
       });
     }
 
@@ -92,21 +102,25 @@ test.describe("Permission Request Modal", () => {
       type: "permissionRequest",
       requestId: "demo-req-2",
       title: "Run Command",
-      rawInput: { command: "npm test" },
+      rawInput: { command: "rm", args: ["-rf", "build"] },
       options: [
-        { id: "run", label: "Run" },
-        { id: "skip", label: "Skip" },
+        { id: "reject_once", kind: "reject_once" },
+        { id: "allow_once", kind: "allow_once" },
       ],
     });
 
-    await expect(frame.locator(".permission-title")).toHaveText("Write File");
+    await expect(frame.locator(".permission-title")).toHaveText(
+      "Agent requests permission"
+    );
 
     // Decision 1: approve the write. The modal must then advance to the
     // queued second request rather than closing entirely.
     await frame.locator(".permission-option-btn").first().click();
 
     await expect(modal).toHaveClass(/visible/);
-    await expect(frame.locator(".permission-title")).toHaveText("Run Command");
+    await expect(frame.locator(".permission-title")).toHaveText(
+      "Agent requests permission"
+    );
     await expect(frame.locator(".permission-option-btn")).toHaveCount(2);
     await expect(
       frame.locator(".permission-option-btn").first()
@@ -117,7 +131,7 @@ test.describe("Permission Request Modal", () => {
     const sidebarAfterDecision = await sidebarLocator.first().boundingBox();
     if (sidebarAfterDecision) {
       await window.screenshot({
-        path: join(SCREENSHOTS_DIR, "permission-modal-decision.png"),
+        path: join(SCREENSHOTS_DIR, "terminal-permission-denied.png"),
         clip: {
           x: sidebarAfterDecision.x,
           y: sidebarAfterDecision.y,
@@ -127,7 +141,7 @@ test.describe("Permission Request Modal", () => {
       });
     } else {
       await window.screenshot({
-        path: join(SCREENSHOTS_DIR, "permission-modal-decision.png"),
+        path: join(SCREENSHOTS_DIR, "terminal-permission-denied.png"),
       });
     }
 
@@ -152,7 +166,7 @@ test.describe("Permission Request Modal", () => {
       requestId: "demo-req-escape",
       title: "Delete File",
       rawInput: { path: "src/old.ts" },
-      options: [{ id: "allow_once", label: "Allow Once" }],
+      options: [{ id: "allow_once", kind: "allow_once" }],
     });
 
     const modal = frame.locator("#permission-modal");
@@ -178,7 +192,7 @@ test.describe("Permission Request Modal", () => {
       requestId: "demo-req-expire",
       title: "Execute Command",
       rawInput: { command: "rm -rf build" },
-      options: [{ id: "allow_once", label: "Allow Once" }],
+      options: [{ id: "allow_once", kind: "allow_once" }],
     });
 
     const modal = frame.locator("#permission-modal");

@@ -1,9 +1,17 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  writeFile,
+} from "fs/promises";
 import { tmpdir } from "os";
-import { join } from "path";
-import { ChatViewProvider } from "../views/chat";
+import { isAbsolute, join } from "path";
+import { buildWindowsBatchCommandLine, ChatViewProvider } from "../views/chat";
 import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
@@ -19,6 +27,7 @@ import type {
   McpCapabilities,
   NewSessionRequest,
   RequestPermissionRequest,
+  RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
 import * as attachmentHelpers from "../attachments";
@@ -72,7 +81,10 @@ interface MockACPClient {
 
 interface TestManagedTerminal {
   id: string;
+  sessionId: string;
+  generation: number;
   proc: null;
+  closing: boolean;
   output: string;
   outputByteLimit: number;
   truncated: boolean;
@@ -316,6 +328,103 @@ function makePermissionRequest(
     ],
     ...overrides,
   };
+}
+
+/**
+ * The extension host's `process.execPath` is the Electron binary, which needs
+ * a display and is not a usable stand-in for a command an agent would run.
+ */
+const NODE_EXECUTABLE = process.env.npm_node_execpath ?? "node";
+
+interface TerminalCreateRequest {
+  command: string;
+  args?: string[];
+  cwd?: string | null;
+  outputByteLimit?: number;
+}
+
+interface TerminalTestHarness {
+  view: FakeWebview["view"];
+  handleRequestPermission(
+    params: RequestPermissionRequest
+  ): Promise<RequestPermissionResponse>;
+  handlePermissionResponse(message: {
+    requestId: string;
+    optionId?: string;
+  }): void;
+  expirePermissionRequests(): void;
+  handleCreateTerminal(
+    params: TerminalCreateRequest & { sessionId: string }
+  ): Promise<{ terminalId: string }>;
+  handleTerminalOutput(params: {
+    sessionId: string;
+    terminalId: string;
+  }): Promise<{ output: string }>;
+  handleWaitForTerminalExit(params: {
+    sessionId: string;
+    terminalId: string;
+  }): Promise<unknown>;
+  handleKillTerminalCommand(params: {
+    sessionId: string;
+    terminalId: string;
+  }): Promise<unknown>;
+  handleReleaseTerminal(params: {
+    sessionId: string;
+    terminalId: string;
+  }): Promise<unknown>;
+  disposeTerminals(): Promise<void>;
+}
+
+function workspaceRoot(): string {
+  const folder = vscode.workspace.workspaceFolders?.find(
+    (candidate) => candidate.uri.scheme === "file"
+  );
+  if (!folder) {
+    throw new Error(
+      "Integration tests require the workspace folder configured in .vscode-test.mjs"
+    );
+  }
+  return folder.uri.fsPath;
+}
+
+/**
+ * Drives the real permission path an agent must traverse before a terminal can
+ * run and returns the exact launch descriptor shown to the user.
+ */
+async function decideTerminalRequest(
+  provider: TerminalTestHarness,
+  webview: FakeWebview,
+  rawInput: TerminalCreateRequest,
+  decisionId: "once" | "always" | "deny" = "once"
+): Promise<Record<string, unknown>> {
+  const pendingCount = webview.messages.length;
+  const decision = provider.handleRequestPermission(
+    makePermissionRequest({
+      toolCall: { toolCallId: `tool-${pendingCount}`, rawInput },
+      options: [
+        { optionId: "once", name: "Allow", kind: "allow_once" },
+        { optionId: "always", name: "Always", kind: "allow_always" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    })
+  );
+  for (
+    let attempt = 0;
+    webview.messages.length === pendingCount && attempt < 100;
+    attempt++
+  ) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const posted = webview.messages[pendingCount];
+  const requestId = posted?.requestId;
+  if (typeof requestId !== "string") {
+    assert.fail("permission request must include a string request id");
+  }
+  provider.handlePermissionResponse({ requestId, optionId: decisionId });
+  assert.deepStrictEqual(await decision, {
+    outcome: { outcome: "selected", optionId: decisionId },
+  });
+  return posted;
 }
 
 suite("ChatViewProvider", () => {
@@ -1154,7 +1263,8 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.newSessionCalls, 2);
       assert.strictEqual(client.requests[0], client.requests[1]);
       assert.deepStrictEqual(client.requests[0], {
-        cwd: process.cwd(),
+        cwd:
+          vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
         mcpServers: [],
       });
       assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
@@ -1696,7 +1806,10 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(history?.length, 1);
       assert.strictEqual(history?.[0].sessionId, "test-session");
       assert.strictEqual(history?.[0].agentId, "test-agent");
-      assert.strictEqual(history?.[0].cwd, process.cwd());
+      assert.strictEqual(
+        history?.[0].cwd,
+        vscode.workspace.workspaceFolders?.[0].uri.fsPath ?? process.cwd()
+      );
       assert.strictEqual(history?.[0].preview, "Describe the migration plan");
       assert.strictEqual(history?.[0].messageCount, 1);
     });
@@ -2283,7 +2396,10 @@ suite("ChatViewProvider", () => {
       const testProvider = provider as unknown as TestableCapabilityHandlers;
       const terminal = {
         id: "terminal",
+        sessionId: "session",
+        generation: 0,
         proc: null,
+        closing: false,
         output: "",
         outputByteLimit: 3,
         truncated: false,
@@ -2306,6 +2422,830 @@ suite("ChatViewProvider", () => {
         exitStatus: null,
       });
       assert.ok(Buffer.byteLength(response.output, "utf8") <= 3);
+      await assert.rejects(
+        () =>
+          testProvider.handleTerminalOutput({
+            sessionId: "other-session",
+            terminalId: terminal.id,
+          }),
+        /Terminal not found/
+      );
+    });
+
+    test("rejects terminal working directories outside trusted workspace roots", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["--version"],
+        cwd: tmpdir(),
+      };
+      const posted = await decideTerminalRequest(
+        terminalProvider,
+        fakeWebview,
+        request
+      );
+      assert.strictEqual(posted.executable, false);
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("never resolves a bare terminal command from the workspace", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const command = `workspace-hijack-${process.pid}${
+        process.platform === "win32" ? ".exe" : ""
+      }`;
+      const planted = join(workspaceRoot(), command);
+      const originalPath = process.env.PATH;
+
+      try {
+        await copyFile(process.execPath, planted);
+        await chmod(planted, 0o755);
+        process.env.PATH = workspaceRoot();
+        const request = { command, args: ["--version"], cwd: workspaceRoot() };
+        const posted = await decideTerminalRequest(
+          terminalProvider,
+          fakeWebview,
+          request
+        );
+
+        assert.strictEqual(posted.executable, false);
+        await assert.rejects(
+          () =>
+            terminalProvider.handleCreateTerminal({
+              sessionId: "test-session",
+              ...request,
+            }),
+          /requires an approved permission request/
+        );
+      } finally {
+        if (originalPath === undefined) {
+          delete process.env.PATH;
+        } else {
+          process.env.PATH = originalPath;
+        }
+        await rm(planted, { force: true });
+      }
+    });
+
+    test("runs an approved command literally and excludes inherited secrets", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const secretName = "VSCODE_ACP_TERMINAL_TEST_SECRET";
+      const originalSecret = process.env[secretName];
+      process.env[secretName] = "host-secret";
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: [
+          "-e",
+          `process.stdout.write(\`${"${process.argv[1]}"}|${"${process.env.VSCODE_ACP_TERMINAL_TEST_SECRET ?? 'missing'}"}\`)`,
+          "literal && echo injected",
+        ],
+        cwd: workspaceRoot(),
+      };
+      let terminalId: string | undefined;
+
+      try {
+        await decideTerminalRequest(terminalProvider, fakeWebview, request);
+        ({ terminalId } = await terminalProvider.handleCreateTerminal({
+          sessionId: "test-session",
+          ...request,
+        }));
+        await terminalProvider.handleWaitForTerminalExit({
+          sessionId: "test-session",
+          terminalId,
+        });
+        const { output } = await terminalProvider.handleTerminalOutput({
+          sessionId: "test-session",
+          terminalId,
+        });
+
+        assert.strictEqual(output, "literal && echo injected|missing");
+      } finally {
+        if (terminalId) {
+          await terminalProvider.handleReleaseTerminal({
+            sessionId: "test-session",
+            terminalId,
+          });
+        }
+        if (originalSecret === undefined) {
+          delete process.env[secretName];
+        } else {
+          process.env[secretName] = originalSecret;
+        }
+      }
+    });
+
+    test("spends an allow_once grant on the first create only", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('once')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId,
+      });
+
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("tracks identical allow_once approvals independently", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('twice')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      for (let approved = 0; approved < 2; approved++) {
+        const { terminalId } = await terminalProvider.handleCreateTerminal({
+          sessionId: "test-session",
+          ...request,
+        });
+        await terminalProvider.handleReleaseTerminal({
+          sessionId: "test-session",
+          terminalId,
+        });
+      }
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("revokes a banked grant when the same launch is denied", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["--version"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      await decideTerminalRequest(
+        terminalProvider,
+        fakeWebview,
+        request,
+        "deny"
+      );
+
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("revokes an existing grant even when denial preflight fails", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness & {
+        prepareTerminalLaunch(params: unknown): Promise<unknown>;
+        terminalPermissionGrants: Map<string, unknown>;
+      };
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["--version"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      assert.strictEqual(terminalProvider.terminalPermissionGrants.size, 1);
+
+      const prepare = terminalProvider.prepareTerminalLaunch.bind(provider);
+      terminalProvider.prepareTerminalLaunch = async () => {
+        throw new Error("temporarily unavailable");
+      };
+      try {
+        await decideTerminalRequest(
+          terminalProvider,
+          fakeWebview,
+          request,
+          "deny"
+        );
+      } finally {
+        terminalProvider.prepareTerminalLaunch = prepare;
+      }
+      assert.strictEqual(terminalProvider.terminalPermissionGrants.size, 0);
+    });
+    test("honours an allow_always grant for the rest of the session", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('always')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(
+        terminalProvider,
+        fakeWebview,
+        request,
+        "always"
+      );
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const { terminalId } = await terminalProvider.handleCreateTerminal({
+          sessionId: "test-session",
+          ...request,
+        });
+        await terminalProvider.handleReleaseTerminal({
+          sessionId: "test-session",
+          terminalId,
+        });
+      }
+
+      // "Always" is scoped to the session: a session transition revokes it.
+      terminalProvider.expirePermissionRequests();
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("caps distinct allow_always grants for the session", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness & {
+        terminalPermissionGrants: Map<string, unknown>;
+      };
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+
+      for (let index = 0; index < 65; index++) {
+        await decideTerminalRequest(
+          terminalProvider,
+          fakeWebview,
+          {
+            command: NODE_EXECUTABLE,
+            args: ["-e", `process.stdout.write('${index}')`],
+            cwd: workspaceRoot(),
+          },
+          "always"
+        );
+      }
+      assert.strictEqual(terminalProvider.terminalPermissionGrants.size, 64);
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            command: NODE_EXECUTABLE,
+            args: ["-e", "process.stdout.write('0')"],
+            cwd: workspaceRoot(),
+          }),
+        /requires an approved permission request/
+      );
+    });
+
+    test("lets only one of two concurrent creates spend a single grant", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('race')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      const results = await Promise.allSettled([
+        terminalProvider.handleCreateTerminal({
+          sessionId: "test-session",
+          ...request,
+        }),
+        terminalProvider.handleCreateTerminal({
+          sessionId: "test-session",
+          ...request,
+        }),
+      ]);
+
+      const fulfilled = results.filter(
+        (result) => result.status === "fulfilled"
+      );
+      assert.strictEqual(fulfilled.length, 1);
+      for (const result of fulfilled) {
+        await terminalProvider.handleReleaseTerminal({
+          sessionId: "test-session",
+          terminalId: result.value.terminalId,
+        });
+      }
+    });
+
+    test("denies a create whose command, args, or cwd differ from the approval", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('approved')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+            args: ["-e", "process.stdout.write('swapped')"],
+          }),
+        /requires an approved permission request/
+      );
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "other-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
+      await assert.rejects(
+        () =>
+          terminalProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+            padding: "unreviewed",
+          } as never),
+        /requires an approved permission request/
+      );
+    });
+
+    test("releases a killed terminal and reuses its slot", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "setInterval(() => {}, 1000)"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(
+        terminalProvider,
+        fakeWebview,
+        request,
+        "always"
+      );
+
+      const first = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      await terminalProvider.handleKillTerminalCommand({
+        sessionId: "test-session",
+        terminalId: first.terminalId,
+      });
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId: first.terminalId,
+      });
+      assert.strictEqual(terminalProvider.terminals.size, 0);
+
+      const second = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId: second.terminalId,
+      });
+    });
+
+    test("releases a terminal whose process already exited", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "process.stdout.write('done')"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      await terminalProvider.handleWaitForTerminalExit({
+        sessionId: "test-session",
+        terminalId,
+      });
+
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId,
+      });
+      assert.strictEqual(terminalProvider.terminals.size, 0);
+    });
+
+    test("does not spawn when cleanup wins the PTY preflight race", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers & {
+          prepareTerminalLaunch(params: unknown): Promise<unknown>;
+        };
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "setInterval(() => {}, 1000)"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+
+      const prepare = terminalProvider.prepareTerminalLaunch.bind(provider);
+      let calls = 0;
+      let releaseOpen!: () => void;
+      let markOpenStarted!: () => void;
+      let markOpenPrepared!: () => void;
+      const openGate = new Promise<void>((resolve) => {
+        releaseOpen = resolve;
+      });
+      const openStarted = new Promise<void>((resolve) => {
+        markOpenStarted = resolve;
+      });
+      const openPrepared = new Promise<void>((resolve) => {
+        markOpenPrepared = resolve;
+      });
+      terminalProvider.prepareTerminalLaunch = async (params) => {
+        calls++;
+        if (calls === 2) {
+          markOpenStarted();
+          await openGate;
+        }
+        const launch = await prepare(params);
+        if (calls === 2) {
+          markOpenPrepared();
+        }
+        return launch;
+      };
+
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      const tracked = terminalProvider.terminals.get(terminalId) as unknown as {
+        proc: unknown;
+      };
+      await openStarted;
+      const cleanup = terminalProvider.disposeTerminals();
+      releaseOpen();
+      await Promise.all([cleanup, openPrepared]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(tracked.proc, null);
+      assert.strictEqual(terminalProvider.terminals.size, 0);
+      terminalProvider.prepareTerminalLaunch = prepare;
+    });
+
+    test("disposes running terminals when the agent connection drops", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "setTimeout(() => {}, 5000)"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+
+      acpClient.emitStateChange("disconnected");
+      await terminalProvider.disposeTerminals();
+
+      assert.strictEqual(terminalProvider.terminals.size, 0);
+      await assert.rejects(
+        () =>
+          terminalProvider.handleTerminalOutput({
+            sessionId: "test-session",
+            terminalId,
+          }),
+        /Terminal not found/
+      );
+    });
+
+    test("allows one waiter and settles it during release", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "setInterval(() => {}, 1000)"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+      const firstWait = terminalProvider.handleWaitForTerminalExit({
+        sessionId: "test-session",
+        terminalId,
+      });
+
+      await assert.rejects(
+        () =>
+          terminalProvider.handleWaitForTerminalExit({
+            sessionId: "test-session",
+            terminalId,
+          }),
+        /already pending/
+      );
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId,
+      });
+      await firstWait;
+    });
+
+    test("terminates the complete child process tree before release", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const childProgram = "setInterval(() => {}, 1000)";
+      const parentProgram = [
+        "const { spawn } = require('child_process');",
+        `const child = spawn(process.execPath, ['-e', ${JSON.stringify(childProgram)}], { stdio: 'ignore' });`,
+        "child.unref();",
+        "process.stdout.write(String(child.pid));",
+      ].join(" ");
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", parentProgram],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(terminalProvider, fakeWebview, request);
+      const { terminalId } = await terminalProvider.handleCreateTerminal({
+        sessionId: "test-session",
+        ...request,
+      });
+
+      await terminalProvider.handleWaitForTerminalExit({
+        sessionId: "test-session",
+        terminalId,
+      });
+      const { output } = await terminalProvider.handleTerminalOutput({
+        sessionId: "test-session",
+        terminalId,
+      });
+      const childPid = Number.parseInt(output, 10);
+      assert.ok(childPid > 0, "child process PID should be reported");
+
+      await terminalProvider.handleReleaseTerminal({
+        sessionId: "test-session",
+        terminalId,
+      });
+      assert.throws(() => process.kill(childPid, 0));
+    });
+
+    test("bounds retained output when the agent sets no byte limit", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const testProvider = provider as unknown as TestableCapabilityHandlers;
+      const terminal = {
+        id: "unbounded",
+        sessionId: "session",
+        generation: 0,
+        proc: null,
+        closing: false,
+        output: "",
+        outputByteLimit: null as unknown as number,
+        truncated: false,
+        exitCode: null,
+        signal: null,
+        exitPromise: Promise.resolve(),
+        exitResolve: () => undefined,
+      };
+      testProvider.terminals.set(terminal.id, terminal);
+
+      for (let chunk = 0; chunk < 24; chunk++) {
+        testProvider.appendTerminalOutput(terminal, "x".repeat(100_000));
+      }
+
+      assert.ok(Buffer.byteLength(terminal.output, "utf8") <= 1_048_576);
+      assert.strictEqual(terminal.truncated, true);
+    });
+
+    test("atomically caps concurrent persistent terminal creates", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const terminalProvider = provider as unknown as TerminalTestHarness &
+        TestableCapabilityHandlers;
+      const fakeWebview = createFakeWebview();
+      terminalProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["-e", "setTimeout(() => {}, 5000)"],
+        cwd: workspaceRoot(),
+      };
+      await decideTerminalRequest(
+        terminalProvider,
+        fakeWebview,
+        request,
+        "always"
+      );
+
+      try {
+        const results = await Promise.allSettled(
+          Array.from({ length: 16 }, () =>
+            terminalProvider.handleCreateTerminal({
+              sessionId: "test-session",
+              ...request,
+            })
+          )
+        );
+        const fulfilled = results.filter(
+          (result) => result.status === "fulfilled"
+        );
+        const rejected = results.filter(
+          (result) => result.status === "rejected"
+        );
+        assert.strictEqual(fulfilled.length, 8);
+        assert.strictEqual(rejected.length, 8);
+        assert.strictEqual(terminalProvider.terminals.size, 8);
+        assert.ok(
+          rejected.every((result) =>
+            String(result.reason).includes("Too many ACP terminals")
+          )
+        );
+      } finally {
+        await Promise.all(
+          Array.from(terminalProvider.terminals.keys(), (terminalId) =>
+            terminalProvider.handleReleaseTerminal({
+              sessionId: "test-session",
+              terminalId,
+            })
+          )
+        );
+      }
+    });
+
+    test("quotes Windows batch launches and refuses unsafe or oversized ones", () => {
+      assert.strictEqual(
+        buildWindowsBatchCommandLine("C:\\Program Files\\run.cmd", [
+          "a b",
+          "--flag=1",
+        ]),
+        '"C:\\Program Files\\run.cmd" "a b" "--flag=1"'
+      );
+      for (const hostile of ['"', "&", "|", "<", ">", "(", ")", "^", "%"]) {
+        assert.throws(
+          () => buildWindowsBatchCommandLine("run.cmd", [`x${hostile}y`]),
+          /unsupported characters/,
+          `expected ${hostile} to be rejected`
+        );
+      }
+      assert.throws(
+        () => buildWindowsBatchCommandLine("run.cmd", ["!DELAYED!"]),
+        /unsupported characters/
+      );
+      // cmd.exe truncates past 8191 characters, which would run a command the
+      // user never reviewed.
+      assert.throws(
+        () =>
+          buildWindowsBatchCommandLine(
+            "run.cmd",
+            Array.from({ length: 8 }, () => "a".repeat(1024))
+          ),
+        /too long/
+      );
     });
   });
 
@@ -2339,6 +3279,122 @@ suite("ChatViewProvider", () => {
 
       assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
       assert.strictEqual(fakeWebview.messages.length, 0);
+    });
+    test("should cancel permission requests with unknown option kinds", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as any,
+        memento as any
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as {
+        view: FakeWebview["view"];
+        handleRequestPermission(
+          params: RequestPermissionRequest
+        ): Promise<unknown>;
+      };
+      testProvider.view = fakeWebview.view;
+      // The protocol type excludes unknown kinds; cast after constructing the
+      // hostile wire payload so the runtime boundary remains under test.
+      const malformedRequest = {
+        sessionId: "test-session",
+        toolCall: { toolCallId: "tool-1" },
+        options: [
+          {
+            optionId: "unexpected",
+            name: "Allow everything",
+            kind: "unknown",
+          },
+        ],
+      } as unknown as RequestPermissionRequest;
+
+      const response =
+        await testProvider.handleRequestPermission(malformedRequest);
+
+      assert.deepStrictEqual(response, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 0);
+    });
+
+    test("bounds option count, duplicate kinds, and permission payload size", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+      const fiveOptions = [
+        { optionId: "once", name: "Once", kind: "allow_once" as const },
+        { optionId: "always", name: "Always", kind: "allow_always" as const },
+        { optionId: "deny", name: "Deny", kind: "reject_once" as const },
+        {
+          optionId: "deny-always",
+          name: "Always deny",
+          kind: "reject_always" as const,
+        },
+        { optionId: "extra", name: "Extra", kind: "allow_once" as const },
+      ];
+      assert.deepStrictEqual(
+        await testProvider.handleRequestPermission(
+          makePermissionRequest({ options: fiveOptions })
+        ),
+        { outcome: { outcome: "cancelled" } }
+      );
+      assert.deepStrictEqual(
+        await testProvider.handleRequestPermission(
+          makePermissionRequest({
+            options: [
+              { optionId: "one", name: "One", kind: "allow_once" },
+              { optionId: "two", name: "Two", kind: "allow_once" },
+            ],
+          })
+        ),
+        { outcome: { outcome: "cancelled" } }
+      );
+      assert.deepStrictEqual(
+        await testProvider.handleRequestPermission(
+          makePermissionRequest({
+            toolCall: {
+              toolCallId: "oversized",
+              rawInput: { value: "x".repeat(4097) },
+            },
+          })
+        ),
+        { outcome: { outcome: "cancelled" } }
+      );
+      assert.strictEqual(fakeWebview.messages.length, 0);
+    });
+
+    test("does not grant terminal input containing invisible Unicode controls", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+      const request = {
+        command: NODE_EXECUTABLE,
+        args: ["safe\u200bhidden"],
+        cwd: workspaceRoot(),
+      };
+      const posted = await decideTerminalRequest(
+        testProvider,
+        fakeWebview,
+        request,
+        "deny"
+      );
+      assert.strictEqual(posted.executable, false);
+      await assert.rejects(
+        () =>
+          testProvider.handleCreateTerminal({
+            sessionId: "test-session",
+            ...request,
+          }),
+        /requires an approved permission request/
+      );
     });
 
     test("should reject a permission request from a stale session", async () => {
@@ -2418,11 +3474,13 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(fakeWebview.messages.length, 1);
       const sent = fakeWebview.messages[0];
       assert.strictEqual(sent.type, "permissionRequest");
-      assert.strictEqual(sent.title, "Write file");
+      assert.strictEqual(sent.title, "Agent requests permission");
       assert.deepStrictEqual(sent.options, [
-        { id: "allow", label: "Allow" },
-        { id: "deny", label: "Deny" },
+        { id: "allow", kind: "allow_once" },
+        { id: "deny", kind: "reject_once" },
       ]);
+      assert.strictEqual(sent.executable, false);
+
       // A prompt posted to a collapsed sidebar is delivered but never seen, so
       // the view is revealed without taking focus away from the editor.
       assert.deepStrictEqual(fakeWebview.shownWith, [true]);
@@ -2432,6 +3490,252 @@ suite("ChatViewProvider", () => {
         cancelled: true,
       });
       await promise;
+    });
+    test("offers only denial when permission details are redacted", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+      const decision = testProvider.handleRequestPermission(
+        makePermissionRequest({
+          toolCall: {
+            toolCallId: "secret-input",
+            rawInput: { action: "publish", authorization: "Bearer secret" },
+          },
+        })
+      );
+      const posted = fakeWebview.messages[0];
+      assert.deepStrictEqual(posted.options, [
+        { id: "deny", kind: "reject_once" },
+      ]);
+      testProvider.handlePermissionResponse({
+        requestId: posted.requestId as string,
+        optionId: "deny",
+      });
+      assert.deepStrictEqual(await decision, {
+        outcome: { outcome: "selected", optionId: "deny" },
+      });
+    });
+
+    test("shows the exact effective terminal launch before approval", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+
+      const posted = await decideTerminalRequest(
+        testProvider,
+        fakeWebview,
+        { command: NODE_EXECUTABLE, args: ["--version"] },
+        "deny"
+      );
+      const descriptor = posted.rawInput as {
+        command: string;
+        args: string[];
+        cwd: string;
+        env: Record<string, string>;
+      };
+
+      assert.strictEqual(posted.executable, true);
+      assert.ok(isAbsolute(descriptor.command));
+      assert.deepStrictEqual(descriptor.args, ["--version"]);
+      assert.strictEqual(descriptor.cwd, await realpath(workspaceRoot()));
+      assert.ok(typeof descriptor.env.PATH === "string");
+    });
+
+    test("cancels permission requests once the pending queue is saturated", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+
+      const pending = Array.from({ length: 16 }, () =>
+        testProvider.handleRequestPermission(makePermissionRequest())
+      );
+      const overflow = await testProvider.handleRequestPermission(
+        makePermissionRequest()
+      );
+
+      assert.deepStrictEqual(overflow, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(fakeWebview.messages.length, 16);
+
+      testProvider.expirePermissionRequests();
+      await Promise.all(pending);
+    });
+    test("reserves pending slots before asynchronous terminal preflight", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness & {
+        prepareTerminalLaunch(params: unknown): Promise<unknown>;
+        permissionRequests: Map<string, unknown>;
+      };
+      testProvider.view = fakeWebview.view;
+      let releasePreflight!: () => void;
+      const preflight = new Promise<void>((resolve) => {
+        releasePreflight = resolve;
+      });
+      const prepare = testProvider.prepareTerminalLaunch.bind(provider);
+      testProvider.prepareTerminalLaunch = async () => {
+        await preflight;
+        throw new Error("cancelled preflight");
+      };
+
+      const request = makePermissionRequest({
+        toolCall: {
+          toolCallId: "blocked-terminal",
+          rawInput: { command: NODE_EXECUTABLE, args: ["--version"] },
+        },
+      });
+      const pending = Array.from({ length: 16 }, () =>
+        testProvider.handleRequestPermission(request)
+      );
+      const overflow = await testProvider.handleRequestPermission(request);
+      assert.deepStrictEqual(overflow, { outcome: { outcome: "cancelled" } });
+      assert.strictEqual(testProvider.permissionRequests.size, 16);
+
+      testProvider.expirePermissionRequests();
+      releasePreflight();
+      await Promise.all(pending);
+      testProvider.prepareTerminalLaunch = prepare;
+      assert.ok(
+        fakeWebview.messages.every(
+          (message) => message.type !== "permissionRequest"
+        )
+      );
+    });
+
+    test("cancels a permission that is answered after its turn ends", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness & {
+        expireTurnPermissions(): void;
+        terminalPermissionGrants: Map<string, unknown>;
+      };
+      testProvider.view = fakeWebview.view;
+      const permission = testProvider.handleRequestPermission(
+        makePermissionRequest({
+          toolCall: {
+            toolCallId: "late-terminal",
+            rawInput: { command: NODE_EXECUTABLE, args: ["--version"] },
+          },
+        })
+      );
+      for (
+        let attempt = 0;
+        fakeWebview.messages.length === 0 && attempt < 100;
+        attempt++
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const requestId = fakeWebview.messages[0]?.requestId;
+      testProvider.expireTurnPermissions();
+      if (typeof requestId === "string") {
+        testProvider.handlePermissionResponse({ requestId, optionId: "allow" });
+      }
+
+      assert.deepStrictEqual(await permission, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual(testProvider.terminalPermissionGrants.size, 0);
+    });
+
+    test("creates a one-use terminal grant only after an allow decision", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness & {
+        terminalPermissionGrants: Map<
+          string,
+          { descriptorKey: string; persistent: boolean; uses: number }
+        >;
+      };
+      testProvider.view = fakeWebview.view;
+      await decideTerminalRequest(testProvider, fakeWebview, {
+        command: NODE_EXECUTABLE,
+        args: ["--version"],
+        cwd: null,
+      });
+
+      assert.strictEqual(testProvider.terminalPermissionGrants.size, 1);
+      testProvider.expirePermissionRequests();
+      assert.strictEqual(testProvider.terminalPermissionGrants.size, 0);
+
+      const padded = {
+        padding: "unreviewed",
+        command: NODE_EXECUTABLE,
+        args: ["--version"],
+        cwd: null,
+      } as unknown as TerminalCreateRequest;
+      await decideTerminalRequest(testProvider, fakeWebview, padded);
+      assert.strictEqual(testProvider.terminalPermissionGrants.size, 0);
+    });
+
+    test("cancels terminal approval when its session is replaced", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness & {
+        terminalPermissionGrants: Map<string, unknown>;
+      };
+      testProvider.view = fakeWebview.view;
+      const permission = testProvider.handleRequestPermission(
+        makePermissionRequest({
+          toolCall: {
+            toolCallId: "terminal-tool",
+            rawInput: {
+              command: NODE_EXECUTABLE,
+              args: ["--version"],
+              cwd: null,
+              env: [],
+            },
+          },
+        })
+      );
+      for (
+        let attempt = 0;
+        fakeWebview.messages.length === 0 && attempt < 100;
+        attempt++
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const requestId = fakeWebview.messages[0]?.requestId;
+      if (typeof requestId !== "string") {
+        assert.fail("permission request must include a string request id");
+      }
+      acpClient.currentSessionId = "replacement-session";
+      testProvider.handlePermissionResponse({ requestId, optionId: "allow" });
+
+      assert.deepStrictEqual(await permission, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual(testProvider.terminalPermissionGrants.size, 0);
+      acpClient.currentSessionId = "test-session";
     });
 
     test("should resolve with the selected option when the webview responds", async () => {
