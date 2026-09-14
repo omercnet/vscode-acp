@@ -41,21 +41,34 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 export function getMcpConfigurationResource(
   cwd: string,
-  workspaceFolders = vscode.workspace.workspaceFolders
+  workspaceFolders = vscode.workspace.workspaceFolders,
+  resource?: vscode.Uri
 ): vscode.Uri {
-  return (
-    workspaceFolders?.find((folder) => folder.uri.fsPath === cwd)?.uri ??
-    vscode.Uri.file(cwd)
-  );
+  const exactResource = resource
+    ? workspaceFolders?.find(
+        (folder) => folder.uri.toString() === resource.toString()
+      )
+    : undefined;
+  if (exactResource) {
+    return exactResource.uri;
+  }
+
+  const cwdMatches =
+    workspaceFolders?.filter((folder) => folder.uri.fsPath === cwd) ?? [];
+  return cwdMatches.length === 1 ? cwdMatches[0].uri : vscode.Uri.file(cwd);
 }
 
 export function getConfiguredSession(
   cwd: string,
   capabilities: acp.McpCapabilities,
-  environment: NodeJS.ProcessEnv = process.env
+  environment: NodeJS.ProcessEnv = process.env,
+  resource?: vscode.Uri
 ): ConfiguredSession {
   const configuration = vscode.workspace
-    .getConfiguration("vscode-acp", getMcpConfigurationResource(cwd))
+    .getConfiguration(
+      "vscode-acp",
+      getMcpConfigurationResource(cwd, undefined, resource)
+    )
     .get<unknown>("mcpServers", []);
   const sensitiveValues = new Set<string>();
   const mcpServers = validateMcpServers(
@@ -90,6 +103,22 @@ export class McpSecretRedactor {
         (redacted, secret) => redacted.split(secret).join("[redacted]"),
         text
       );
+  }
+
+  redactError(error: unknown): Error {
+    if (!(error instanceof Error)) {
+      return new Error(this.redact(String(error)));
+    }
+    const message = this.redact(error.message);
+    if (message === error.message) {
+      return error;
+    }
+    if (error instanceof acp.RequestError) {
+      return new acp.RequestError(error.code, message);
+    }
+    const redacted = new Error(message);
+    redacted.name = error.name;
+    return redacted;
   }
 }
 
@@ -240,10 +269,10 @@ function validateRemote(
   } catch {
     fail("MCP_CONFIG_MALFORMED", `${location}.url must be a valid URL`);
   }
-  if (url.protocol !== "https:" || url.username || url.password) {
+  if (url.protocol !== "https:" || url.username || url.password || url.hash) {
     fail(
       "MCP_CONFIG_UNSAFE",
-      `${location}.url must use HTTPS and must not contain credentials`
+      `${location}.url must use HTTPS and must not contain credentials or a fragment`
     );
   }
 

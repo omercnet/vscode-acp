@@ -1,5 +1,6 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
+import { RequestError } from "@agentclientprotocol/sdk";
 import {
   getMcpConfigurationResource,
   McpConfigurationError,
@@ -21,6 +22,30 @@ suite("MCP server configuration", () => {
     assert.strictEqual(
       getMcpConfigurationResource(remoteUri.fsPath, [workspaceFolder]),
       remoteUri
+    );
+  });
+
+  test("uses the exact resource when workspace fsPaths collide", () => {
+    const localUri = vscode.Uri.file("/workspace");
+    const remoteUri = vscode.Uri.parse(
+      "vscode-remote://ssh-remote+host/workspace"
+    );
+    const workspaceFolders = [
+      { index: 0, name: "local", uri: localUri },
+      { index: 1, name: "remote", uri: remoteUri },
+    ];
+
+    assert.strictEqual(
+      getMcpConfigurationResource(
+        remoteUri.fsPath,
+        workspaceFolders,
+        remoteUri
+      ),
+      remoteUri
+    );
+    assert.strictEqual(
+      getMcpConfigurationResource(remoteUri.fsPath, workspaceFolders).scheme,
+      "file"
     );
   });
 
@@ -153,6 +178,20 @@ suite("MCP server configuration", () => {
         ),
       "MCP_CONFIG_UNSAFE"
     );
+    assertMcpError(
+      () =>
+        validateMcpServers(
+          [
+            {
+              type: "http",
+              name: "remote",
+              url: "https://example.com/mcp#secret",
+            },
+          ],
+          { http: true }
+        ),
+      "MCP_CONFIG_UNSAFE"
+    );
   });
 
   test("resolves environment references freshly without mutating configuration", () => {
@@ -271,6 +310,25 @@ suite("MCP server configuration", () => {
       "agent echoed [redacted] and then [redacted]"
     );
     assert.ok(!diagnostic.includes("top-secret"));
+  });
+
+  test("preserves RequestError identity and code while redacting secrets", () => {
+    const redactor = new McpSecretRedactor();
+    redactor.add(["top-secret"]);
+
+    const redacted = redactor.redactError(
+      new RequestError(-32000, "Authentication failed for top-secret", {
+        token: "top-secret",
+      })
+    );
+
+    assert.ok(redacted instanceof RequestError);
+    assert.strictEqual(redacted.code, -32000);
+    assert.strictEqual(
+      redacted.message,
+      "Authentication failed for [redacted]"
+    );
+    assert.strictEqual(redacted.data, undefined);
   });
 
   test("reports missing environment variables without exposing values", () => {

@@ -21,6 +21,7 @@ export type ProtocolErrorDemoMode =
 export type AuthenticationDemoMode =
   | "authentication"
   | "authentication-failure"
+  | "authentication-mcp"
   | "authentication-terminal"
   | "authentication-unknown-type";
 
@@ -32,6 +33,7 @@ export type AuthenticationDemoMode =
 const AUTH_METHODS_BY_DEMO_MODE: Partial<Record<DemoMode, unknown[]>> = {
   authentication: [{ id: "browser", name: "Browser sign-in" }],
   "authentication-failure": [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-mcp": [{ id: "browser", name: "Browser sign-in" }],
   "authentication-terminal": [
     { id: "terminal", name: "Terminal sign-in", type: "terminal" },
   ],
@@ -222,8 +224,11 @@ export class MockACPServer {
                 : acp.PROTOCOL_VERSION,
             agentCapabilities: {
               loadSession:
-                this.demoMode === "load" || this.demoMode === "load-failure",
-              ...(this.demoMode === "mcp-transports"
+                this.demoMode === "load" ||
+                this.demoMode === "load-failure" ||
+                this.demoMode === "authentication-mcp",
+              ...(this.demoMode === "mcp-transports" ||
+              this.demoMode === "authentication-mcp"
                 ? { mcpCapabilities: { http: true, sse: true } }
                 : {}),
               ...(this.demoMode === "session-close" ||
@@ -294,7 +299,11 @@ export class MockACPServer {
       this.sendError(id, -32000, "Authentication failed");
       return;
     }
-    if (this.demoMode !== "authentication" || methodId !== "browser") {
+    if (
+      (this.demoMode !== "authentication" &&
+        this.demoMode !== "authentication-mcp") ||
+      methodId !== "browser"
+    ) {
       this.sendError(id, -32602, "Unsupported authentication method");
       return;
     }
@@ -309,7 +318,8 @@ export class MockACPServer {
     }
     if (
       (this.demoMode === "authentication" ||
-        this.demoMode === "authentication-failure") &&
+        this.demoMode === "authentication-failure" ||
+        this.demoMode === "authentication-mcp") &&
       !this.authenticated
     ) {
       this.sendError(id, -32000, "Authentication required");

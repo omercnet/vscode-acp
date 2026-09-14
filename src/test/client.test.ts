@@ -398,6 +398,8 @@ suite("ACPClient with Mock Server", () => {
         http: true,
         sse: true,
       });
+      client.dispose();
+      assert.deepStrictEqual(client.getMcpCapabilities(), {});
     });
 
     test("rejects an unsupported negotiated protocol version", async () => {
@@ -448,11 +450,14 @@ suite("ACPClient with Mock Server", () => {
       ]);
 
       await assert.rejects(
-        () => client.newSession("/test/dir"),
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
         (error) => error instanceof RequestError && error.code === -32000
       );
       await client.authenticate("browser", client.getConnectionGeneration());
-      const session = await client.newSession("/test/dir");
+      const session = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
 
       assert.ok(session.sessionId);
       assert.deepStrictEqual(
@@ -462,6 +467,45 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(
         mockProcesses[0].server.getNewSessionRequestCount(),
         2
+      );
+      client.dispose();
+      assert.deepStrictEqual(client.getAuthenticationMethods(), []);
+    });
+
+    test("preserves one MCP payload across auth retry and session load", async () => {
+      demoMode = "authentication-mcp";
+      await client.connect();
+      const mcpServers: McpServer[] = [
+        {
+          type: "http",
+          name: "remote",
+          url: "https://example.com/mcp",
+          headers: [{ name: "Authorization", value: "Bearer resolved" }],
+        },
+      ];
+      const request = { cwd: "/test/dir", mcpServers };
+
+      await assert.rejects(
+        () => client.newSession(request),
+        (error) => error instanceof RequestError && error.code === -32000
+      );
+      await client.authenticate("browser", client.getConnectionGeneration());
+      const created = await client.newSession(request);
+      await client.loadSession({ sessionId: created.sessionId, ...request });
+
+      assert.deepStrictEqual(client.getMcpCapabilities(), {
+        http: true,
+        sse: true,
+      });
+      assert.deepStrictEqual(
+        mockProcesses[0].server
+          .getNewSessionRequests()
+          .map((received) => received.mcpServers),
+        [mcpServers, mcpServers]
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getLoadSessionRequests()[0].mcpServers,
+        mcpServers
       );
     });
 
@@ -529,7 +573,9 @@ suite("ACPClient with Mock Server", () => {
       demoMode = "authentication-failure";
       await client.connect();
 
-      await assert.rejects(() => client.newSession("/test/dir"));
+      await assert.rejects(() =>
+        client.newSession({ cwd: "/test/dir", mcpServers: [] })
+      );
       await assert.rejects(() =>
         client.authenticate("browser", client.getConnectionGeneration())
       );

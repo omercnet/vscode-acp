@@ -190,7 +190,7 @@ class TestACPClient implements MockACPClient {
     return false;
   }
   async connect(): Promise<void> {}
-  async newSession(): Promise<void> {}
+  async newSession(_params: NewSessionRequest): Promise<void> {}
   async sendMessage(): Promise<{ stopReason: string }> {
     return { stopReason: "end_turn" };
   }
@@ -794,13 +794,13 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-        async loadSession(sessionId: string): Promise<void> {
+        async loadSession(params: LoadSessionRequest): Promise<void> {
           this.currentSessionId = null;
           markLoadStarted();
           await new Promise<void>((resolve) => {
             finishLoad = resolve;
           });
-          this.currentSessionId = sessionId;
+          this.currentSessionId = params.sessionId;
         }
 
         async sendMessage(): Promise<{ stopReason: string }> {
@@ -1063,6 +1063,7 @@ suite("ChatViewProvider", () => {
       class AuthenticationClient extends TestACPClient {
         newSessionCalls = 0;
         authenticatedMethods: string[] = [];
+        requests: NewSessionRequest[] = [];
 
         isConnected(): boolean {
           return true;
@@ -1072,7 +1073,8 @@ suite("ChatViewProvider", () => {
           return [{ id: "browser", name: "Browser sign-in" }];
         }
 
-        async newSession(): Promise<void> {
+        async newSession(request: NewSessionRequest): Promise<void> {
+          this.requests.push(request);
           this.newSessionCalls++;
           if (this.newSessionCalls === 1) {
             throw new RequestError(-32000, "Authentication required");
@@ -1103,6 +1105,11 @@ suite("ChatViewProvider", () => {
       await authenticationProvider.ensureSession();
 
       assert.strictEqual(client.newSessionCalls, 2);
+      assert.strictEqual(client.requests[0], client.requests[1]);
+      assert.deepStrictEqual(client.requests[0], {
+        cwd: process.cwd(),
+        mcpServers: [],
+      });
       assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
       assert.strictEqual(authenticationProvider.hasSession, true);
     });
@@ -1470,7 +1477,7 @@ suite("ChatViewProvider", () => {
     assert.match(visibleOutput, /\[redacted\]/);
   });
 
-  test("rethrows session creation errors without MCP secrets", async () => {
+  test("redacts session creation errors without losing RequestError identity", async () => {
     const secret = "session-secret-value";
     class SecretErrorClient extends TestACPClient {
       isConnected(): boolean {
@@ -1478,7 +1485,9 @@ suite("ChatViewProvider", () => {
       }
 
       async newSession(): Promise<void> {
-        throw new Error(`Agent echoed ${secret}`);
+        throw new RequestError(-32000, `Agent echoed ${secret}`, {
+          token: secret,
+        });
       }
     }
 
@@ -1499,8 +1508,10 @@ suite("ChatViewProvider", () => {
     await assert.rejects(
       () => handleConnect.call(provider),
       (error) => {
-        assert.ok(error instanceof Error);
+        assert.ok(error instanceof RequestError);
+        assert.strictEqual(error.code, -32000);
         assert.strictEqual(error.message, "Agent echoed [redacted]");
+        assert.strictEqual(error.data, undefined);
         return true;
       }
     );
@@ -1914,7 +1925,7 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(restored?.messageCount, 2);
     });
 
-    test("keeps the visible session state when loading fails", async () => {
+    test("rolls back load and preserves typed errors while redacting", async () => {
       class FailingLoadClient extends TestACPClient {
         isConnected(): boolean {
           return true;
@@ -1925,7 +1936,9 @@ suite("ChatViewProvider", () => {
         }
 
         async loadSession(): Promise<void> {
-          throw new RequestError(-32000, "Sign in to continue");
+          throw new RequestError(-32000, "Sign in with session-secret-value", {
+            token: "session-secret-value",
+          });
         }
       }
 
@@ -1934,6 +1947,11 @@ suite("ChatViewProvider", () => {
         new FailingLoadClient() as unknown as ACPClient,
         memento as unknown as vscode.Memento
       );
+      const redactor = Reflect.get(
+        provider,
+        "mcpSecretRedactor"
+      ) as McpSecretRedactor;
+      redactor.add(["session-secret-value"]);
       const messages: Array<Record<string, unknown>> = [];
       Object.defineProperty(provider, "postMessage", {
         value: (message: Record<string, unknown>) => messages.push(message),
@@ -1963,7 +1981,13 @@ suite("ChatViewProvider", () => {
             preview: "Previous conversation",
             messageCount: 1,
           }),
-        /Sign in to continue/
+        (error) => {
+          assert.ok(error instanceof RequestError);
+          assert.strictEqual(error.code, -32000);
+          assert.strictEqual(error.message, "Sign in with [redacted]");
+          assert.strictEqual(error.data, undefined);
+          return true;
+        }
       );
 
       assert.strictEqual(sessionProvider.hasSession, true);
@@ -1971,7 +1995,7 @@ suite("ChatViewProvider", () => {
         messages.find((message) => message.type === "replayFailed"),
         {
           type: "replayFailed",
-          text: "Authentication required: Sign in to continue",
+          text: "Authentication required: Sign in with [redacted]",
         }
       );
       assert.ok(!messages.some((message) => message.type === "replayComplete"));
