@@ -822,14 +822,14 @@ suite("Webview", () => {
         assert.strictEqual(tools["tool-1"].status, "running");
       });
 
-      test("handles toolCallComplete", () => {
+      test("handles toolCallUpdate", () => {
         controller.handleMessage({
           type: "toolCallStart",
           toolCallId: "tool-1",
           name: "bash",
         });
         controller.handleMessage({
-          type: "toolCallComplete",
+          type: "toolCallUpdate",
           toolCallId: "tool-1",
           status: "completed",
           rawInput: { command: "ls -la" },
@@ -943,7 +943,7 @@ suite("Webview", () => {
           kind: "execute",
         });
         controller.handleMessage({
-          type: "toolCallComplete",
+          type: "toolCallUpdate",
           toolCallId: "tool-1",
           status: "completed",
           rawInput: { command: "ls -la" },
@@ -966,6 +966,197 @@ suite("Webview", () => {
           messages[0].querySelector(".tool-input-preview")?.textContent,
           "ls -la"
         );
+      });
+
+      test("keeps replacement locations through later partial updates and opens them", () => {
+        mockVsCode._clearMessages();
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "Read file",
+          locations: [
+            {
+              path: "/workspace/first.ts",
+              label: "src/<img src=x onerror=alert(1)>.ts",
+              line: 3,
+            },
+          ],
+        });
+        controller.handleMessage({
+          type: "toolCallUpdate",
+          toolCallId: "tool-1",
+          locations: [
+            {
+              path: "/workspace/final.ts",
+              label: "src/final.ts",
+              line: 12,
+            },
+          ],
+        });
+        controller.handleMessage({
+          type: "toolCallUpdate",
+          toolCallId: "tool-1",
+          status: "completed",
+        });
+
+        assert.deepStrictEqual(controller.getTools()["tool-1"].locations, [
+          {
+            path: "/workspace/final.ts",
+            label: "src/final.ts",
+            line: 12,
+          },
+        ]);
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+
+        const link = elements.messagesEl.querySelector<HTMLButtonElement>(
+          ".tool-location-link"
+        );
+        assert.strictEqual(link?.textContent, "src/final.ts:12");
+        assert.strictEqual(link?.querySelector("img"), null);
+        link?.click();
+        assert.deepStrictEqual(mockVsCode._getMessages().at(-1), {
+          type: "openToolLocation",
+          locationPath: "/workspace/final.ts",
+          locationLine: 12,
+        });
+      });
+
+      test("preserves a tool-only turn before rendering its stop reason", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-1",
+          name: "Inspect source",
+          locations: [
+            {
+              path: "/workspace/src/extension.ts",
+              label: "src/extension.ts",
+              line: 10,
+            },
+          ],
+        });
+        controller.handleMessage({
+          type: "toolCallUpdate",
+          toolCallId: "tool-1",
+          status: "completed",
+        });
+        controller.handleMessage({
+          type: "streamEnd",
+          stopReason: "max_tokens",
+        });
+
+        assert.strictEqual(
+          elements.messagesEl.querySelectorAll(".message.assistant .tool-item")
+            .length,
+          1
+        );
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".message.warning")?.textContent,
+          "Response stopped because the agent reached its token limit."
+        );
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
+      for (const [stopReason, selector, text] of [
+        ["end_turn", null, null],
+        [
+          "max_tokens",
+          ".message.warning",
+          "Response stopped because the agent reached its token limit.",
+        ],
+        [
+          "max_turn_requests",
+          ".message.warning",
+          "Response stopped because the agent reached its turn request limit.",
+        ],
+        [
+          "refusal",
+          ".message.error",
+          "The agent refused to continue this turn. Try rephrasing the request.",
+        ],
+        ["cancelled", ".message.system", "Response cancelled."],
+      ] as const) {
+        test(`renders zero-text ${stopReason} completion accurately`, () => {
+          controller.handleMessage({ type: "userMessage", text: "Continue" });
+          controller.handleMessage({ type: "streamStart" });
+          controller.handleMessage({ type: "streamEnd", stopReason });
+
+          if (selector === null) {
+            assert.strictEqual(
+              elements.messagesEl.querySelectorAll(
+                ".message.warning, .message.error, .message.system"
+              ).length,
+              0
+            );
+          } else {
+            assert.strictEqual(
+              elements.messagesEl.querySelector(selector)?.textContent,
+              text
+            );
+          }
+          assert.strictEqual(elements.sendBtn.disabled, false);
+          assert.strictEqual(document.activeElement, elements.inputEl);
+        });
+      }
+
+      test("shows a zero-text stop notice when no transcript is visible", () => {
+        controller.handleMessage({ type: "chatCleared" });
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "refusal" });
+
+        assert.strictEqual(elements.messagesEl.style.display, "flex");
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".message.error")?.textContent,
+          "The agent refused to continue this turn. Try rephrasing the request."
+        );
+      });
+
+      test("does not show cancellation from an abandoned conversation", () => {
+        controller.handleMessage({ type: "agentChanged" });
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "streamEnd",
+          stopReason: "cancelled",
+          suppressStopReason: true,
+        });
+
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".message.system"),
+          null
+        );
+        assert.strictEqual(elements.messagesEl.style.display, "none");
+      });
+
+      test("renders initialized identity as text and clears it on agent switch", () => {
+        controller.handleMessage({
+          type: "connectionState",
+          state: "connected",
+          agentInfo: {
+            name: "fallback-name",
+            title: '<img src=x onerror="alert(1)">',
+            version: "1.4.0",
+          },
+        });
+
+        assert.strictEqual(
+          elements.statusText.textContent,
+          'Connected · <img src=x onerror="alert(1)"> 1.4.0'
+        );
+        assert.strictEqual(elements.statusText.querySelector("img"), null);
+
+        controller.handleMessage({
+          type: "connectionState",
+          state: "connected",
+          agentInfo: { name: "fallback-name", version: "2.0.0" },
+        });
+        assert.strictEqual(
+          elements.statusText.textContent,
+          "Connected · fallback-name 2.0.0"
+        );
+
+        controller.handleMessage({ type: "agentChanged" });
+        assert.strictEqual(elements.statusText.textContent, "Disconnected");
       });
     });
 

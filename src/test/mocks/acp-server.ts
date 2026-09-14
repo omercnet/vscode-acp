@@ -64,6 +64,7 @@ const PROTOCOL_ERRORS: Record<
 export type DemoMode =
   | ProtocolErrorDemoMode
   | AuthenticationDemoMode
+  | "agent-info"
   | "ansi"
   | "capabilities"
   | "deferred-config"
@@ -239,6 +240,13 @@ export class MockACPServer {
                 : {}),
             },
             authMethods,
+            ...(this.demoMode === "agent-info" && {
+              agentInfo: {
+                name: "metadata-agent",
+                title: "Metadata Agent",
+                version: "1.4.0",
+              },
+            }),
           });
         }
         break;
