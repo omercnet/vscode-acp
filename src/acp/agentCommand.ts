@@ -110,21 +110,23 @@ const WINDOWS_DRIVE_ROOT = /^[a-z]:[\\/]/i;
 const WINDOWS_UNC_ROOT = /^[\\/]{2}[^\\/]+[\\/][^\\/]+/;
 
 /**
- * Produces a comparable form of a Windows path so that extended-length and
- * device prefixes cannot hide a candidate from the exclusion check.
+ * Rewrites a Windows extended-length or device prefix (`\\?\C:\x`,
+ * `\\?\UNC\host\share`) into its ordinary spelling so the same path cannot be
+ * written two ways to dodge a comparison.
  */
-function comparablePath(value: string, platform: NodeJS.Platform): string {
-  if (platform !== "win32") {
-    return value;
-  }
+function withoutWindowsPrefix(value: string): string {
   const extended = WINDOWS_EXTENDED_PREFIX.exec(value);
   if (!extended) {
-    return win32.normalize(value).toLowerCase();
+    return value;
   }
   const remainder = value.slice(extended[0].length);
-  return win32
-    .normalize(extended[1] ? `\\\\${remainder}` : remainder)
-    .toLowerCase();
+  return extended[1] ? `\\\\${remainder}` : remainder;
+}
+
+function comparablePath(value: string, platform: NodeJS.Platform): string {
+  return platform === "win32"
+    ? win32.normalize(withoutWindowsPrefix(value)).toLowerCase()
+    : value;
 }
 
 /**
@@ -136,12 +138,7 @@ function isRooted(value: string, platform: NodeJS.Platform): boolean {
   if (platform !== "win32") {
     return posix.isAbsolute(value);
   }
-  const extended = WINDOWS_EXTENDED_PREFIX.exec(value);
-  const candidate = extended
-    ? extended[1]
-      ? `\\\\${value.slice(extended[0].length)}`
-      : value.slice(extended[0].length)
-    : value;
+  const candidate = withoutWindowsPrefix(value);
   return WINDOWS_DRIVE_ROOT.test(candidate) || WINDOWS_UNC_ROOT.test(candidate);
 }
 
