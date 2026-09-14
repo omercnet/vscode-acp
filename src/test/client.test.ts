@@ -245,6 +245,23 @@ suite("ACPClient with Mock Server", () => {
       assert.ok(response);
       assert.deepStrictEqual(states, ["connecting", "connected"]);
     });
+    test("retains only the active connection's initialized identity", async () => {
+      demoMode = "agent-info";
+      await client.connect();
+
+      assert.deepStrictEqual(client.getAgentInfo(), {
+        name: "metadata-agent",
+        title: "Metadata Agent",
+        version: "1.4.0",
+      });
+
+      client.dispose();
+      assert.strictEqual(client.getAgentInfo(), null);
+
+      demoMode = "invalid-version";
+      await assert.rejects(() => client.connect());
+      assert.strictEqual(client.getAgentInfo(), null);
+    });
     test("spawns the resolved absolute executable without a shell", async () => {
       let spawned:
         { command: string; args: string[]; options: SpawnOptions } | undefined;

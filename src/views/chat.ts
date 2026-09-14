@@ -25,6 +25,7 @@ import { selectAgentPaths } from "../acp/agentPaths";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
   canonicalizeUnder,
+  isPathWithin,
   openTrustedWorkspaceFile,
   readOpenedWorkspaceFile,
   writeOpenedWorkspaceFile,
@@ -52,12 +53,18 @@ import type {
   RequestPermissionResponse,
   NewSessionRequest,
 } from "@agentclientprotocol/sdk";
+
 import { createFileAttachment, pickAttachmentUris } from "../attachments";
 import {
   MAX_ATTACHMENTS,
   isAttachmentMetadataValid,
   type FileAttachment,
 } from "../shared/attachments";
+interface WebviewToolLocation {
+  path: string;
+  label: string;
+  line?: number;
+}
 
 export const DIRTY_EDITOR_WRITE_CONFLICT =
   "ACP write refused because the file has unsaved editor changes. Save or revert the file, then retry.";
@@ -118,7 +125,8 @@ interface WebviewMessage {
     | "selectSession"
     | "deleteSession"
     | "requestAttachFiles"
-    | "removeAttachment";
+    | "removeAttachment"
+    | "openToolLocation";
   text?: string;
   agentId?: string;
   modeId?: string;
@@ -130,6 +138,8 @@ interface WebviewMessage {
   attachmentIds?: string[];
   attachmentId?: string;
   attachmentCount?: number;
+  locationPath?: string;
+  locationLine?: number;
 }
 
 interface ManagedTerminal {
@@ -223,6 +233,15 @@ const MAX_WINDOWS_COMMAND_LINE = 8000;
 /** Live child processes one session may hold open at a time. */
 const MAX_ACTIVE_TERMINALS = 8;
 const TERMINAL_TERMINATION_GRACE_MS = 1000;
+const MAX_TOOL_LOCATIONS = 20;
+const MAX_TOOL_LOCATION_PATH_LENGTH = 4096;
+const MAX_TOOL_LOCATION_LABEL_LENGTH = 160;
+const TOOL_LOCATION_UNSAFE_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/u;
+const TOOL_LOCATION_DISPLAY_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/gu;
+const TOOL_LOCATION_ERROR =
+  "Could not open this tool location. It must be an existing file inside a trusted local workspace.";
 
 /**
  * Fields the user actually reviews in the permission modal. A grant is only
@@ -612,7 +631,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
         }
       }
-      this.postMessage({ type: "connectionState", state });
+      this.sendConnectionState(state);
     });
 
     this.acpClient.setOnSessionUpdate((update) => {
@@ -752,15 +771,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "removeAttachment":
           this.pendingAttachments.delete(message.attachmentId ?? "");
           break;
+        case "openToolLocation":
+          await this.handleOpenToolLocation(
+            message.locationPath,
+            message.locationLine
+          );
+          break;
         case "ready":
           // A freshly loaded composer starts with an empty attachment bar;
           // drop any draft the previous webview instance owned so its files
           // do not keep consuming the per-prompt budget invisibly.
           this.clearPendingAttachments();
-          this.postMessage({
-            type: "connectionState",
-            state: this.acpClient.getState(),
-          });
+          this.sendConnectionState();
           this.sendAgentStatus();
           this.sendSessionMetadata();
           if (
@@ -2237,32 +2259,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         name: update.title,
         toolCallId: update.toolCallId,
         kind: update.kind,
+        status: update.status,
+        locations: this.toWebviewToolLocations(update.locations),
       });
     } else if (update.sessionUpdate === "tool_call_update") {
-      if (update.status === "completed" || update.status === "failed") {
-        let terminalOutput: string | undefined;
+      let terminalOutput: string | undefined;
 
-        if (update.content && update.content.length > 0) {
-          const terminalContent = update.content.find(
-            (c: { type: string; terminalId?: string }) => c.type === "terminal"
-          );
-          if (terminalContent && "terminalId" in terminalContent) {
-            terminalOutput = `[Terminal: ${terminalContent.terminalId}]`;
-          }
+      if (update.content && update.content.length > 0) {
+        const terminalContent = update.content.find(
+          (c: { type: string; terminalId?: string }) => c.type === "terminal"
+        );
+        if (terminalContent && "terminalId" in terminalContent) {
+          terminalOutput = `[Terminal: ${terminalContent.terminalId}]`;
         }
-
-        this.postMessage({
-          type: "toolCallComplete",
-          toolCallId: update.toolCallId,
-          title: update.title,
-          kind: update.kind,
-          content: update.content,
-          rawInput: update.rawInput,
-          rawOutput: update.rawOutput,
-          status: update.status,
-          terminalOutput,
-        });
       }
+
+      this.postMessage({
+        type: "toolCallUpdate",
+        toolCallId: update.toolCallId,
+        title: update.title,
+        kind: update.kind,
+        content: update.content,
+        rawInput: update.rawInput,
+        rawOutput: update.rawOutput,
+        status: update.status,
+        terminalOutput,
+        ...(update.locations !== undefined && {
+          locations: this.toWebviewToolLocations(update.locations),
+        }),
+      });
     } else if (update.sessionUpdate === "current_mode_update") {
       this.postMessage({ type: "modeUpdate", modeId: update.currentModeId });
     } else if (update.sessionUpdate === "config_option_update") {
@@ -2543,7 +2568,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           selected.id
         );
         if (queuedGeneration !== this.conversationGeneration) {
-          this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+          this.postMessage({
+            type: "streamEnd",
+            stopReason: "cancelled",
+            suppressStopReason: true,
+          });
           return;
         }
         if (refreshed) {
@@ -2581,7 +2610,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         promptGeneration !== this.conversationGeneration ||
         promptSessionId !== this.acpClient.getCurrentSessionId()
       ) {
-        this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
+        this.postMessage({
+          type: "streamEnd",
+          stopReason: "cancelled",
+          suppressStopReason: true,
+        });
         return;
       }
 
@@ -2594,22 +2627,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       if (this.streamingText.length === 0) {
-        console.warn("[Chat] No streaming text received from agent");
-        if (this.stderrBuffer.length > 0) {
-          console.warn("[Chat] Agent produced stderr output");
-        }
-        console.warn(`[Chat] Prompt stopped: ${response.stopReason}`);
-        this.postMessage({
-          type: "error",
-          text: "Agent returned no response. Check the ACP output channel for details.",
-        });
-        this.postMessage({ type: "streamEnd", stopReason: "error" });
-      } else {
-        this.postMessage({
-          type: "streamEnd",
-          stopReason: response.stopReason,
-        });
+        console.log(
+          `[Chat] Prompt completed without text: ${response.stopReason}`
+        );
       }
+      this.postMessage({
+        type: "streamEnd",
+        stopReason: response.stopReason,
+      });
       this.streamingText = "";
     } catch (error) {
       if (!promptStarted) {
@@ -2635,6 +2660,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postMessage({
         type: "streamEnd",
         stopReason: kind === "cancelled" ? "cancelled" : "error",
+        ...(queuedGeneration !== this.conversationGeneration && {
+          suppressStopReason: true,
+        }),
       });
 
       this.streamingText = "";
@@ -2809,6 +2837,110 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.attachmentDraftVersion += 1;
   }
 
+  private toWebviewToolLocations(locations: unknown): WebviewToolLocation[] {
+    if (!Array.isArray(locations)) {
+      return [];
+    }
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    const normalized: WebviewToolLocation[] = [];
+    for (const entry of locations.slice(0, MAX_TOOL_LOCATIONS)) {
+      if (typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const candidate = entry as Record<string, unknown>;
+      if (
+        typeof candidate.path !== "string" ||
+        candidate.path.length === 0 ||
+        !isAbsolute(candidate.path) ||
+        candidate.path.length > MAX_TOOL_LOCATION_PATH_LENGTH ||
+        TOOL_LOCATION_UNSAFE_CHARACTERS.test(candidate.path)
+      ) {
+        continue;
+      }
+      const requestPath = candidate.path;
+      const workspaceFolder = workspaceFolders.find(
+        (folder) =>
+          folder.uri.scheme === "file" &&
+          isWithinWorkspaceRoot(requestPath, folder.uri.fsPath)
+      );
+      const rawLabel = workspaceFolder
+        ? relative(workspaceFolder.uri.fsPath, requestPath) || requestPath
+        : requestPath;
+      const safeLabel = rawLabel.replace(TOOL_LOCATION_DISPLAY_CHARACTERS, " ");
+      const label =
+        safeLabel.length > MAX_TOOL_LOCATION_LABEL_LENGTH
+          ? `…${safeLabel.slice(-(MAX_TOOL_LOCATION_LABEL_LENGTH - 1))}`
+          : safeLabel;
+      const line =
+        Number.isSafeInteger(candidate.line) && (candidate.line as number) > 0
+          ? (candidate.line as number)
+          : undefined;
+      normalized.push({ path: requestPath, label, ...(line && { line }) });
+    }
+    return normalized;
+  }
+
+  private async handleOpenToolLocation(
+    requestPath: unknown,
+    requestedLine: unknown
+  ): Promise<void> {
+    try {
+      if (
+        !vscode.workspace.isTrusted ||
+        typeof requestPath !== "string" ||
+        requestPath.length === 0 ||
+        requestPath.length > MAX_TOOL_LOCATION_PATH_LENGTH ||
+        TOOL_LOCATION_UNSAFE_CHARACTERS.test(requestPath) ||
+        !isAbsolute(requestPath)
+      ) {
+        throw new Error("Untrusted tool location");
+      }
+      const canonicalPath = await realpath(requestPath);
+      let contained = false;
+      for (const folder of vscode.workspace.workspaceFolders ?? []) {
+        if (folder.uri.scheme !== "file") {
+          continue;
+        }
+        try {
+          const canonicalRoot = await realpath(folder.uri.fsPath);
+          if (isPathWithin(canonicalRoot, canonicalPath)) {
+            contained = true;
+            break;
+          }
+        } catch {
+          continue;
+        }
+      }
+      if (!contained) {
+        throw new Error("Tool location is outside the workspace");
+      }
+
+      const document = await vscode.workspace.openTextDocument(
+        vscode.Uri.file(canonicalPath)
+      );
+      const line =
+        Number.isSafeInteger(requestedLine) && (requestedLine as number) > 0
+          ? Math.min(requestedLine as number, document.lineCount) - 1
+          : undefined;
+      const selection =
+        line === undefined
+          ? undefined
+          : new vscode.Range(
+              new vscode.Position(line, 0),
+              new vscode.Position(line, 0)
+            );
+      await vscode.window.showTextDocument(document, {
+        preview: true,
+        ...(selection && { selection }),
+      });
+    } catch {
+      this.postMessage({
+        type: "toolLocationError",
+        text: TOOL_LOCATION_ERROR,
+      });
+    }
+  }
+
   private nextAttachmentId(): string {
     this.attachmentCounter += 1;
     return `att-${this.attachmentCounter}-${Date.now()}`;
@@ -2897,6 +3029,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } finally {
       this.attachmentPickerActive = false;
     }
+  }
+
+  private sendConnectionState(state = this.acpClient.getState()): void {
+    this.postMessage({
+      type: "connectionState",
+      state,
+      agentInfo: state === "connected" ? this.acpClient.getAgentInfo() : null,
+    });
   }
 
   private sendSessionMetadata(): void {
