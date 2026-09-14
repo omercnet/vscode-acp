@@ -52,6 +52,27 @@ function getModelState(
     currentModelId: modelConfig.currentValue,
   };
 }
+/**
+ * ACP discriminates auth methods on `type`, and treats a missing `type` as
+ * `agent`. The SDK does not validate `initialize` responses, so unknown values
+ * arrive verbatim from the agent process; only the documented agent-managed
+ * shapes may be passed to `authenticate`.
+ */
+export function isAgentAuthMethod(
+  method: unknown
+): method is acp.AuthMethodAgent {
+  if (typeof method !== "object" || method === null) {
+    return false;
+  }
+  const candidate = method as Record<string, unknown>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    (candidate.description === undefined ||
+      typeof candidate.description === "string") &&
+    (candidate.type === undefined || candidate.type === "agent")
+  );
+}
 
 export interface SessionMetadata {
   modes: acp.SessionModeState | null;
@@ -221,6 +242,7 @@ export class ACPClient {
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
+  private authenticationMethods: acp.AuthMethod[] = [];
   private pendingCommandsBySession = new Map<
     acp.SessionId,
     acp.AvailableCommand[]
@@ -290,6 +312,19 @@ export class ACPClient {
 
   getCurrentSessionId(): string | null {
     return this.isConnected() ? this.currentSessionId : null;
+  }
+
+  getAuthenticationMethods(): readonly acp.AuthMethod[] {
+    return [...this.authenticationMethods];
+  }
+
+  /**
+   * Identifies the connection attempt that produced the current
+   * {@link getAuthenticationMethods} list, so a selection made while the agent
+   * was replaced cannot be applied to the replacement.
+   */
+  getConnectionGeneration(): number {
+    return this.connectionGeneration;
   }
 
   supportsSessionLoad(): boolean {
@@ -368,6 +403,7 @@ export class ACPClient {
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
+    this.authenticationMethods = [];
     this.canCloseSessions = false;
     this.setState("connecting");
 
@@ -428,6 +464,7 @@ export class ACPClient {
         this.activePrompt = null;
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
+        this.authenticationMethods = [];
         this.loadingSessionId = null;
         this.setState("disconnected");
       });
@@ -566,6 +603,10 @@ export class ACPClient {
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
       this.supportsSessionLoading =
         initResponse.agentCapabilities?.loadSession === true;
+      const advertisedAuthMethods: unknown = initResponse.authMethods;
+      this.authenticationMethods = Array.isArray(advertisedAuthMethods)
+        ? advertisedAuthMethods.filter(isAgentAuthMethod)
+        : [];
 
       this.setState("connected");
       return initResponse;
@@ -587,6 +628,7 @@ export class ACPClient {
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
         this.loadingSessionId = null;
+        this.authenticationMethods = [];
         this.setState("error");
       }
       throw error;
@@ -873,6 +915,41 @@ export class ACPClient {
     return this.sessionMetadata;
   }
 
+  /**
+   * Sends an agent-managed ACP `authenticate` request.
+   *
+   * `selectedGeneration` is the {@link getConnectionGeneration} value observed
+   * when the method list was presented. A mismatch means the agent process was
+   * replaced while the user was choosing, so the selection is discarded instead
+   * of being applied to a different agent.
+   */
+  async authenticate(
+    methodId: acp.AuthMethodId,
+    selectedGeneration: number
+  ): Promise<void> {
+    const connection = this.connection;
+    const method = this.authenticationMethods.find(
+      (candidate) => candidate.id === methodId
+    );
+    if (!connection) {
+      throw new Error("Not connected");
+    }
+    if (selectedGeneration !== this.connectionGeneration) {
+      throw new Error("Authentication selection is stale");
+    }
+    if (!method || !isAgentAuthMethod(method)) {
+      throw new Error("Authentication method is not available");
+    }
+
+    await connection.agent.request(acp.methods.agent.authenticate, {
+      methodId,
+    });
+
+    if (connection !== this.connection) {
+      throw new Error("Authentication result is stale");
+    }
+  }
+
   async setMode(modeId: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
@@ -996,6 +1073,7 @@ export class ACPClient {
     this.supportsSessionLoading = false;
     this.loadingSessionId = null;
     this.activePrompt = null;
+    this.authenticationMethods = [];
     this.setState("disconnected");
   }
 

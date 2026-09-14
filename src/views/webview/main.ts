@@ -137,6 +137,7 @@ export interface ExtensionMessage {
   requestId?: string;
   options?: PermissionOption[];
   active?: boolean;
+  restoreFocus?: boolean;
 }
 
 /**
@@ -855,7 +856,12 @@ export class WebviewController {
     this.saveState();
   }
 
-  private setInputLock(reason: string, locked: boolean, message = ""): void {
+  private setInputLock(
+    reason: string,
+    locked: boolean,
+    message = "",
+    restoreFocus = true
+  ): void {
     if (locked) {
       const activeElement = this.doc.activeElement;
       this.restoreInputFocus ||=
@@ -869,10 +875,10 @@ export class WebviewController {
       this.inputLocks.delete(reason);
     }
 
-    this.updateInputControls();
+    this.updateInputControls(restoreFocus);
   }
 
-  private updateInputControls(): void {
+  private updateInputControls(restoreFocus = true): void {
     const inputLocked = this.inputLocks.size > 0;
     let hint = DEFAULT_INPUT_HINT;
     for (const lockMessage of this.inputLocks.values()) {
@@ -903,6 +909,7 @@ export class WebviewController {
     if (
       !inputLocked &&
       this.restoreInputFocus &&
+      restoreFocus &&
       !this.elements.permissionModal.classList.contains("visible") &&
       !this.elements.sessionPicker.classList.contains("visible")
     ) {
@@ -1227,6 +1234,17 @@ export class WebviewController {
       this.elements;
 
     switch (msg.type) {
+      // The composer stays editable while session setup runs, so a draft typed
+      // in the meantime wins over the prompt that never started.
+      case "restoreInput":
+        if (msg.text && !this.elements.inputEl.value) {
+          this.elements.inputEl.value = msg.text;
+          this.elements.inputEl.style.height = "auto";
+          this.elements.inputEl.focus();
+          this.saveState();
+        }
+        break;
+
       case "userMessage":
         if (msg.text) {
           this.addMessage(msg.text, "user");
@@ -1368,7 +1386,8 @@ export class WebviewController {
         this.setInputLock(
           "session",
           msg.active === true,
-          msg.text || "Preparing session…"
+          msg.text || "Preparing session…",
+          msg.restoreFocus !== false
         );
         break;
       case "connectionState":

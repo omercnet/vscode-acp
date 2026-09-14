@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
-import { ACPClient, describeACPError, formatACPError } from "../acp/client";
+import {
+  ACPClient,
+  describeACPError,
+  formatACPError,
+  isAgentAuthMethod,
+} from "../acp/client";
 import {
   getAgent,
   getAgentsWithStatus,
@@ -9,7 +14,9 @@ import {
 } from "../acp/agents";
 import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import { selectAgentPaths } from "../acp/agentPaths";
+import { RequestError } from "@agentclientprotocol/sdk";
 import type {
+  AuthMethodId,
   SessionNotification,
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -50,6 +57,20 @@ interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
   text: string;
+}
+
+interface AuthenticationPickItem extends vscode.QuickPickItem {
+  methodId: AuthMethodId;
+}
+
+/**
+ * VS Code substitutes `$(name)` in quick pick labels with a codicon glyph. Auth
+ * method names and descriptions come straight from the agent process, so the
+ * sequence is escaped to stop an agent rendering trust iconography (for example
+ * `$(verified)`) inside the authentication prompt.
+ */
+function escapeQuickPickIcons(value: string): string {
+  return value.replace(/\$\(/g, "\\$(");
 }
 
 interface WebviewMessage {
@@ -104,6 +125,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private sessionStart: Promise<void> | null = null;
   private sessionTransition: Promise<void> | null = null;
   private sessionTransitionLabel: string | null = null;
+  private sessionTransitionInputPaused = false;
   private conversationGeneration = 0;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
@@ -295,7 +317,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.sendAgentStatus();
           this.sendSessionMetadata();
-          if (this.sessionTransitionLabel) {
+          if (
+            this.sessionTransitionLabel &&
+            !this.sessionTransitionInputPaused
+          ) {
             this.postMessage({
               type: "sessionTransition",
               active: true,
@@ -1073,6 +1098,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     console.error(`[Chat] ${context}:`, error);
     this.postMessage({ type: "error", text: formatACPError(error) });
   }
+  private setSessionTransitionInputPaused(paused: boolean): void {
+    this.sessionTransitionInputPaused = paused;
+    if (paused) {
+      this.postMessage({
+        type: "sessionTransition",
+        active: false,
+        restoreFocus: false,
+      });
+    } else if (this.sessionTransitionLabel) {
+      this.postMessage({
+        type: "sessionTransition",
+        active: true,
+        text: this.sessionTransitionLabel,
+      });
+    }
+  }
+
   private async runSessionTransition(
     label: string,
     operation: () => Promise<void>
@@ -1090,6 +1132,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     })();
 
     this.sessionTransition = transition;
+    this.sessionTransitionInputPaused = false;
     this.sessionTransitionLabel = label;
     this.postMessage({ type: "sessionTransition", active: true, text: label });
 
@@ -1099,6 +1142,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.sessionTransition === transition) {
         this.sessionTransition = null;
         this.sessionTransitionLabel = null;
+        this.sessionTransitionInputPaused = false;
         this.postMessage({ type: "sessionTransition", active: false });
       }
     }
@@ -1107,7 +1151,66 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private settleSessionLock(): void {
     if (!this.sessionTransition) {
       this.sessionTransitionLabel = null;
+      this.sessionTransitionInputPaused = false;
       this.postMessage({ type: "sessionTransition", active: false });
+    }
+  }
+
+  private async selectAuthenticationMethod(): Promise<AuthMethodId | null> {
+    const methods = this.acpClient
+      .getAuthenticationMethods()
+      .filter(isAgentAuthMethod);
+    if (methods.length === 0) {
+      throw new Error("No supported authentication methods are available");
+    }
+
+    const selection = await vscode.window.showQuickPick<AuthenticationPickItem>(
+      methods.map((method) => ({
+        label: escapeQuickPickIcons(method.name),
+        description: method.description
+          ? escapeQuickPickIcons(method.description)
+          : undefined,
+        methodId: method.id,
+      })),
+      {
+        title: "Authentication required",
+        placeHolder: "Select an authentication method",
+        ignoreFocusOut: true,
+      }
+    );
+    return selection?.methodId ?? null;
+  }
+
+  private async createSessionWithAuthentication(
+    workingDirectory: string
+  ): Promise<void> {
+    try {
+      await this.acpClient.newSession(workingDirectory);
+    } catch (error) {
+      if (describeACPError(error).kind !== "authentication-required") {
+        throw error;
+      }
+
+      const selectedGeneration = this.acpClient.getConnectionGeneration();
+      const hasSupportedMethod = this.acpClient
+        .getAuthenticationMethods()
+        .some(isAgentAuthMethod);
+      if (!hasSupportedMethod) {
+        throw error;
+      }
+
+      this.setSessionTransitionInputPaused(true);
+      let methodId: AuthMethodId | null;
+      try {
+        methodId = await this.selectAuthenticationMethod();
+      } finally {
+        this.setSessionTransitionInputPaused(false);
+      }
+      if (!methodId) {
+        throw new Error("Authentication cancelled");
+      }
+      await this.acpClient.authenticate(methodId, selectedGeneration);
+      await this.acpClient.newSession(workingDirectory);
     }
   }
 
@@ -1150,7 +1253,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.sessionStart = this.runSessionTransition(label, async () => {
         await this.ensureConnection();
         if (!this.hasSession) {
-          await this.acpClient.newSession(workingDir);
+          await this.createSessionWithAuthentication(workingDir);
           this.hasSession = true;
           this.sendSessionMetadata();
         }
@@ -1163,14 +1266,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async handleUserMessage(text: string): Promise<void> {
     const queuedGeneration = this.conversationGeneration;
-    this.postMessage({ type: "userMessage", text });
-
+    let promptStarted = false;
     try {
       await this.ensureSession();
       if (queuedGeneration !== this.conversationGeneration) {
-        this.postMessage({ type: "streamEnd", stopReason: "cancelled" });
-        return;
+        throw new RequestError(-32800, "Request cancelled");
       }
+      this.postMessage({ type: "userMessage", text });
+      promptStarted = true;
       const promptGeneration = this.conversationGeneration;
       const promptSessionId = this.acpClient.getCurrentSessionId();
       this.streamingText = "";
@@ -1208,6 +1311,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.streamingText = "";
     } catch (error) {
+      if (!promptStarted) {
+        this.postMessage({ type: "restoreInput", text });
+      }
       const { kind } = describeACPError(error);
       if (kind === "cancelled") {
         console.log("[Chat] Prompt cancelled:", error);
@@ -1291,7 +1397,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.ensureConnection();
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        await this.acpClient.newSession(workingDir);
+        await this.createSessionWithAuthentication(workingDir);
         this.hasSession = true;
         this.hasRestoredModeModel = false;
         this.postMessage({ type: "chatCleared" });

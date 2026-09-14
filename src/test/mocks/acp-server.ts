@@ -18,6 +18,28 @@ export type ProtocolErrorDemoMode =
   | "error-auth-required"
   | "error-resource-not-found";
 
+export type AuthenticationDemoMode =
+  | "authentication"
+  | "authentication-failure"
+  | "authentication-terminal"
+  | "authentication-unknown-type";
+
+/**
+ * Advertised `authMethods`. Values are raw JSON because agents are untrusted
+ * and `initialize` responses are not schema-validated on the wire, so the mock
+ * must be able to send a `type` the SDK union does not model.
+ */
+const AUTH_METHODS_BY_DEMO_MODE: Partial<Record<DemoMode, unknown[]>> = {
+  authentication: [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-failure": [{ id: "browser", name: "Browser sign-in" }],
+  "authentication-terminal": [
+    { id: "terminal", name: "Terminal sign-in", type: "terminal" },
+  ],
+  "authentication-unknown-type": [
+    { id: "future", name: "Future sign-in", type: "terminal-v2" },
+  ],
+};
+
 const PROTOCOL_ERRORS: Record<
   ProtocolErrorDemoMode,
   { code: number; message: string }
@@ -39,6 +61,7 @@ const PROTOCOL_ERRORS: Record<
 
 export type DemoMode =
   | ProtocolErrorDemoMode
+  | AuthenticationDemoMode
   | "ansi"
   | "capabilities"
   | "deferred-config"
@@ -82,6 +105,9 @@ export class MockACPServer {
   private permissionOutcomes: acp.RequestPermissionOutcome[] = [];
   private initializeRequest: acp.InitializeRequest | null = null;
   private closedSessionIds: string[] = [];
+  private authenticated = false;
+  private authenticationRequests: string[] = [];
+  private newSessionRequestCount = 0;
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -93,6 +119,14 @@ export class MockACPServer {
 
   getClosedSessionIds(): readonly string[] {
     return this.closedSessionIds;
+  }
+
+  getAuthenticationRequests(): readonly string[] {
+    return this.authenticationRequests;
+  }
+
+  getNewSessionRequestCount(): number {
+    return this.newSessionRequestCount;
   }
 
   constructor(demoMode: DemoMode = "default") {
@@ -170,6 +204,7 @@ export class MockACPServer {
           this.initializeRequest = params as acp.InitializeRequest;
         }
         if (id !== undefined && this.demoMode !== "no-initialize") {
+          const authMethods = AUTH_METHODS_BY_DEMO_MODE[this.demoMode] ?? [];
           this.sendResponse(id, {
             protocolVersion:
               this.demoMode === "invalid-version"
@@ -183,7 +218,13 @@ export class MockACPServer {
                 ? { sessionCapabilities: { close: {} } }
                 : {}),
             },
+            authMethods,
           });
+        }
+        break;
+      case "authenticate":
+        if (id !== undefined) {
+          this.handleAuthenticate(id, params);
         }
         break;
       case "session/new":
@@ -229,7 +270,35 @@ export class MockACPServer {
     }
   }
 
+  private handleAuthenticate(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const methodId =
+      typeof params?.methodId === "string" ? params.methodId : "";
+    this.authenticationRequests.push(methodId);
+    if (this.demoMode === "authentication-failure") {
+      this.sendError(id, -32000, "Authentication failed");
+      return;
+    }
+    if (this.demoMode !== "authentication" || methodId !== "browser") {
+      this.sendError(id, -32602, "Unsupported authentication method");
+      return;
+    }
+    this.authenticated = true;
+    this.sendResponse(id, {});
+  }
+
   private handleNewSession(id: number, params?: Record<string, unknown>): void {
+    this.newSessionRequestCount++;
+    if (
+      (this.demoMode === "authentication" ||
+        this.demoMode === "authentication-failure") &&
+      !this.authenticated
+    ) {
+      this.sendError(id, -32000, "Authentication required");
+      return;
+    }
     let previousSession: MockSession | undefined;
     if (this.demoMode === "replacement-failure" && this.sessionCounter === 1) {
       this.sendError(id, -32000, "Replacement session failed");

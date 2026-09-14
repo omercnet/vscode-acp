@@ -6,6 +6,8 @@ import { ChatViewProvider } from "../views/chat";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type { ACPClient } from "../acp/client";
 import type {
+  AuthMethod,
+  AuthMethodId,
   RequestPermissionRequest,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
@@ -20,6 +22,12 @@ interface MockACPClient {
   setAgent: (config: any) => void;
   getAgentId: () => string;
   getCurrentSessionId: () => string | null;
+  getAuthenticationMethods: () => readonly AuthMethod[];
+  getConnectionGeneration: () => number;
+  authenticate: (
+    methodId: AuthMethodId,
+    selectedGeneration: number
+  ) => Promise<void>;
   setOnStateChange: (callback: any) => () => void;
   setOnSessionUpdate: (callback: any) => () => void;
   setOnStderr: (callback: any) => () => void;
@@ -70,6 +78,13 @@ interface TestableCapabilityHandlers {
   terminals: Map<string, TestManagedTerminal>;
 }
 
+interface AuthenticationTestProvider {
+  selectAuthenticationMethod(): Promise<AuthMethodId | null>;
+  ensureSession(): Promise<void>;
+  hasSession: boolean;
+  handleUserMessage(text: string): Promise<void>;
+}
+
 class TestMemento implements MockMemento {
   private state = new Map<string, unknown>();
 
@@ -110,6 +125,23 @@ class TestACPClient implements MockACPClient {
   }
   getCurrentSessionId(): string | null {
     return this.currentSessionId;
+  }
+
+  public connectionGeneration = 1;
+
+  getAuthenticationMethods(): readonly AuthMethod[] {
+    return [];
+  }
+
+  getConnectionGeneration(): number {
+    return this.connectionGeneration;
+  }
+
+  async authenticate(
+    _methodId: AuthMethodId,
+    _selectedGeneration: number
+  ): Promise<void> {
+    throw new Error("Authentication method is not available");
   }
   setOnStateChange(
     callback: (
@@ -610,12 +642,21 @@ suite("ChatViewProvider", () => {
   test("restores session metadata when a replacement chat fails", async () => {
     const metadata = { modes: null, models: null, commands: [] };
     class FailingReplacementClient extends TestACPClient {
+      newSessionCalls = 0;
+      sentMessages: string[] = [];
+
       isConnected(): boolean {
         return true;
       }
 
       async newSession(): Promise<void> {
+        this.newSessionCalls++;
         throw new RequestError(-32000, "Sign in to continue");
+      }
+
+      async sendMessage(text = ""): Promise<{ stopReason: string }> {
+        this.sentMessages.push(text);
+        return { stopReason: "end_turn" };
       }
 
       getSessionMetadata() {
@@ -623,20 +664,22 @@ suite("ChatViewProvider", () => {
       }
     }
 
+    const client = new FailingReplacementClient();
     const provider = new ChatViewProvider(
       mockExtensionUri,
-      new FailingReplacementClient() as unknown as ACPClient,
+      client as unknown as ACPClient,
       memento as unknown as vscode.Memento
     );
     const messages: Array<Record<string, unknown>> = [];
     Object.defineProperty(provider, "postMessage", {
       value: (message: Record<string, unknown>) => messages.push(message),
     });
-    const handleNewChat = Reflect.get(provider, "handleNewChat") as (
-      this: ChatViewProvider
-    ) => Promise<void>;
+    const lifecycle = provider as unknown as AuthenticationTestProvider & {
+      handleNewChat(): Promise<void>;
+    };
+    lifecycle.hasSession = true;
 
-    await handleNewChat.call(provider);
+    await lifecycle.handleNewChat();
 
     assert.deepStrictEqual(
       messages.find((message) => message.type === "error"),
@@ -654,6 +697,10 @@ suite("ChatViewProvider", () => {
       type: "sessionTransition",
       active: false,
     });
+
+    await lifecycle.handleUserMessage("Continue old session");
+    assert.strictEqual(client.newSessionCalls, 1);
+    assert.deepStrictEqual(client.sentMessages, ["Continue old session"]);
   });
 
   suite("Session transition races", () => {
@@ -920,6 +967,410 @@ suite("ChatViewProvider", () => {
         },
         { type: "sessionTransition", active: false },
       ]);
+    });
+  });
+
+  suite("authentication", () => {
+    test("offers only agent-managed methods and neutralizes agent-supplied icon syntax", async () => {
+      class AuthenticationClient extends TestACPClient {
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [
+            {
+              id: "browser",
+              name: "$(verified) Browser sign-in",
+              description: "$(shield) Continue in your browser",
+            },
+            {
+              id: "terminal",
+              name: "Terminal sign-in",
+              type: "terminal",
+            },
+            // A client-executed method type from a future ACP revision. The SDK
+            // does not validate `initialize` responses, so it reaches the client
+            // verbatim and must not be offered as agent-managed.
+            {
+              id: "future",
+              name: "Future sign-in",
+              type: "terminal-v2",
+            } as unknown as AuthMethod,
+          ];
+        }
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      const window = vscode.window as unknown as Record<string, unknown>;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        vscode.window,
+        "showQuickPick"
+      );
+      let choices: Array<{
+        label: string;
+        description?: string;
+        methodId: string;
+      }> = [];
+      Object.defineProperty(vscode.window, "showQuickPick", {
+        configurable: true,
+        value: async (
+          items: readonly {
+            label: string;
+            description?: string;
+            methodId: string;
+          }[]
+        ) => {
+          choices = [...items];
+          return items[0];
+        },
+      });
+
+      try {
+        const selected =
+          await authenticationProvider.selectAuthenticationMethod();
+
+        assert.strictEqual(selected, "browser");
+        assert.deepStrictEqual(choices, [
+          {
+            label: "\\$(verified) Browser sign-in",
+            description: "\\$(shield) Continue in your browser",
+            methodId: "browser",
+          },
+        ]);
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(vscode.window, "showQuickPick", descriptor);
+        } else {
+          delete window.showQuickPick;
+        }
+      }
+    });
+
+    test("authenticates once and retries session creation once", async () => {
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticatedMethods: string[] = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          if (this.newSessionCalls === 1) {
+            throw new RequestError(-32000, "Authentication required");
+          }
+        }
+
+        async authenticate(
+          methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedMethods.push(`${methodId}@${selectedGeneration}`);
+        }
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => "browser",
+      });
+
+      await authenticationProvider.ensureSession();
+
+      assert.strictEqual(client.newSessionCalls, 2);
+      assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
+      assert.strictEqual(authenticationProvider.hasSession, true);
+    });
+
+    test("does not authenticate again when the retry still requires authentication", async () => {
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticateCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          throw new RequestError(-32000, "Authentication required");
+        }
+
+        async authenticate(): Promise<void> {
+          this.authenticateCalls++;
+        }
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => "browser",
+      });
+
+      await assert.rejects(
+        () => authenticationProvider.ensureSession(),
+        /Authentication required/
+      );
+      assert.strictEqual(client.newSessionCalls, 2);
+      assert.strictEqual(client.authenticateCalls, 1);
+      assert.strictEqual(authenticationProvider.hasSession, false);
+    });
+
+    test("unlocks selection while keeping authentication serialized", async () => {
+      let resolveSelection!: () => void;
+      let selectionStarted!: () => void;
+      const selectionGate = new Promise<void>((resolve) => {
+        resolveSelection = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        selectionStarted = resolve;
+      });
+
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          if (this.newSessionCalls === 1) {
+            throw new RequestError(-32000, "Authentication required");
+          }
+        }
+
+        async authenticate(): Promise<void> {}
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider & {
+          handleNewChat(): Promise<void>;
+        };
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => {
+          selectionStarted();
+          await selectionGate;
+          return "browser";
+        },
+      });
+
+      const session = authenticationProvider.ensureSession();
+      await started;
+      assert.deepStrictEqual(
+        messages.filter((message) => message.type === "sessionTransition"),
+        [
+          {
+            type: "sessionTransition",
+            active: true,
+            text: "Starting session…",
+          },
+          { type: "sessionTransition", active: false, restoreFocus: false },
+        ]
+      );
+
+      const replacement = authenticationProvider.handleNewChat();
+      await Promise.resolve();
+      assert.strictEqual(client.newSessionCalls, 1);
+
+      resolveSelection();
+      await Promise.all([session, replacement]);
+      assert.strictEqual(client.newSessionCalls, 3);
+      assert.deepStrictEqual(
+        messages
+          .filter((message) => message.type === "sessionTransition")
+          .at(-1),
+        { type: "sessionTransition", active: false }
+      );
+    });
+
+    test("does not retry after authentication cancellation or a stale selection", async () => {
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticatedMethods: string[] = [];
+        authenticationError: Error | null = null;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          throw new RequestError(-32000, "Authentication required");
+        }
+
+        async authenticate(
+          methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedMethods.push(`${methodId}@${selectedGeneration}`);
+          if (this.authenticationError) {
+            throw this.authenticationError;
+          }
+        }
+      }
+
+      const cancelledClient = new AuthenticationClient();
+      const cancelledProvider = new ChatViewProvider(
+        mockExtensionUri,
+        cancelledClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const cancelledAuthenticationProvider =
+        cancelledProvider as unknown as AuthenticationTestProvider;
+      Object.defineProperty(cancelledProvider, "selectAuthenticationMethod", {
+        value: async () => null,
+      });
+
+      await assert.rejects(
+        () => cancelledAuthenticationProvider.ensureSession(),
+        /Authentication cancelled/
+      );
+      assert.strictEqual(cancelledClient.newSessionCalls, 1);
+      assert.deepStrictEqual(cancelledClient.authenticatedMethods, []);
+      assert.strictEqual(cancelledAuthenticationProvider.hasSession, false);
+
+      const cancellationMessages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(cancelledProvider, "postMessage", {
+        value: (message: Record<string, unknown>) =>
+          cancellationMessages.push(message),
+      });
+      await cancelledAuthenticationProvider.handleUserMessage("Resume this");
+      assert.ok(
+        cancellationMessages.some(
+          (message) =>
+            message.type === "restoreInput" && message.text === "Resume this"
+        )
+      );
+      assert.ok(
+        !cancellationMessages.some((message) => message.type === "userMessage")
+      );
+      assert.strictEqual(cancelledClient.newSessionCalls, 2);
+
+      const staleClient = new AuthenticationClient();
+      staleClient.authenticationError = new Error(
+        "Authentication method is not available"
+      );
+      const staleProvider = new ChatViewProvider(
+        mockExtensionUri,
+        staleClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const staleAuthenticationProvider =
+        staleProvider as unknown as AuthenticationTestProvider;
+      Object.defineProperty(staleProvider, "selectAuthenticationMethod", {
+        value: async () => "browser",
+      });
+
+      await assert.rejects(
+        () => staleAuthenticationProvider.ensureSession(),
+        /Authentication method is not available/
+      );
+      assert.strictEqual(staleClient.newSessionCalls, 1);
+      assert.deepStrictEqual(staleClient.authenticatedMethods, ["browser@1"]);
+      assert.strictEqual(staleAuthenticationProvider.hasSession, false);
+    });
+
+    test("carries the connection generation that produced the method list", async () => {
+      class ReconnectingClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticatedGenerations: number[] = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          throw new RequestError(-32000, "Authentication required");
+        }
+
+        async authenticate(
+          _methodId: AuthMethodId,
+          selectedGeneration: number
+        ): Promise<void> {
+          this.authenticatedGenerations.push(selectedGeneration);
+          if (selectedGeneration !== this.connectionGeneration) {
+            throw new Error("Authentication selection is stale");
+          }
+        }
+      }
+
+      const client = new ReconnectingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      // Private methods are test seams for the authentication lifecycle.
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      // The agent process is replaced while the native picker is open.
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => {
+          client.connectionGeneration++;
+          return "browser";
+        },
+      });
+
+      await assert.rejects(
+        () => authenticationProvider.ensureSession(),
+        /Authentication selection is stale/
+      );
+      assert.deepStrictEqual(client.authenticatedGenerations, [1]);
+      assert.strictEqual(client.newSessionCalls, 1);
+      assert.strictEqual(authenticationProvider.hasSession, false);
     });
   });
 

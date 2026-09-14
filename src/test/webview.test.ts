@@ -475,6 +475,38 @@ suite("Webview", () => {
         assert.strictEqual(document.activeElement, elements.inputEl);
       });
 
+      test("does not steal focus when an external picker pauses the session lock", () => {
+        const outsideControl = document.createElement("button");
+        document.body.appendChild(outsideControl);
+        elements.inputEl.focus();
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Starting session…",
+        } as ExtensionMessage);
+        outsideControl.focus();
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+          restoreFocus: false,
+        } as ExtensionMessage);
+
+        assert.strictEqual(elements.inputEl.disabled, false);
+        assert.strictEqual(document.activeElement, outsideControl);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Starting session…",
+        } as ExtensionMessage);
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
       test("keeps input locked after transport connects until the session is ready", () => {
         controller.handleMessage({
           type: "sessionTransition",
@@ -586,6 +618,24 @@ suite("Webview", () => {
         controller.handleMessage({ type: "userMessage", text: "Hello" });
         const msgs = elements.messagesEl.querySelectorAll(".message.user");
         assert.strictEqual(msgs.length, 1);
+      });
+
+      test("restores an unsent prompt after authentication cancellation", () => {
+        controller.handleMessage({ type: "restoreInput", text: "Resume this" });
+
+        assert.strictEqual(elements.inputEl.value, "Resume this");
+        assert.strictEqual(
+          mockVsCode.getState<{ inputValue: string }>()?.inputValue,
+          "Resume this"
+        );
+      });
+
+      test("keeps a newer draft instead of the restored prompt", () => {
+        elements.inputEl.value = "Typed while connecting";
+
+        controller.handleMessage({ type: "restoreInput", text: "Resume this" });
+
+        assert.strictEqual(elements.inputEl.value, "Typed while connecting");
       });
 
       test("handles connectionState", () => {
