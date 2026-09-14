@@ -83,6 +83,11 @@ when the command is not on `PATH`. User-level overrides remain available in
 Restricted Mode. Workspace-level overrides are ignored until Workspace Trust is
 granted.
 
+On Windows, `npm`-generated `.cmd`/`.bat` shims are decoded into the interpreter
+and script they invoke. Other shim styles (for example Scoop or Chocolatey
+wrappers) are not decoded; point `vscode-acp.agentPaths` at the real executable
+in that case.
+
 ```json
 {
   "vscode-acp.agentPaths": {

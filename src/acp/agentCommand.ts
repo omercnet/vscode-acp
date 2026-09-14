@@ -105,15 +105,56 @@ function getWindowsExtensions(env: NodeJS.ProcessEnv): string[] {
   return [...new Set([...WINDOWS_NATIVE_EXTENSIONS, ...shimExtensions])];
 }
 
+const WINDOWS_EXTENDED_PREFIX = /^\\\\[?.]\\(UNC\\)?/i;
+const WINDOWS_DRIVE_ROOT = /^[a-z]:[\\/]/i;
+const WINDOWS_UNC_ROOT = /^[\\/]{2}[^\\/]+[\\/][^\\/]+/;
+
+/**
+ * Produces a comparable form of a Windows path so that extended-length and
+ * device prefixes cannot hide a candidate from the exclusion check.
+ */
+function comparablePath(value: string, platform: NodeJS.Platform): string {
+  if (platform !== "win32") {
+    return value;
+  }
+  const extended = WINDOWS_EXTENDED_PREFIX.exec(value);
+  if (!extended) {
+    return win32.normalize(value).toLowerCase();
+  }
+  const remainder = value.slice(extended[0].length);
+  return win32
+    .normalize(extended[1] ? `\\\\${remainder}` : remainder)
+    .toLowerCase();
+}
+
+/**
+ * Accepts only paths anchored to a real root. Windows drive-relative roots such
+ * as `\tools` still depend on the current working drive, so they are rejected
+ * together with device paths.
+ */
+function isRooted(value: string, platform: NodeJS.Platform): boolean {
+  if (platform !== "win32") {
+    return posix.isAbsolute(value);
+  }
+  const extended = WINDOWS_EXTENDED_PREFIX.exec(value);
+  const candidate = extended
+    ? extended[1]
+      ? `\\\\${value.slice(extended[0].length)}`
+      : value.slice(extended[0].length)
+    : value;
+  return WINDOWS_DRIVE_ROOT.test(candidate) || WINDOWS_UNC_ROOT.test(candidate);
+}
+
 function isWithinDirectory(
   candidate: string,
   directory: string,
   platform: NodeJS.Platform
 ): boolean {
   const pathApi = platform === "win32" ? win32 : posix;
-  const normalize = (value: string) =>
-    platform === "win32" ? value.toLowerCase() : value;
-  const relative = pathApi.relative(normalize(directory), normalize(candidate));
+  const relative = pathApi.relative(
+    comparablePath(directory, platform),
+    comparablePath(candidate, platform)
+  );
   return (
     relative === "" ||
     (!relative.startsWith("..") && !pathApi.isAbsolute(relative))
@@ -130,7 +171,6 @@ function getAbsoluteSearchDirectories(
   pathValue: string,
   platform: NodeJS.Platform
 ): string[] {
-  const pathApi = platform === "win32" ? win32 : posix;
   const delimiter = platform === "win32" ? ";" : ":";
   return pathValue
     .split(delimiter)
@@ -144,7 +184,7 @@ function getAbsoluteSearchDirectories(
       }
       return directory;
     })
-    .filter((directory) => directory !== "" && pathApi.isAbsolute(directory));
+    .filter((directory) => isRooted(directory, platform));
 }
 
 function createResolutionContext(
@@ -153,15 +193,18 @@ function createResolutionContext(
   const platform = options.platform ?? process.platform;
   const fileSystem = options.fileSystem ?? nodeFileSystem;
   const pathApi = platform === "win32" ? win32 : posix;
-  const excludedDirectories = (options.excludedDirectories ?? []).map(
-    (directory) => {
-      try {
-        return fileSystem.realpath(directory);
-      } catch {
-        return pathApi.resolve(directory);
-      }
-    }
-  );
+  const excludedDirectories = [
+    ...new Set(
+      (options.excludedDirectories ?? []).flatMap((directory) => {
+        const lexical = pathApi.resolve(directory);
+        try {
+          return [lexical, fileSystem.realpath(directory)];
+        } catch {
+          return [lexical];
+        }
+      })
+    ),
+  ];
   return {
     platform,
     env: options.env ?? process.env,
@@ -183,6 +226,10 @@ function canonicalFile(
     return undefined;
   }
 
+  if (!allowExcluded && isExcluded(candidate, context)) {
+    return undefined;
+  }
+
   try {
     const canonical = context.fileSystem.realpath(candidate);
     if (!allowExcluded && isExcluded(canonical, context)) {
@@ -199,7 +246,7 @@ function commandCandidates(
   context: ResolutionContext
 ): { paths: string[]; explicit: boolean } | undefined {
   const pathApi = context.platform === "win32" ? win32 : posix;
-  const explicit = pathApi.isAbsolute(command);
+  const explicit = isRooted(command, context.platform);
   if (!explicit && pathApi.basename(command) !== command) {
     return undefined;
   }
@@ -236,14 +283,25 @@ function commandCandidates(
   };
 }
 
-function resolveExecutableFile(
+interface ExecutableCandidate {
+  path: string;
+  extension: string;
+  explicit: boolean;
+}
+
+/**
+ * Yields canonical executables for a command in Windows PATH/PATHEXT order.
+ * Shared by discovery, launch, and shim interpreter lookup so every caller
+ * applies the same trust boundary.
+ */
+function* executableCandidates(
   command: string,
   context: ResolutionContext,
-  executableExtensionsOnly = false
-): { path: string; explicit: boolean } | undefined {
+  nativeOnly = false
+): Generator<ExecutableCandidate> {
   const candidates = commandCandidates(command, context);
   if (!candidates) {
-    return undefined;
+    return;
   }
 
   for (const candidate of candidates.paths) {
@@ -251,29 +309,68 @@ function resolveExecutableFile(
       context.platform === "win32"
         ? win32.extname(candidate).toLowerCase()
         : "";
-    if (
-      executableExtensionsOnly &&
-      extension !== ".exe" &&
-      extension !== ".com"
-    ) {
+    const native = extension === ".exe" || extension === ".com";
+    if (nativeOnly && !native) {
       continue;
     }
 
-    const resolved = canonicalFile(
+    const path = canonicalFile(
       candidate,
       context,
-      context.platform !== "win32" ||
-        extension === ".exe" ||
-        extension === ".com",
+      context.platform !== "win32" || native,
       candidates.explicit
     );
-    if (resolved) {
-      return { path: resolved, explicit: candidates.explicit };
+    if (path) {
+      yield { path, extension, explicit: candidates.explicit };
     }
+  }
+}
+
+function resolveNativeExecutable(
+  command: string,
+  context: ResolutionContext
+): string | undefined {
+  for (const candidate of executableCandidates(command, context, true)) {
+    return candidate.path;
   }
   return undefined;
 }
 
+const SHIM_LOCAL_TOKEN = /^%dp0%[\\/](.+)$/i;
+const SHIM_UNSAFE_TOKEN = /[%&|<>^"]/;
+
+function resolveShimInterpreter(
+  contents: string,
+  shimDirectory: string,
+  context: ResolutionContext,
+  explicit: boolean
+): string | undefined {
+  const localProgram = contents.match(/SET\s+"_prog=%dp0%[\\/]([^"%]+)"/i)?.[1];
+  const local = localProgram
+    ? canonicalFile(
+        win32.resolve(shimDirectory, localProgram),
+        context,
+        true,
+        explicit
+      )
+    : undefined;
+  if (local) {
+    return local;
+  }
+
+  const fallbackPrograms = [...contents.matchAll(/SET\s+"_prog=([^"%]+)"/gi)];
+  const fallbackProgram =
+    fallbackPrograms[fallbackPrograms.length - 1]?.[1]?.trim();
+  return fallbackProgram
+    ? resolveNativeExecutable(fallbackProgram, context)
+    : undefined;
+}
+
+/**
+ * Decodes an npm-style `.cmd`/`.bat` shim into an absolute interpreter plus the
+ * arguments it would have passed, without handing the line to a shell. Every
+ * token the tokenizer cannot account for fails the resolution closed.
+ */
 function resolveWindowsCommandShim(
   shimPath: string,
   args: readonly string[],
@@ -293,69 +390,59 @@ function resolveWindowsCommandShim(
     return undefined;
   }
 
-  const targetMatches = [...invocationLine.matchAll(/"%dp0%[\\/]([^"%]+)"/gi)];
-  const targetMatch = targetMatches[targetMatches.length - 1];
-  const targetRelative = targetMatch?.[1];
-  if (!targetRelative) {
-    return undefined;
-  }
-
-  const targetCandidate = win32.resolve(
-    win32.dirname(shimPath),
-    targetRelative
+  const invocation = invocationLine.slice(0, invocationLine.lastIndexOf("%*"));
+  const tokens = [...invocation.matchAll(/"([^"]*)"|(\S+)/g)].map(
+    (match) => match[1] ?? match[2]
   );
-  const target = canonicalFile(targetCandidate, context, false, explicit);
-  if (!target) {
+  const programIndex = tokens.findIndex(
+    (token) => token === "%_prog%" || SHIM_LOCAL_TOKEN.test(token)
+  );
+  if (programIndex < 0) {
     return undefined;
   }
 
-  if (!invocationLine.includes('"%_prog%"')) {
-    const executable = canonicalFile(targetCandidate, context, true, explicit);
-    return executable
-      ? {
-          command: executable,
-          args: [...args],
-          source: "Windows command shim",
-        }
-      : undefined;
-  }
-
-  const localProgram = contents.match(/SET\s+"_prog=%dp0%[\\/]([^"%]+)"/i)?.[1];
-  const fallbackPrograms = [...contents.matchAll(/SET\s+"_prog=([^"%]+)"/gi)];
-  const fallbackProgram =
-    fallbackPrograms[fallbackPrograms.length - 1]?.[1]?.trim();
-
-  let interpreter: string | undefined;
-  if (localProgram) {
-    interpreter = canonicalFile(
-      win32.resolve(win32.dirname(shimPath), localProgram),
-      context,
-      true,
-      explicit
-    );
-  }
-  if (!interpreter && fallbackProgram) {
-    interpreter = resolveExecutableFile(fallbackProgram, context, true)?.path;
-  }
-  if (!interpreter) {
+  const shimDirectory = win32.dirname(shimPath);
+  const program =
+    tokens[programIndex] === "%_prog%"
+      ? resolveShimInterpreter(contents, shimDirectory, context, explicit)
+      : canonicalFile(
+          win32.resolve(
+            shimDirectory,
+            SHIM_LOCAL_TOKEN.exec(tokens[programIndex])?.[1] ?? ""
+          ),
+          context,
+          true,
+          explicit
+        );
+  if (!program) {
     return undefined;
   }
 
-  const escapedTarget = targetMatch?.[0];
-  const invocationStart = invocationLine.indexOf('"%_prog%"') + 10;
-  const targetStart = escapedTarget
-    ? invocationLine.lastIndexOf(escapedTarget)
-    : -1;
-  const interpreterArguments = invocationLine
-    .slice(invocationStart, targetStart)
-    .trim();
-  if (interpreterArguments !== "") {
-    return undefined;
+  const shimArguments: string[] = [];
+  for (const token of tokens.slice(programIndex + 1)) {
+    const local = SHIM_LOCAL_TOKEN.exec(token);
+    if (local) {
+      const file = canonicalFile(
+        win32.resolve(shimDirectory, local[1]),
+        context,
+        false,
+        explicit
+      );
+      if (!file) {
+        return undefined;
+      }
+      shimArguments.push(file);
+      continue;
+    }
+    if (SHIM_UNSAFE_TOKEN.test(token)) {
+      return undefined;
+    }
+    shimArguments.push(token);
   }
 
   return {
-    command: interpreter,
-    args: [target, ...args],
+    command: program,
+    args: [...shimArguments, ...args],
     source: "Windows command shim",
   };
 }
@@ -372,34 +459,14 @@ export function resolveAgentCommand(
   options: AgentCommandResolutionOptions = {}
 ): ResolvedAgentCommand | undefined {
   const context = createResolutionContext(options);
-  const { platform } = context;
-  const candidates = commandCandidates(command, context);
-  if (!candidates) {
-    return undefined;
-  }
 
-  for (const candidate of candidates.paths) {
-    const extension =
-      platform === "win32" ? win32.extname(candidate).toLowerCase() : "";
-    const executable = canonicalFile(
-      candidate,
-      context,
-      platform !== "win32" || extension === ".exe" || extension === ".com",
-      candidates.explicit
-    );
-    if (!executable) {
-      continue;
-    }
-
-    if (
-      platform === "win32" &&
-      (extension === ".cmd" || extension === ".bat")
-    ) {
+  for (const candidate of executableCandidates(command, context)) {
+    if (candidate.extension === ".cmd" || candidate.extension === ".bat") {
       const shim = resolveWindowsCommandShim(
-        executable,
+        candidate.path,
         args,
         context,
-        candidates.explicit
+        candidate.explicit
       );
       if (shim) {
         return shim;
@@ -408,9 +475,9 @@ export function resolveAgentCommand(
     }
 
     return {
-      command: executable,
+      command: candidate.path,
       args: [...args],
-      source: candidates.explicit ? "explicit executable" : "PATH executable",
+      source: candidate.explicit ? "explicit executable" : "PATH executable",
     };
   }
   return undefined;
@@ -439,6 +506,9 @@ export function createAgentEnvironment(
     pathValue,
     context.platform
   )) {
+    if (isExcluded(directory, context)) {
+      continue;
+    }
     try {
       const canonical = context.fileSystem.realpath(directory);
       if (!isExcluded(canonical, context)) {

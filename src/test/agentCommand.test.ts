@@ -223,4 +223,96 @@ suite("agent command resolution", () => {
 
     assert.strictEqual(result, undefined);
   });
+
+  test("rejects a workspace link whose target escapes the excluded root", () => {
+    const result = resolveAgentCommand("opencode", ["acp"], {
+      platform: "win32",
+      env: {
+        Path: "C:\\workspace\\node_modules\\.bin;C:\\trusted\\bin",
+        PATHEXT: ".EXE",
+      },
+      excludedDirectories: ["C:\\workspace"],
+      fileSystem: fakeFileSystem(
+        "win32",
+        {
+          "C:\\workspace\\node_modules\\.bin\\opencode.exe": true,
+          "C:\\trusted\\bin\\opencode.exe": true,
+        },
+        {
+          "C:\\workspace\\node_modules\\.bin\\opencode.exe":
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        }
+      ),
+    });
+
+    assert.strictEqual(result?.command, "C:\\trusted\\bin\\opencode.exe");
+  });
+
+  test("excludes extended-length spellings of the workspace root", () => {
+    const result = resolveAgentCommand("opencode", [], {
+      platform: "win32",
+      env: { Path: "\\\\?\\C:\\workspace\\bin", PATHEXT: ".EXE" },
+      excludedDirectories: ["C:\\workspace"],
+      fileSystem: fakeFileSystem("win32", {
+        "\\\\?\\C:\\workspace\\bin\\opencode.exe": true,
+      }),
+    });
+
+    assert.strictEqual(result, undefined);
+  });
+
+  test("ignores Windows drive-relative PATH roots", () => {
+    const result = resolveAgentCommand("opencode", [], {
+      platform: "win32",
+      env: { Path: "\\dropbox\\bin;C:\\trusted\\bin", PATHEXT: ".EXE" },
+      fileSystem: fakeFileSystem("win32", {
+        "\\dropbox\\bin\\opencode.exe": true,
+        "C:\\trusted\\bin\\opencode.exe": true,
+      }),
+    });
+
+    assert.strictEqual(result?.command, "C:\\trusted\\bin\\opencode.exe");
+  });
+
+  test("keeps interpreter arguments that a command shim supplies", () => {
+    const shim = [
+      "@ECHO off",
+      'SET "_prog=%dp0%\\node.exe"',
+      '"%_prog%"  "%dp0%\\cli.js" --no-deprecation %*',
+    ].join("\r\n");
+    const result = resolveAgentCommand("agent", ["acp"], {
+      platform: "win32",
+      env: { Path: "C:\\tools", PATHEXT: ".CMD;.EXE" },
+      fileSystem: fakeFileSystem("win32", {
+        "C:\\tools\\agent.cmd": shim,
+        "C:\\tools\\node.exe": true,
+        "C:\\tools\\cli.js": true,
+      }),
+    });
+
+    assert.deepStrictEqual(result?.args, [
+      "C:\\tools\\cli.js",
+      "--no-deprecation",
+      "acp",
+    ]);
+  });
+
+  test("refuses command shims that inject shell operators", () => {
+    const shim = [
+      "@ECHO off",
+      'SET "_prog=%dp0%\\node.exe"',
+      '"%_prog%"  "%dp0%\\cli.js" & calc.exe %*',
+    ].join("\r\n");
+    const result = resolveAgentCommand("agent", [], {
+      platform: "win32",
+      env: { Path: "C:\\tools", PATHEXT: ".CMD;.EXE" },
+      fileSystem: fakeFileSystem("win32", {
+        "C:\\tools\\agent.cmd": shim,
+        "C:\\tools\\node.exe": true,
+        "C:\\tools\\cli.js": true,
+      }),
+    });
+
+    assert.strictEqual(result, undefined);
+  });
 });

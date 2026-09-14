@@ -198,7 +198,7 @@
     "format": "prettier --write \"src/**/*.ts\" \"*.{json,md}\"",
     "prepare": "husky",
     "screenshot": "npx tsx scripts/screenshot.ts",
-    "smoke:agent-resolution": "tsx scripts/windows-agent-resolution-smoke.ts",
+    "smoke:agent-resolution": "tsx scripts/agent-resolution-smoke.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug"
