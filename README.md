@@ -69,9 +69,11 @@ Click on any tool to see the command input and output.
 ## Configuration
 
 The extension auto-detects installed agents from the extension host's `PATH`.
-Commands are resolved to absolute executables before launch, without searching
-the workspace working directory or invoking a shell. This works the same way in
-local and remote extension hosts.
+Commands are resolved to absolute executables and started from the resolved
+installation directory without a shell. Relative `PATH` entries and untrusted
+workspace directories are removed before launch; the workspace path is sent
+separately when the ACP session starts. The same rules apply in local and remote
+extension hosts.
 
 | Agent       | Command    | Detection     |
 | ----------- | ---------- | ------------- |

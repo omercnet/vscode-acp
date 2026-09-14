@@ -7,8 +7,10 @@
 import { spawnSync } from "child_process";
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "fs";
@@ -20,6 +22,7 @@ import {
 } from "../src/acp/agentCommand";
 
 const windows = process.platform === "win32";
+const startDirectory = process.cwd();
 const root = mkdtempSync(join(tmpdir(), "acp-agent-resolution-"));
 const workspace = join(root, "untrusted-workspace");
 const workspaceBin = join(workspace, "node_modules", ".bin");
@@ -35,7 +38,13 @@ function writeAgent(directory: string, label: string): void {
   if (windows) {
     writeFileSync(
       join(directory, "cli.js"),
-      `console.log("${label}");\nconsole.log(process.env.PATH ?? "");\n`
+      [
+        `console.log("${label}");`,
+        'console.log(process.env.PATH ?? "");',
+        "console.log(process.cwd());",
+        "console.log(process.execPath);",
+        "",
+      ].join("\n")
     );
     writeFileSync(
       join(directory, "opencode.cmd"),
@@ -54,7 +63,17 @@ function writeAgent(directory: string, label: string): void {
     return;
   }
   const executable = join(directory, "opencode");
-  writeFileSync(executable, `#!/bin/sh\necho "${label}"\necho "$PATH"\n`);
+  writeFileSync(
+    executable,
+    [
+      "#!/usr/bin/env node",
+      `console.log("${label}");`,
+      'console.log(process.env.PATH ?? "");',
+      "console.log(process.cwd());",
+      "console.log(process.execPath);",
+      "",
+    ].join("\n")
+  );
   chmodSync(executable, 0o755);
 }
 
@@ -68,9 +87,48 @@ function check(name: string, passed: boolean, detail: string): void {
 writeAgent(workspaceBin, "MALICIOUS-WORKSPACE-AGENT");
 writeAgent(trustedBin, "TRUSTED-AGENT");
 
+const workspaceNode = join(workspace, windows ? "node.exe" : "node");
+if (windows) {
+  copyFileSync(process.execPath, workspaceNode);
+} else {
+  writeFileSync(
+    workspaceNode,
+    '#!/bin/sh\necho "MALICIOUS-WORKSPACE-INTERPRETER"\n'
+  );
+  chmodSync(workspaceNode, 0o755);
+}
+
+const localPackageName = "acp-cwd-hijack-probe";
+const localPackageDirectory = join(workspace, "node_modules", localPackageName);
+mkdirSync(localPackageDirectory, { recursive: true });
+writeFileSync(
+  join(localPackageDirectory, "package.json"),
+  JSON.stringify({
+    name: localPackageName,
+    version: "1.0.0",
+    bin: { [localPackageName]: "cli.js" },
+  })
+);
+writeFileSync(
+  join(localPackageDirectory, "cli.js"),
+  '#!/usr/bin/env node\nconsole.log("MALICIOUS-NPX-CWD")\n',
+  { mode: 0o755 }
+);
+if (windows) {
+  writeFileSync(
+    join(workspaceBin, `${localPackageName}.cmd`),
+    "@ECHO off\r\nECHO MALICIOUS-NPX-CWD\r\n"
+  );
+} else {
+  symlinkSync(
+    join("..", localPackageName, "cli.js"),
+    join(workspaceBin, localPackageName)
+  );
+}
+
 // 1. A workspace copy that precedes the trusted install on PATH, plus the
 //    current directory and empty/relative entries Windows would otherwise probe.
-process.chdir(workspaceBin);
+process.chdir(workspace);
 const searchPath = [
   "",
   ".",
@@ -97,6 +155,7 @@ const environment = createAgentEnvironment({
 const started = launch
   ? spawnSync(launch.command, launch.args, {
       shell: false,
+      cwd: launch.cwd,
       encoding: "utf8",
       env: environment,
     })
@@ -108,7 +167,7 @@ check(
   `stdout: ${output.split(/\r?\n/)[0] || started?.error?.message || "<none>"}`
 );
 check(
-  "child PATH cannot re-enter the workspace through an env shebang",
+  "child launch context cannot re-enter the workspace",
   !output.toLowerCase().includes(workspace.toLowerCase()) &&
     !(environment.PATH ?? "").toLowerCase().includes(workspace.toLowerCase()),
   `child PATH entries: ${(environment.PATH ?? "").split(delimiter).length}`
@@ -139,7 +198,52 @@ check(
   `resolved ${explicit?.command ?? "<none>"} (${explicit?.source ?? "unavailable"})`
 );
 
+const hostileOnlyPath = ["", ".", workspace, workspaceBin].join(delimiter);
+const noSafeEnvironment = createAgentEnvironment({
+  env: { ...process.env, PATH: hostileOnlyPath, Path: hostileOnlyPath },
+  excludedDirectories,
+});
+const noSafeStarted = explicit
+  ? spawnSync(explicit.command, explicit.args, {
+      cwd: explicit.cwd,
+      shell: false,
+      encoding: "utf8",
+      env: noSafeEnvironment,
+    })
+  : undefined;
+const noSafeOutput = noSafeStarted?.stdout ?? "";
+check(
+  "empty sanitized PATH cannot select the cwd interpreter",
+  !noSafeOutput.includes("MALICIOUS-WORKSPACE-INTERPRETER") &&
+    !Object.keys(noSafeEnvironment).some(
+      (key) => key.toLowerCase() === "path" && noSafeEnvironment[key] === ""
+    ),
+  `stdout: ${noSafeOutput.split(/\r?\n/)[0] || noSafeStarted?.error?.message || "<none>"}`
+);
+
+const npxLaunch = resolveAgentCommand("npx", ["--offline", localPackageName], {
+  env: { ...process.env, PATH: searchPath, Path: searchPath },
+  excludedDirectories,
+});
+const npxStarted = npxLaunch
+  ? spawnSync(npxLaunch.command, npxLaunch.args, {
+      cwd: npxLaunch.cwd,
+      shell: false,
+      encoding: "utf8",
+      env: environment,
+      timeout: 15000,
+    })
+  : undefined;
+const npxOutput = `${npxStarted?.stdout ?? ""}${npxStarted?.stderr ?? ""}`;
+check(
+  "npx cannot select a workspace-local ACP package",
+  npxLaunch !== undefined && !npxOutput.includes("MALICIOUS-NPX-CWD"),
+  `cwd: ${npxLaunch?.cwd ?? "<none>"}; exit: ${npxStarted?.status ?? "not started"}`
+);
+
 console.log(
   `\n${failures.length === 0 ? "SMOKE OK" : "SMOKE FAILED"} on ${process.platform}`
 );
+process.chdir(startDirectory);
+rmSync(root, { recursive: true, force: true });
 process.exit(failures.length === 0 ? 0 : 1);

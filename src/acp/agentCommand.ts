@@ -22,6 +22,7 @@ export interface ResolvedAgentCommand {
   command: string;
   args: string[];
   source: AgentCommandSource;
+  cwd: string;
 }
 
 export interface AgentCommandFileSystem {
@@ -105,7 +106,7 @@ function getWindowsExtensions(env: NodeJS.ProcessEnv): string[] {
   return [...new Set([...WINDOWS_NATIVE_EXTENSIONS, ...shimExtensions])];
 }
 
-const WINDOWS_EXTENDED_PREFIX = /^\\\\[?.]\\(UNC\\)?/i;
+const WINDOWS_EXTENDED_PREFIX = /^[\\/]{2}[?.][\\/](UNC[\\/])?/i;
 const WINDOWS_DRIVE_ROOT = /^[a-z]:[\\/]/i;
 const WINDOWS_UNC_ROOT = /^[\\/]{2}[^\\/]+[\\/][^\\/]+/;
 
@@ -443,6 +444,7 @@ function resolveWindowsCommandShim(
   return {
     command: program,
     args: [...shimArguments, ...args],
+    cwd: win32.dirname(program),
     source: "Windows command shim",
   };
 }
@@ -477,6 +479,10 @@ export function resolveAgentCommand(
     return {
       command: candidate.path,
       args: [...args],
+      cwd:
+        context.platform === "win32"
+          ? win32.dirname(candidate.path)
+          : posix.dirname(candidate.path),
       source: candidate.explicit ? "explicit executable" : "PATH executable",
     };
   }
@@ -492,9 +498,6 @@ export function createAgentEnvironment(
 ): NodeJS.ProcessEnv {
   const context = createResolutionContext(options);
   const environment = { ...context.env };
-  if (context.excludedDirectories.length === 0) {
-    return environment;
-  }
 
   const pathValue = getEnvironmentValue(context.env, "PATH", context.platform);
   if (pathValue === undefined) {
@@ -525,9 +528,13 @@ export function createAgentEnvironment(
         delete environment[key];
       }
     }
+  } else {
+    delete environment.PATH;
   }
-  environment.PATH = safeDirectories.join(
-    context.platform === "win32" ? ";" : ":"
-  );
+  if (safeDirectories.length > 0) {
+    environment.PATH = safeDirectories.join(
+      context.platform === "win32" ? ";" : ":"
+    );
+  }
   return environment;
 }

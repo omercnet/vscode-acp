@@ -5,7 +5,7 @@ import {
   type Page,
 } from "@playwright/test";
 import { mkdir, rm, writeFile } from "fs/promises";
-import { join } from "path";
+import { dirname, join } from "path";
 import {
   cmdOrCtrl,
   findVSCodeExecutable,
@@ -16,8 +16,10 @@ import {
 const DEMO_DIR = join(VSCODE_TEST_DIR, "agent-resolution-demo");
 const USER_DATA_DIR = join(VSCODE_TEST_DIR, "user-data-agent-resolution");
 const WORKSPACE_DIR = join(DEMO_DIR, "untrusted-workspace");
-const WORKSPACE_PAYLOAD = join(WORKSPACE_DIR, "tools", "opencode");
-const TRUSTED_AGENT = join(DEMO_DIR, "trusted-install", "bin", "opencode");
+const AGENT_COMMAND =
+  process.platform === "win32" ? "opencode.cmd" : "opencode";
+const WORKSPACE_PAYLOAD = join(WORKSPACE_DIR, "tools", AGENT_COMMAND);
+const TRUSTED_AGENT = join(DEMO_DIR, "trusted-install", "bin", AGENT_COMMAND);
 const SCREENSHOT_PATH = join(
   PROJECT_ROOT,
   "screenshots",
@@ -63,6 +65,26 @@ process.stdin.on("data", (chunk) => {
   }
 });
 `;
+
+async function writeAgent(commandPath: string, label: string): Promise<void> {
+  if (process.platform !== "win32") {
+    await writeFile(commandPath, agentSource(label), { mode: 0o755 });
+    return;
+  }
+
+  const scriptPath = join(dirname(commandPath), "agent.js");
+  await writeFile(scriptPath, agentSource(label));
+  await writeFile(
+    commandPath,
+    [
+      "@ECHO off",
+      'SETLOCAL & SET "dp0=%~dp0"',
+      'SET "_prog=node"',
+      '"%_prog%" "%dp0%\\agent.js" %*',
+      "",
+    ].join("\r\n")
+  );
+}
 
 async function launchRestrictedHost() {
   const settingsDir = join(USER_DATA_DIR, "User");
@@ -122,12 +144,8 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
     join(WORKSPACE_DIR, ".vscode", "settings.json"),
     JSON.stringify({ "vscode-acp.agentPaths": { opencode: WORKSPACE_PAYLOAD } })
   );
-  await writeFile(WORKSPACE_PAYLOAD, agentSource("MALICIOUS-WORKSPACE-AGENT"), {
-    mode: 0o755,
-  });
-  await writeFile(TRUSTED_AGENT, agentSource("TRUSTED-AGENT"), {
-    mode: 0o755,
-  });
+  await writeAgent(WORKSPACE_PAYLOAD, "MALICIOUS-WORKSPACE-AGENT");
+  await writeAgent(TRUSTED_AGENT, "TRUSTED-AGENT");
 
   const host = await launchRestrictedHost();
   try {
@@ -141,7 +159,7 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
       frame
         .locator(".message.assistant")
         .filter({ hasText: "TRUSTED-AGENT running from" })
-    ).toContainText(TRUSTED_AGENT);
+    ).toContainText(dirname(TRUSTED_AGENT));
     await expect(frame.getByText("MALICIOUS-WORKSPACE-AGENT")).toHaveCount(0);
 
     await window.waitForTimeout(500);

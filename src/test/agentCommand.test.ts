@@ -59,6 +59,7 @@ suite("agent command resolution", () => {
     assert.deepStrictEqual(result, {
       command: "/opt/opencode/bin/opencode",
       args: ["acp"],
+      cwd: "/opt/opencode/bin",
       source: "PATH executable",
     });
   });
@@ -100,6 +101,18 @@ suite("agent command resolution", () => {
 
     assert.deepStrictEqual(environment, {
       PATH: "/usr/bin",
+      AGENT_TEST_VALUE: "preserved",
+    });
+  });
+
+  test("removes cwd search when no safe PATH directory remains", () => {
+    const environment = createAgentEnvironment({
+      platform: "linux",
+      env: { PATH: ":relative", AGENT_TEST_VALUE: "preserved" },
+      fileSystem: fakeFileSystem("linux", {}),
+    });
+
+    assert.deepStrictEqual(environment, {
       AGENT_TEST_VALUE: "preserved",
     });
   });
@@ -154,6 +167,7 @@ suite("agent command resolution", () => {
     assert.deepStrictEqual(result, {
       command: "C:\\trusted\\bin\\opencode.exe",
       args: ["acp"],
+      cwd: "C:\\trusted\\bin",
       source: "PATH executable",
     });
   });
@@ -190,6 +204,7 @@ suite("agent command resolution", () => {
         "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js",
         "@zed-industries/claude-code-acp",
       ],
+      cwd: "C:\\Program Files\\nodejs",
       source: "Windows command shim",
     });
   });
@@ -259,6 +274,54 @@ suite("agent command resolution", () => {
     });
 
     assert.strictEqual(result, undefined);
+  });
+
+  test("excludes forward-slash extended workspace paths", () => {
+    const result = resolveAgentCommand("opencode", [], {
+      platform: "win32",
+      env: { Path: "//?/C:/workspace/bin", PATHEXT: ".EXE" },
+      excludedDirectories: ["C:\\workspace"],
+      fileSystem: fakeFileSystem("win32", {
+        "//?/C:/workspace/bin/opencode.exe": true,
+      }),
+    });
+
+    assert.strictEqual(result, undefined);
+  });
+
+  test("rejects a trusted-looking link into the workspace", () => {
+    const result = resolveAgentCommand("opencode", [], {
+      platform: "win32",
+      env: { Path: "C:\\trusted-link", PATHEXT: ".EXE" },
+      excludedDirectories: ["C:\\workspace"],
+      fileSystem: fakeFileSystem(
+        "win32",
+        { "C:\\trusted-link\\opencode.exe": true },
+        {
+          "C:\\trusted-link\\opencode.exe": "C:\\workspace\\bin\\opencode.exe",
+        }
+      ),
+    });
+
+    assert.strictEqual(result, undefined);
+  });
+
+  test("removes PATH links that resolve into the workspace", () => {
+    const environment = createAgentEnvironment({
+      platform: "win32",
+      env: { Path: "C:\\trusted-link;C:\\Windows\\System32" },
+      excludedDirectories: ["C:\\workspace"],
+      fileSystem: fakeFileSystem(
+        "win32",
+        {},
+        {
+          "C:\\trusted-link": "C:\\workspace\\bin",
+          "C:\\Windows\\System32": "C:\\Windows\\System32",
+        }
+      ),
+    });
+
+    assert.strictEqual(environment.PATH, "C:\\Windows\\System32");
   });
 
   test("ignores Windows drive-relative PATH roots", () => {

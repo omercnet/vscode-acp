@@ -39,6 +39,14 @@ jobs:
       - name: Agent resolution smoke (real spawn)
         run: npm run smoke:agent-resolution
 
+      - name: Restricted Mode agent resolution demo (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:e2e -- e2e/agent-resolution.spec.ts
+
+      - name: Restricted Mode agent resolution demo (non-Linux)
+        if: runner.os != 'Linux'
+        run: npm run test:e2e -- e2e/agent-resolution.spec.ts
+
       - name: Upload coverage report
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: runner.os == 'Linux'

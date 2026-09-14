@@ -271,6 +271,7 @@ suite("ACPClient with Mock Server", () => {
         command: "/trusted/bin/opencode",
         args: ["acp"],
         options: {
+          cwd: "/trusted/bin",
           stdio: ["pipe", "pipe", "pipe"],
           env: {
             PATH: "/trusted/bin",

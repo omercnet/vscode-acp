@@ -378,6 +378,7 @@ export class ACPClient {
       try {
         child = this.spawnFn(launch.command, launch.args, {
           stdio: ["pipe", "pipe", "pipe"],
+          cwd: launch.cwd,
           env: createAgentEnvironment(resolutionOptions),
           shell: false,
         });
