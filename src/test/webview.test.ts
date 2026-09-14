@@ -15,6 +15,7 @@ import {
   type VsCodeApi,
   type Tool,
   type WebviewElements,
+  type ExtensionMessage,
 } from "../views/webview/main";
 
 function createMockVsCodeApi(): VsCodeApi & {
@@ -70,6 +71,7 @@ function createWebviewHTML(): string {
     <textarea id="input" rows="1" placeholder="Ask your agent..."></textarea>
     <button id="send">Send</button>
   </div>
+  <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
   
   <div id="options-bar">
     <select id="mode-selector" style="display: none;"></select>
@@ -304,6 +306,8 @@ suite("Webview", () => {
       assert.ok(elements.messagesEl);
       assert.ok(elements.inputEl);
       assert.ok(elements.sendBtn);
+      assert.ok(elements.inputContainer);
+      assert.ok(elements.inputHint);
       assert.ok(elements.statusDot);
       assert.ok(elements.statusText);
       assert.ok(elements.agentSelector);
@@ -419,6 +423,146 @@ suite("Webview", () => {
         controller.updateStatus("connected");
         const state = mockVsCode.getState<{ isConnected: boolean }>();
         assert.strictEqual(state?.isConnected, true);
+      });
+    });
+    suite("session transition input locking", () => {
+      test("locks input synchronously when connect is requested", () => {
+        elements.inputEl.value = "queued prompt";
+        elements.inputEl.focus();
+        mockVsCode._clearMessages();
+
+        elements.connectBtn.click();
+
+        assert.strictEqual(elements.inputEl.disabled, true);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(
+          document.getElementById("input-container")?.getAttribute("aria-busy"),
+          "true"
+        );
+        assert.strictEqual(elements.inputEl.value, "queued prompt");
+        assert.strictEqual(elements.sendBtn.textContent, "Wait…");
+        assert.strictEqual(
+          elements.sendBtn.getAttribute("aria-label"),
+          "Connecting to agent…"
+        );
+        elements.inputEl.dispatchEvent(
+          new dom.window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        assert.deepStrictEqual(mockVsCode._getMessages(), [
+          { type: "connect" },
+        ]);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+
+        assert.strictEqual(elements.inputEl.disabled, false);
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(elements.sendBtn.textContent, "Send");
+        assert.strictEqual(
+          elements.sendBtn.getAttribute("aria-label"),
+          "Send message"
+        );
+        assert.strictEqual(
+          document.getElementById("input-container")?.getAttribute("aria-busy"),
+          "false"
+        );
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
+      test("keeps input locked after transport connects until the session is ready", () => {
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Starting session…",
+        } as ExtensionMessage);
+        controller.handleMessage({
+          type: "connectionState",
+          state: "connecting",
+        });
+        controller.handleMessage({
+          type: "connectionState",
+          state: "connected",
+        });
+
+        assert.strictEqual(elements.inputEl.disabled, true);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(
+          document.getElementById("input-hint")?.textContent,
+          "Starting session…"
+        );
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(elements.inputEl.disabled, false);
+      });
+
+      test("unlocks and restores focus with actionable feedback after restore fails", () => {
+        elements.inputEl.focus();
+        controller.handleMessage({ type: "replayStart" });
+        assert.strictEqual(elements.inputEl.disabled, true);
+
+        controller.handleMessage({
+          type: "replayFailed",
+          text: "Authentication required: Sign in to continue",
+        });
+
+        assert.strictEqual(elements.inputEl.disabled, false);
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(document.activeElement, elements.inputEl);
+        const error = elements.messagesEl.querySelector(".message.error");
+        assert.ok(error?.textContent?.includes("Sign in to continue"));
+        assert.ok(error?.textContent?.includes("start a new chat"));
+      });
+
+      test("keeps composed replay and session locks independent", () => {
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Restoring conversation…",
+        } as ExtensionMessage);
+        controller.handleMessage({ type: "replayStart" });
+
+        controller.handleMessage({
+          type: "replayFailed",
+          text: "Session is no longer available.",
+        });
+        assert.strictEqual(elements.inputEl.disabled, true);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(elements.inputEl.disabled, false);
+      });
+
+      test("defers focus restoration until a permission dialog closes", () => {
+        elements.inputEl.focus();
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: true,
+          text: "Starting session…",
+        } as ExtensionMessage);
+        controller.showPermissionModal("request-1", "Write file", "/tmp/a", [
+          { id: "allow", label: "Allow" },
+        ]);
+        assert.strictEqual(document.activeElement, elements.permissionModal);
+
+        controller.handleMessage({
+          type: "sessionTransition",
+          active: false,
+        } as ExtensionMessage);
+        assert.strictEqual(document.activeElement, elements.permissionModal);
+
+        controller.hidePermissionModal();
+        assert.strictEqual(document.activeElement, elements.inputEl);
       });
     });
 

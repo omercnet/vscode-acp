@@ -125,6 +125,43 @@ suite("ACP error presentation", () => {
     assert.strictEqual(formatACPError(error), "Internal error (-32603)");
   });
 
+  test("replaces internal session transition diagnostics with recovery guidance", () => {
+    const errors = [
+      "Already connected or connecting",
+      "Session creation already in progress",
+      "Session loading already in progress",
+      "No active session",
+    ];
+
+    for (const message of errors) {
+      assert.deepStrictEqual(describeACPError(new Error(message)), {
+        kind: "session-transition",
+        summary: "Session is still getting ready",
+        diagnostic:
+          "Session is still getting ready. Wait for setup to finish, then try again.",
+      });
+      assert.strictEqual(
+        formatACPError(new Error(message)),
+        "Session is still getting ready. Wait for setup to finish, then try again."
+      );
+    }
+  });
+
+  test("preserves structured classifications for transition-like diagnostics", () => {
+    const error = new RequestError(-32602, "No active session");
+
+    assert.deepStrictEqual(describeACPError(error), {
+      kind: "invalid-parameters",
+      code: -32602,
+      summary: "Invalid parameters",
+      diagnostic: "No active session",
+    });
+    assert.strictEqual(
+      formatACPError(error),
+      "Invalid parameters: No active session"
+    );
+  });
+
   test("does not repeat the summary for the SDK's default message", () => {
     assert.strictEqual(
       formatACPError(RequestError.authRequired()),

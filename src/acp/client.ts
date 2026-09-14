@@ -63,6 +63,7 @@ export type ACPErrorKind =
   | "authentication-required"
   | "resource-not-found"
   | "cancelled"
+  | "session-transition"
   | "unknown";
 
 export interface ACPErrorPresentation {
@@ -93,11 +94,17 @@ const ERROR_PRESENTATIONS: Record<
 };
 
 /**
- * Classifies structured JSON-RPC errors exposed by ACP SDK 1.4.
- *
- * Only {@link acp.RequestError} instances carry a transport-verified RPC code;
- * other errors remain unclassified and retain their diagnostic text.
+ * Classifies structured JSON-RPC errors exposed by ACP SDK 1.4 and replaces
+ * local lifecycle guard diagnostics with user-facing recovery guidance.
+ * Other unstructured errors retain their diagnostic text.
  */
+const SESSION_TRANSITION_DIAGNOSTICS: Readonly<Record<string, true>> = {
+  "Already connected or connecting": true,
+  "Session creation already in progress": true,
+  "Session loading already in progress": true,
+  "No active session": true,
+};
+
 export function describeACPError(error: unknown): ACPErrorPresentation {
   if (error instanceof acp.RequestError) {
     const presentation = ERROR_PRESENTATIONS[error.code];
@@ -114,6 +121,15 @@ export function describeACPError(error: unknown): ACPErrorPresentation {
       code: error.code,
       summary: "ACP request failed",
       diagnostic: error.message,
+    };
+  }
+
+  if (error instanceof Error && SESSION_TRANSITION_DIAGNOSTICS[error.message]) {
+    return {
+      kind: "session-transition",
+      summary: "Session is still getting ready",
+      diagnostic:
+        "Session is still getting ready. Wait for setup to finish, then try again.",
     };
   }
 
