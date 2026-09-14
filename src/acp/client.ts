@@ -59,13 +59,19 @@ function getModelState(
  * shapes may be passed to `authenticate`.
  */
 export function isAgentAuthMethod(
-  method: acp.AuthMethod
+  method: unknown
 ): method is acp.AuthMethodAgent {
-  if (!("type" in method)) {
-    return true;
+  if (typeof method !== "object" || method === null) {
+    return false;
   }
-  const declaredType: unknown = method.type;
-  return declaredType === "agent";
+  const candidate = method as Record<string, unknown>;
+  return (
+    typeof candidate.id === "string" &&
+    typeof candidate.name === "string" &&
+    (candidate.description === undefined ||
+      typeof candidate.description === "string") &&
+    (candidate.type === undefined || candidate.type === "agent")
+  );
 }
 
 export interface SessionMetadata {
@@ -597,7 +603,10 @@ export class ACPClient {
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
       this.supportsSessionLoading =
         initResponse.agentCapabilities?.loadSession === true;
-      this.authenticationMethods = [...(initResponse.authMethods ?? [])];
+      const advertisedAuthMethods: unknown = initResponse.authMethods;
+      this.authenticationMethods = Array.isArray(advertisedAuthMethods)
+        ? advertisedAuthMethods.filter(isAgentAuthMethod)
+        : [];
 
       this.setState("connected");
       return initResponse;

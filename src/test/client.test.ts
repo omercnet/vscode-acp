@@ -4,6 +4,7 @@ import {
   ACPClient,
   describeACPError,
   formatACPError,
+  isAgentAuthMethod,
   type SpawnFunction,
 } from "../acp/client";
 import { getAgent } from "../acp/agents";
@@ -402,6 +403,32 @@ suite("ACPClient with Mock Server", () => {
   });
 
   suite("authentication", () => {
+    test("rejects malformed and client-executed method shapes", () => {
+      assert.strictEqual(isAgentAuthMethod(null), false);
+      assert.strictEqual(isAgentAuthMethod({}), false);
+      assert.strictEqual(isAgentAuthMethod({ id: "browser", name: 42 }), false);
+      assert.strictEqual(
+        isAgentAuthMethod({
+          id: "browser",
+          name: "Browser sign-in",
+          description: { secret: "not displayable" },
+        }),
+        false
+      );
+      assert.strictEqual(
+        isAgentAuthMethod({
+          id: "terminal",
+          name: "Terminal sign-in",
+          type: "terminal",
+        }),
+        false
+      );
+      assert.strictEqual(
+        isAgentAuthMethod({ id: "browser", name: "Browser sign-in" }),
+        true
+      );
+    });
+
     test("retains advertised agent methods and authenticates before retrying session creation", async () => {
       demoMode = "authentication";
 

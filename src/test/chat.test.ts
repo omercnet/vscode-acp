@@ -642,12 +642,21 @@ suite("ChatViewProvider", () => {
   test("restores session metadata when a replacement chat fails", async () => {
     const metadata = { modes: null, models: null, commands: [] };
     class FailingReplacementClient extends TestACPClient {
+      newSessionCalls = 0;
+      sentMessages: string[] = [];
+
       isConnected(): boolean {
         return true;
       }
 
       async newSession(): Promise<void> {
+        this.newSessionCalls++;
         throw new RequestError(-32000, "Sign in to continue");
+      }
+
+      async sendMessage(text = ""): Promise<{ stopReason: string }> {
+        this.sentMessages.push(text);
+        return { stopReason: "end_turn" };
       }
 
       getSessionMetadata() {
@@ -655,20 +664,22 @@ suite("ChatViewProvider", () => {
       }
     }
 
+    const client = new FailingReplacementClient();
     const provider = new ChatViewProvider(
       mockExtensionUri,
-      new FailingReplacementClient() as unknown as ACPClient,
+      client as unknown as ACPClient,
       memento as unknown as vscode.Memento
     );
     const messages: Array<Record<string, unknown>> = [];
     Object.defineProperty(provider, "postMessage", {
       value: (message: Record<string, unknown>) => messages.push(message),
     });
-    const handleNewChat = Reflect.get(provider, "handleNewChat") as (
-      this: ChatViewProvider
-    ) => Promise<void>;
+    const lifecycle = provider as unknown as AuthenticationTestProvider & {
+      handleNewChat(): Promise<void>;
+    };
+    lifecycle.hasSession = true;
 
-    await handleNewChat.call(provider);
+    await lifecycle.handleNewChat();
 
     assert.deepStrictEqual(
       messages.find((message) => message.type === "error"),
@@ -686,6 +697,10 @@ suite("ChatViewProvider", () => {
       type: "sessionTransition",
       active: false,
     });
+
+    await lifecycle.handleUserMessage("Continue old session");
+    assert.strictEqual(client.newSessionCalls, 1);
+    assert.deepStrictEqual(client.sentMessages, ["Continue old session"]);
   });
 
   suite("Session transition races", () => {
@@ -1082,6 +1097,132 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.newSessionCalls, 2);
       assert.deepStrictEqual(client.authenticatedMethods, ["browser@1"]);
       assert.strictEqual(authenticationProvider.hasSession, true);
+    });
+
+    test("does not authenticate again when the retry still requires authentication", async () => {
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+        authenticateCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          throw new RequestError(-32000, "Authentication required");
+        }
+
+        async authenticate(): Promise<void> {
+          this.authenticateCalls++;
+        }
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider;
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => "browser",
+      });
+
+      await assert.rejects(
+        () => authenticationProvider.ensureSession(),
+        /Authentication required/
+      );
+      assert.strictEqual(client.newSessionCalls, 2);
+      assert.strictEqual(client.authenticateCalls, 1);
+      assert.strictEqual(authenticationProvider.hasSession, false);
+    });
+
+    test("unlocks selection while keeping authentication serialized", async () => {
+      let resolveSelection!: () => void;
+      let selectionStarted!: () => void;
+      const selectionGate = new Promise<void>((resolve) => {
+        resolveSelection = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        selectionStarted = resolve;
+      });
+
+      class AuthenticationClient extends TestACPClient {
+        newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          if (this.newSessionCalls === 1) {
+            throw new RequestError(-32000, "Authentication required");
+          }
+        }
+
+        async authenticate(): Promise<void> {}
+      }
+
+      const client = new AuthenticationClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const authenticationProvider =
+        provider as unknown as AuthenticationTestProvider & {
+          handleNewChat(): Promise<void>;
+        };
+      Object.defineProperty(provider, "selectAuthenticationMethod", {
+        value: async () => {
+          selectionStarted();
+          await selectionGate;
+          return "browser";
+        },
+      });
+
+      const session = authenticationProvider.ensureSession();
+      await started;
+      assert.deepStrictEqual(
+        messages.filter((message) => message.type === "sessionTransition"),
+        [
+          {
+            type: "sessionTransition",
+            active: true,
+            text: "Starting session…",
+          },
+          { type: "sessionTransition", active: false, restoreFocus: false },
+        ]
+      );
+
+      const replacement = authenticationProvider.handleNewChat();
+      await Promise.resolve();
+      assert.strictEqual(client.newSessionCalls, 1);
+
+      resolveSelection();
+      await Promise.all([session, replacement]);
+      assert.strictEqual(client.newSessionCalls, 3);
+      assert.deepStrictEqual(
+        messages
+          .filter((message) => message.type === "sessionTransition")
+          .at(-1),
+        { type: "sessionTransition", active: false }
+      );
     });
 
     test("does not retry after authentication cancellation or a stale selection", async () => {

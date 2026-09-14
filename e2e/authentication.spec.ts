@@ -20,6 +20,32 @@ const AGENT_PATH = join(BIN_DIR, "opencode");
 const SCREENSHOT_PATH = join(PROJECT_ROOT, "screenshots", "authentication.png");
 const JOURNAL_PATH = join(DEMO_DIR, "agent-requests.jsonl");
 
+interface AgentRequest {
+  method: string;
+  params?: unknown;
+}
+
+async function readRequestJournal(): Promise<AgentRequest[]> {
+  return (await readFile(JOURNAL_PATH, "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const parsed: unknown = JSON.parse(line);
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !("method" in parsed) ||
+        typeof parsed.method !== "string"
+      ) {
+        throw new Error(`Invalid agent journal entry: ${line}`);
+      }
+      return {
+        method: parsed.method,
+        ...("params" in parsed ? { params: parsed.params } : {}),
+      };
+    });
+}
+
 const AGENT_SOURCE = `#!/usr/bin/env node
 const { appendFileSync } = require("fs");
 const journal = process.env.VSCODE_ACP_AGENT_JOURNAL;
@@ -142,13 +168,16 @@ test("authenticates through the Extension Development Host before creating a ses
 
     await window.keyboard.press("Enter");
 
+    await expect
+      .poll(async () =>
+        (await readRequestJournal()).map((request) => request.method)
+      )
+      .toEqual(["initialize", "session/new", "authenticate", "session/new"]);
+
     await expect(frame.locator("#status-text")).toHaveText("Connected");
     await expect(frame.locator("#input")).toBeVisible();
 
-    const requests = (await readFile(JOURNAL_PATH, "utf8"))
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as { method: string; params?: unknown });
+    const requests = await readRequestJournal();
     expect(requests.map((request) => request.method)).toEqual([
       "initialize",
       "session/new",

@@ -125,6 +125,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private sessionStart: Promise<void> | null = null;
   private sessionTransition: Promise<void> | null = null;
   private sessionTransitionLabel: string | null = null;
+  private sessionTransitionInputPaused = false;
   private conversationGeneration = 0;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private terminalCounter = 0;
@@ -316,7 +317,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.sendAgentStatus();
           this.sendSessionMetadata();
-          if (this.sessionTransitionLabel) {
+          if (
+            this.sessionTransitionLabel &&
+            !this.sessionTransitionInputPaused
+          ) {
             this.postMessage({
               type: "sessionTransition",
               active: true,
@@ -1094,6 +1098,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     console.error(`[Chat] ${context}:`, error);
     this.postMessage({ type: "error", text: formatACPError(error) });
   }
+  private setSessionTransitionInputPaused(paused: boolean): void {
+    this.sessionTransitionInputPaused = paused;
+    if (paused) {
+      this.postMessage({
+        type: "sessionTransition",
+        active: false,
+        restoreFocus: false,
+      });
+    } else if (this.sessionTransitionLabel) {
+      this.postMessage({
+        type: "sessionTransition",
+        active: true,
+        text: this.sessionTransitionLabel,
+      });
+    }
+  }
+
   private async runSessionTransition(
     label: string,
     operation: () => Promise<void>
@@ -1111,6 +1132,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     })();
 
     this.sessionTransition = transition;
+    this.sessionTransitionInputPaused = false;
     this.sessionTransitionLabel = label;
     this.postMessage({ type: "sessionTransition", active: true, text: label });
 
@@ -1120,6 +1142,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (this.sessionTransition === transition) {
         this.sessionTransition = null;
         this.sessionTransitionLabel = null;
+        this.sessionTransitionInputPaused = false;
         this.postMessage({ type: "sessionTransition", active: false });
       }
     }
@@ -1128,6 +1151,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private settleSessionLock(): void {
     if (!this.sessionTransition) {
       this.sessionTransitionLabel = null;
+      this.sessionTransitionInputPaused = false;
       this.postMessage({ type: "sessionTransition", active: false });
     }
   }
@@ -1175,7 +1199,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         throw error;
       }
 
-      const methodId = await this.selectAuthenticationMethod();
+      this.setSessionTransitionInputPaused(true);
+      let methodId: AuthMethodId | null;
+      try {
+        methodId = await this.selectAuthenticationMethod();
+      } finally {
+        this.setSessionTransitionInputPaused(false);
+      }
       if (!methodId) {
         throw new Error("Authentication cancelled");
       }
