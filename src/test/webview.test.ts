@@ -76,7 +76,7 @@ function createWebviewHTML(): string {
       <button id="send">Send</button>
     </div>
   </div>
-  <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.</span>
+  <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.</span>
   
   <div id="options-bar">
     <select id="mode-selector" style="display: none;"></select>
@@ -1217,10 +1217,23 @@ suite("Webview", () => {
         );
       });
 
-      test("showCommandAutocomplete hides when empty", () => {
-        controller.showCommandAutocomplete(testCommands);
-        controller.showCommandAutocomplete([]);
-        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+      test("typing a command the agent did not advertise shows an explanation", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/new";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        assert.ok(elements.commandAutocomplete.classList.contains("visible"));
+        const explanation =
+          elements.commandAutocomplete.querySelector(".no-commands");
+        assert.strictEqual(
+          explanation?.textContent,
+          "No matching ACP commands. This list only includes commands advertised by the active agent; its own app may offer others."
+        );
+        assert.strictEqual(explanation?.getAttribute("role"), "option");
+        assert.strictEqual(explanation?.getAttribute("aria-disabled"), "true");
       });
 
       test("hideCommandAutocomplete clears and hides", () => {
@@ -1249,15 +1262,71 @@ suite("Webview", () => {
         assert.strictEqual(result.length, 3);
       });
 
-      test("sessionMetadata with commands updates commands", () => {
+      test("availableCommands message refreshes an open command list", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: [
+            { name: "review", description: "Review changes" },
+            { name: "skill", description: "Run a skill" },
+          ],
+        });
+
+        assert.deepStrictEqual(
+          Array.from(
+            elements.commandAutocomplete.querySelectorAll(".command-name")
+          ).map((element) => element.textContent),
+          ["review", "skill"]
+        );
+      });
+
+      test("availableCommands message does not reopen a dismissed command list", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Escape" })
+        );
+
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: [{ name: "review", description: "Review changes" }],
+        });
+
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+        assert.strictEqual(elements.inputEl.value, "/");
+      });
+
+      test("sessionMetadata refreshes an open command list", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
         controller.handleMessage({
           type: "sessionMetadata",
-          commands: testCommands,
+          commands: [{ name: "review", description: "Review changes" }],
           modes: null,
           models: null,
         });
-        const result = controller.getFilteredCommands("/");
-        assert.strictEqual(result.length, 3);
+
+        assert.deepStrictEqual(
+          Array.from(
+            elements.commandAutocomplete.querySelectorAll(".command-name")
+          ).map((element) => element.textContent),
+          ["review"]
+        );
       });
 
       test("chatCleared clears commands", () => {
@@ -1268,6 +1337,38 @@ suite("Webview", () => {
         controller.handleMessage({ type: "chatCleared" });
         const result = controller.getFilteredCommands("/");
         assert.strictEqual(result.length, 0);
+      });
+
+      test("Escape dismisses an empty command result without clearing input", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/missing";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Escape" })
+        );
+
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+        assert.strictEqual(elements.inputEl.value, "/missing");
+      });
+
+      test("sending an unadvertised command hides its explanation", () => {
+        controller.handleMessage({
+          type: "availableCommands",
+          commands: testCommands,
+        });
+        elements.inputEl.value = "/missing";
+        elements.inputEl.dispatchEvent(new window.Event("input"));
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", { key: "Enter" })
+        );
+
+        assert.ok(!elements.commandAutocomplete.classList.contains("visible"));
+        assert.strictEqual(elements.inputEl.value, "");
       });
 
       test("Tab key selects command when autocomplete visible", () => {

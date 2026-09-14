@@ -166,7 +166,7 @@ export interface ExtensionMessage {
 const PERMISSION_GUARD_MS = 500;
 
 const DEFAULT_INPUT_HINT =
-  "Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for slash commands.";
+  "Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.";
 /**
  * Decision labels are extension-defined, never agent-supplied, and must state
  * exactly what the extension guarantees. Grants are cleared whenever the
@@ -752,34 +752,37 @@ export class WebviewController {
         commandAutocomplete.classList.contains("visible");
       const commands = this.getFilteredCommands(inputEl.value.split(/\s/)[0]);
 
-      if (isAutocompleteVisible && commands.length > 0) {
-        if (e.key === "ArrowDown") {
-          e.preventDefault();
-          this.selectedCommandIndex = Math.min(
-            this.selectedCommandIndex + 1,
-            commands.length - 1
-          );
-          this.showCommandAutocomplete(commands);
-          return;
-        } else if (e.key === "ArrowUp") {
-          e.preventDefault();
-          this.selectedCommandIndex = Math.max(
-            this.selectedCommandIndex - 1,
-            0
-          );
-          this.showCommandAutocomplete(commands);
-          return;
-        } else if (
-          e.key === "Tab" ||
-          (e.key === "Enter" && this.selectedCommandIndex >= 0)
-        ) {
-          e.preventDefault();
-          this.selectCommand(this.selectedCommandIndex);
-          return;
-        } else if (e.key === "Escape") {
+      if (isAutocompleteVisible) {
+        if (e.key === "Escape") {
           e.preventDefault();
           this.hideCommandAutocomplete();
           return;
+        }
+        if (commands.length > 0) {
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            this.selectedCommandIndex = Math.min(
+              this.selectedCommandIndex + 1,
+              commands.length - 1
+            );
+            this.showCommandAutocomplete(commands);
+            return;
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            this.selectedCommandIndex = Math.max(
+              this.selectedCommandIndex - 1,
+              0
+            );
+            this.showCommandAutocomplete(commands);
+            return;
+          } else if (
+            e.key === "Tab" ||
+            (e.key === "Enter" && this.selectedCommandIndex >= 0)
+          ) {
+            e.preventDefault();
+            this.selectCommand(this.selectedCommandIndex);
+            return;
+          }
         }
       }
 
@@ -1200,6 +1203,7 @@ export class WebviewController {
     const attachmentIds = this.attachments.map((attachment) => attachment.id);
     this.vscode.postMessage({ type: "sendMessage", text, attachmentIds });
     this.elements.inputEl.value = "";
+    this.hideCommandAutocomplete();
     this.elements.inputEl.style.height = "auto";
     this.clearAttachments();
     this.promptPending = true;
@@ -1228,7 +1232,10 @@ export class WebviewController {
   showCommandAutocomplete(commands: AvailableCommand[]): void {
     const { commandAutocomplete, inputEl } = this.elements;
     if (commands.length === 0) {
-      this.hideCommandAutocomplete();
+      commandAutocomplete.innerHTML =
+        '<div class="no-commands" role="option" aria-disabled="true" aria-selected="false">No matching ACP commands. This list only includes commands advertised by the active agent; its own app may offer others.</div>';
+      commandAutocomplete.classList.add("visible");
+      inputEl.setAttribute("aria-expanded", "true");
       return;
     }
 
@@ -1822,6 +1829,9 @@ export class WebviewController {
 
         if (msg.commands && Array.isArray(msg.commands)) {
           this.availableCommands = msg.commands;
+          if (this.elements.commandAutocomplete.classList.contains("visible")) {
+            this.updateAutocomplete();
+          }
         }
         break;
       }
@@ -1834,6 +1844,9 @@ export class WebviewController {
       case "availableCommands":
         if (msg.commands && Array.isArray(msg.commands)) {
           this.availableCommands = msg.commands;
+          if (this.elements.commandAutocomplete.classList.contains("visible")) {
+            this.updateAutocomplete();
+          }
         }
         break;
       case "plan":
