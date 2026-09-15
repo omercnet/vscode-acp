@@ -33,6 +33,8 @@ export async function closeVSCode(host: ElectronApplication): Promise<void> {
     "try{$owned=[System.Diagnostics.Process]::GetProcessById([int]$processId)}catch [System.ArgumentException]{continue}",
     "try{if(-not $owned.WaitForExit(10000)){throw 'VS Code child did not exit before cleanup'}}finally{$owned.Dispose()}",
     "}",
+    // A caught GetProcessById error leaves PowerShell's $? false.
+    "exit 0",
   ].join("\n");
   await execFileAsync(
     powershell,
