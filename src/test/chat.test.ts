@@ -24,7 +24,7 @@ import {
 } from "../views/chat";
 import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
-import type { ACPClient } from "../acp/client";
+import type { ACPClient, ACPSessionCapabilities } from "../acp/client";
 import {
   openTrustedWorkspaceFile,
   workspaceFileCapabilities,
@@ -37,11 +37,13 @@ import type {
   McpCapabilities,
   NewSessionRequest,
   PromptCapabilities,
+  ResumeSessionRequest,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
 import * as attachmentHelpers from "../attachments";
+import { readStoredSessions } from "../sessions";
 import type { FileAttachment } from "../shared/attachments";
 import {
   getElements,
@@ -92,6 +94,8 @@ interface MockACPClient {
   newSession: (params: NewSessionRequest) => Promise<void>;
   sendMessage: (text: string) => Promise<{ stopReason: string }>;
   loadSession: (params: LoadSessionRequest) => Promise<void>;
+  resumeSession: (params: ResumeSessionRequest) => Promise<void>;
+  getSessionCapabilities: () => ACPSessionCapabilities;
   supportsSessionLoad: () => boolean;
   getMcpCapabilities: () => McpCapabilities;
   getPromptCapabilities: () => PromptCapabilities;
@@ -262,6 +266,18 @@ class TestACPClient implements MockACPClient {
 
   async loadSession(_params: LoadSessionRequest): Promise<void> {
     throw new Error("Session loading is unavailable");
+  }
+  async resumeSession(_params: ResumeSessionRequest): Promise<void> {
+    throw new Error("Session resuming is unavailable");
+  }
+
+  getSessionCapabilities(): ACPSessionCapabilities {
+    return {
+      load: this.supportsSessionLoad(),
+      list: false,
+      resume: false,
+      additionalDirectories: false,
+    };
   }
 
   supportsSessionLoad(): boolean {
@@ -2553,6 +2569,10 @@ suite("ChatViewProvider", () => {
         isConnected(): boolean {
           return true;
         }
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
 
         async loadSession(params: LoadSessionRequest): Promise<void> {
           const sessionId = params.sessionId;
@@ -2627,6 +2647,10 @@ suite("ChatViewProvider", () => {
         isConnected(): boolean {
           return true;
         }
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
 
         async sendMessage(): Promise<{ stopReason: string }> {
           markPromptStarted();
@@ -2777,6 +2801,118 @@ suite("ChatViewProvider", () => {
         type: "sessionTransition",
         active: false,
       });
+    });
+
+    test("resumes with one authenticated snapshot and transition cleanup", async () => {
+      class ResumingClient extends TestACPClient {
+        readonly resumeRequests: ResumeSessionRequest[] = [];
+        readonly authenticationRequests: Array<{
+          methodId: AuthMethodId;
+          generation: number;
+        }> = [];
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: true,
+          };
+        }
+
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [{ id: "browser", name: "Browser sign-in" }];
+        }
+
+        async authenticate(
+          methodId: AuthMethodId,
+          generation: number
+        ): Promise<void> {
+          this.authenticationRequests.push({ methodId, generation });
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.resumeRequests.push(params);
+          if (this.resumeRequests.length === 1) {
+            throw RequestError.authRequired();
+          }
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const client = new ResumingClient();
+      const workspaceState = new TestMemento();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      let terminalCleanupCalls = 0;
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          terminalCleanupCalls++;
+        },
+      });
+      const grants = Reflect.get(
+        provider,
+        "terminalPermissionGrants"
+      ) as Map<string, unknown>;
+      grants.set("old-grant", {});
+      const descriptor = Object.getOwnPropertyDescriptor(
+        vscode.window,
+        "showQuickPick"
+      );
+      Object.defineProperty(vscode.window, "showQuickPick", {
+        configurable: true,
+        value: async (items: readonly unknown[]) => items[0],
+      });
+
+      try {
+        await provider.openAgentSession({
+          agentId: "test-agent",
+          sessionId: "resume-session",
+          cwd: process.cwd(),
+          additionalDirectories: ["/shared"],
+          preview: "Resume target",
+          mode: "resume",
+        });
+
+        assert.strictEqual(client.resumeRequests.length, 2);
+        assert.strictEqual(
+          client.resumeRequests[0],
+          client.resumeRequests[1],
+          "authentication retry must reuse the exact configuration snapshot"
+        );
+        assert.deepStrictEqual(
+          client.resumeRequests[1].additionalDirectories,
+          ["/shared"]
+        );
+        assert.deepStrictEqual(client.authenticationRequests, [
+          { methodId: "browser", generation: 1 },
+        ]);
+        assert.strictEqual(terminalCleanupCalls, 1);
+        assert.strictEqual(grants.size, 0);
+        assert.ok(!messages.some((message) => message.type === "replayStart"));
+        assert.ok(messages.some((message) => message.type === "chatCleared"));
+        assert.strictEqual(
+          readStoredSessions(workspaceState)[0]?.sessionId,
+          "resume-session"
+        );
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(vscode.window, "showQuickPick", descriptor);
+        }
+        provider.dispose();
+      }
     });
   });
   suite("Client capability handlers", () => {

@@ -991,6 +991,95 @@ suite("ACPClient with Mock Server", () => {
     });
   });
 
+  suite("agent-owned sessions", () => {
+    test("lists pages without replacing the active session", async () => {
+      demoMode = "sessions";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      assert.deepStrictEqual(client.getSessionCapabilities(), {
+        load: true,
+        list: true,
+        resume: true,
+        additionalDirectories: true,
+      });
+      const first = await client.listSessions({});
+      const second = await client.listSessions({ cursor: first.nextCursor });
+
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.deepStrictEqual(
+        first.sessions.map((session) => session.sessionId),
+        ["listed-session-1"]
+      );
+      assert.deepStrictEqual(
+        second.sessions.map((session) => session.sessionId),
+        ["listed-session-2"]
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getListSessionRequests(),
+        [{}, { cursor: "page-2" }]
+      );
+    });
+
+    test("resumes with the selected directories and MCP snapshot", async () => {
+      demoMode = "sessions";
+      await client.connect();
+      const mcpServers: McpServer[] = [
+        {
+          name: "filesystem",
+          command: process.execPath,
+          args: ["server.js"],
+          env: [],
+        },
+      ];
+
+      await client.resumeSession({
+        sessionId: "listed-session-1",
+        cwd: "/test/dir",
+        additionalDirectories: ["/test/shared"],
+        mcpServers,
+      });
+
+      assert.strictEqual(client.getCurrentSessionId(), "listed-session-1");
+      assert.strictEqual(
+        client.getSessionMetadata()?.modes?.currentModeId,
+        "code"
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getResumeSessionRequests(),
+        [
+          {
+            sessionId: "listed-session-1",
+            cwd: "/test/dir",
+            additionalDirectories: ["/test/shared"],
+            mcpServers,
+          },
+        ]
+      );
+    });
+
+    test("rejects unadvertised listing and resuming", async () => {
+      await client.connect();
+
+      await assert.rejects(
+        () => client.listSessions({}),
+        /does not support session listing/
+      );
+      await assert.rejects(
+        () =>
+          client.resumeSession({
+            sessionId: "session",
+            cwd: "/test/dir",
+            mcpServers: [],
+          }),
+        /does not support session resuming/
+      );
+    });
+  });
+
   suite("sendMessage", () => {
     test("should send message and receive response", async () => {
       await client.connect();

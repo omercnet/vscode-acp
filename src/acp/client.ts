@@ -124,6 +124,12 @@ export interface SessionMetadata {
   models: ModelSelectionState | null;
   commands: acp.AvailableCommand[] | null;
 }
+export interface ACPSessionCapabilities {
+  load: boolean;
+  list: boolean;
+  resume: boolean;
+  additionalDirectories: boolean;
+}
 
 export type ACPConnectionState =
   "disconnected" | "connecting" | "connected" | "error";
@@ -174,6 +180,7 @@ const ERROR_PRESENTATIONS: Record<
  */
 const SESSION_TRANSITION_DIAGNOSTICS: Readonly<Record<string, true>> = {
   "Already connected or connecting": true,
+  "Session restoration already in progress": true,
   "Session creation already in progress": true,
   "Session loading already in progress": true,
   "No active session": true,
@@ -309,6 +316,9 @@ export class ACPClient {
   private pendingSessionRequestGeneration: number | null = null;
   private canCloseSessions = false;
   private supportsSessionLoading = false;
+  private supportsSessionListing = false;
+  private supportsSessionResuming = false;
+  private supportsAdditionalSessionDirectories = false;
   private loadingSessionId: acp.SessionId | null = null;
   private mcpCapabilities: acp.McpCapabilities = {};
   private promptCapabilities: acp.PromptCapabilities = {};
@@ -387,6 +397,14 @@ export class ACPClient {
 
   supportsSessionLoad(): boolean {
     return this.supportsSessionLoading;
+  }
+  getSessionCapabilities(): ACPSessionCapabilities {
+    return {
+      load: this.supportsSessionLoading,
+      list: this.supportsSessionListing,
+      resume: this.supportsSessionResuming,
+      additionalDirectories: this.supportsAdditionalSessionDirectories,
+    };
   }
   getMcpCapabilities(): acp.McpCapabilities {
     return { ...this.mcpCapabilities };
@@ -477,8 +495,12 @@ export class ACPClient {
     this.authenticationMethods = [];
     this.agentInfo = null;
     this.canCloseSessions = false;
+    this.supportsSessionLoading = false;
     this.mcpCapabilities = {};
     this.promptCapabilities = {};
+    this.supportsSessionListing = false;
+    this.supportsSessionResuming = false;
+    this.supportsAdditionalSessionDirectories = false;
     this.setState("connecting");
 
     try {
@@ -539,6 +561,9 @@ export class ACPClient {
         this.activePrompt = null;
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
+        this.supportsSessionListing = false;
+        this.supportsSessionResuming = false;
+        this.supportsAdditionalSessionDirectories = false;
         this.authenticationMethods = [];
         this.loadingSessionId = null;
         this.mcpCapabilities = {};
@@ -686,6 +711,13 @@ export class ACPClient {
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
       this.supportsSessionLoading =
         initResponse.agentCapabilities?.loadSession === true;
+      this.supportsSessionListing =
+        initResponse.agentCapabilities?.sessionCapabilities?.list != null;
+      this.supportsSessionResuming =
+        initResponse.agentCapabilities?.sessionCapabilities?.resume != null;
+      this.supportsAdditionalSessionDirectories =
+        initResponse.agentCapabilities?.sessionCapabilities
+          ?.additionalDirectories != null;
       const advertisedAuthMethods: unknown = initResponse.authMethods;
       this.authenticationMethods = Array.isArray(advertisedAuthMethods)
         ? advertisedAuthMethods.filter(isAgentAuthMethod)
@@ -721,6 +753,9 @@ export class ACPClient {
         this.sessionMetadata = null;
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
+        this.supportsSessionListing = false;
+        this.supportsSessionResuming = false;
+        this.supportsAdditionalSessionDirectories = false;
         this.loadingSessionId = null;
         this.authenticationMethods = [];
         this.mcpCapabilities = {};
@@ -890,19 +925,48 @@ export class ACPClient {
       throw error;
     }
   }
+  async listSessions(
+    params: acp.ListSessionsRequest
+  ): Promise<acp.ListSessionsResponse> {
+    const connection = this.connection;
+    if (!connection) {
+      throw new Error("Not connected");
+    }
+    if (!this.supportsSessionListing) {
+      throw new Error("Agent does not support session listing");
+    }
+    return connection.agent.request(acp.methods.agent.session.list, params);
+  }
+
   async loadSession(
     params: acp.LoadSessionRequest
   ): Promise<acp.LoadSessionResponse> {
+    if (!this.supportsSessionLoading) {
+      throw new Error("Agent does not support session loading");
+    }
+    return this.restoreSession("load", params);
+  }
+
+  async resumeSession(
+    params: acp.ResumeSessionRequest
+  ): Promise<acp.ResumeSessionResponse> {
+    if (!this.supportsSessionResuming) {
+      throw new Error("Agent does not support session resuming");
+    }
+    return this.restoreSession("resume", params);
+  }
+
+  private async restoreSession(
+    mode: "load" | "resume",
+    params: acp.LoadSessionRequest | acp.ResumeSessionRequest
+  ): Promise<acp.LoadSessionResponse | acp.ResumeSessionResponse> {
     const sessionId = params.sessionId;
     const connection = this.connection;
     if (!connection) {
       throw new Error("Not connected");
     }
-    if (!this.supportsSessionLoading) {
-      throw new Error("Agent does not support session loading");
-    }
     if (this.pendingSessionRequestGeneration !== null) {
-      throw new Error("Session loading already in progress");
+      throw new Error("Session restoration already in progress");
     }
 
     const requestGeneration = ++this.sessionRequestGeneration;
@@ -924,10 +988,16 @@ export class ACPClient {
         });
       }
 
-      const response = await connection.agent.request(
-        acp.methods.agent.session.load,
-        params
-      );
+      const response =
+        mode === "load"
+          ? await connection.agent.request(
+              acp.methods.agent.session.load,
+              params as acp.LoadSessionRequest
+            )
+          : await connection.agent.request(
+              acp.methods.agent.session.resume,
+              params as acp.ResumeSessionRequest
+            );
 
       if (
         connection !== this.connection ||
@@ -943,7 +1013,7 @@ export class ACPClient {
       if (
         modes &&
         bufferedMode &&
-        modes.availableModes.some((mode) => mode.id === bufferedMode)
+        modes.availableModes.some((available) => available.id === bufferedMode)
       ) {
         modes.currentModeId = bufferedMode;
       }
@@ -1169,6 +1239,9 @@ export class ACPClient {
     this.pendingSessionRequestGeneration = null;
     this.canCloseSessions = false;
     this.supportsSessionLoading = false;
+    this.supportsSessionListing = false;
+    this.supportsSessionResuming = false;
+    this.supportsAdditionalSessionDirectories = false;
     this.loadingSessionId = null;
     this.mcpCapabilities = {};
     this.promptCapabilities = {};
