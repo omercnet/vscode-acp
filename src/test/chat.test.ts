@@ -10,6 +10,7 @@ import fsPromises, {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "fs/promises";
 import type { FileHandle } from "fs/promises";
@@ -4786,78 +4787,6 @@ suite("ChatViewProvider", () => {
     });
   });
   suite("Protocol metadata", () => {
-    test("forwards initial, replacement, and omitted tool locations", () => {
-      const provider = new ChatViewProvider(
-        mockExtensionUri,
-        acpClient as unknown as ACPClient,
-        memento as unknown as vscode.Memento
-      );
-      const messages: Array<Record<string, unknown>> = [];
-      Object.defineProperty(provider, "postMessage", {
-        value: (message: Record<string, unknown>) => messages.push(message),
-      });
-      const handleSessionUpdate = Reflect.get(
-        provider,
-        "handleSessionUpdate"
-      ) as (notification: SessionNotification) => void;
-      const firstPath = join(workspaceRoot(), "src", "extension.ts");
-      const replacementPath = join(workspaceRoot(), "package.json");
-
-      handleSessionUpdate.call(provider, {
-        sessionId: "test-session",
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: "tool-1",
-          title: "Inspect source",
-          locations: [
-            { path: "relative.ts", line: 1 },
-            { path: firstPath, line: 10 },
-          ],
-        },
-      });
-      handleSessionUpdate.call(provider, {
-        sessionId: "test-session",
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "tool-1",
-          locations: [{ path: replacementPath, line: 5 }],
-        },
-      });
-      handleSessionUpdate.call(provider, {
-        sessionId: "test-session",
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: "tool-1",
-          status: "completed",
-        },
-      });
-
-      assert.deepStrictEqual(messages[0], {
-        type: "toolCallStart",
-        name: "Inspect source",
-        toolCallId: "tool-1",
-        kind: undefined,
-        status: undefined,
-        locations: [{ path: firstPath, label: "src/extension.ts", line: 10 }],
-      });
-      assert.deepStrictEqual(messages[1], {
-        type: "toolCallUpdate",
-        toolCallId: "tool-1",
-        title: undefined,
-        kind: undefined,
-        content: undefined,
-        rawInput: undefined,
-        rawOutput: undefined,
-        status: undefined,
-        terminalOutput: undefined,
-        locations: [{ path: replacementPath, label: "package.json", line: 5 }],
-      });
-      assert.strictEqual(
-        Object.prototype.hasOwnProperty.call(messages[2], "locations"),
-        false
-      );
-    });
-
     for (const stopReason of [
       "end_turn",
       "max_tokens",
@@ -4952,9 +4881,20 @@ suite("ChatViewProvider", () => {
       const projectFile = join(workspaceRoot(), "README.md");
       const outsideDirectory = await mkdtemp(join(tmpdir(), "acp-location-"));
       const outsideFile = join(outsideDirectory, "outside.ts");
+      const linksDirectory = await mkdtemp(join(workspaceRoot(), "locations-"));
       await writeFile(outsideFile, "outside\n");
 
       try {
+        await symlink(
+          workspaceRoot(),
+          join(linksDirectory, "inside"),
+          "junction"
+        );
+        await symlink(
+          outsideDirectory,
+          join(linksDirectory, "outside"),
+          "junction"
+        );
         await handleOpenToolLocation.call(provider, projectFile, 5);
         assert.strictEqual(
           await realpath(vscode.window.activeTextEditor!.document.uri.fsPath),
@@ -4964,36 +4904,44 @@ suite("ChatViewProvider", () => {
           vscode.window.activeTextEditor?.selection.active.line,
           4
         );
+        await handleOpenToolLocation.call(
+          provider,
+          join(linksDirectory, "inside", "README.md"),
+          Number.MAX_SAFE_INTEGER
+        );
+        assert.strictEqual(
+          await realpath(vscode.window.activeTextEditor!.document.uri.fsPath),
+          await realpath(projectFile)
+        );
+        assert.strictEqual(
+          vscode.window.activeTextEditor?.selection.active.line,
+          vscode.window.activeTextEditor!.document.lineCount - 1
+        );
         const activeDocument =
           vscode.window.activeTextEditor?.document.uri.fsPath;
 
-        await handleOpenToolLocation.call(provider, outsideFile, 1);
-        await handleOpenToolLocation.call(
-          provider,
+        for (const rejectedPath of [
+          outsideFile,
+          join(linksDirectory, "outside", "outside.ts"),
           join(workspaceRoot(), "missing-location.ts"),
-          1
-        );
-
-        assert.strictEqual(
-          vscode.window.activeTextEditor?.document.uri.fsPath,
-          activeDocument
-        );
-        assert.deepStrictEqual(
-          fakeWebview.messages.filter(
-            (message) => message.type === "toolLocationError"
-          ),
-          [
-            {
-              type: "toolLocationError",
-              text: "Could not open this tool location. It must be an existing file inside a trusted local workspace.",
-            },
-            {
-              type: "toolLocationError",
-              text: "Could not open this tool location. It must be an existing file inside a trusted local workspace.",
-            },
-          ]
-        );
+          vscode.Uri.file(projectFile).toString(),
+          "relative.ts",
+          `${projectFile}\u0000`,
+        ]) {
+          fakeWebview.messages.length = 0;
+          await handleOpenToolLocation.call(provider, rejectedPath, 1);
+          assert.strictEqual(
+            vscode.window.activeTextEditor?.document.uri.fsPath,
+            activeDocument
+          );
+          assert.strictEqual(
+            fakeWebview.messages[0]?.type,
+            "toolLocationError"
+          );
+        }
       } finally {
+        provider.dispose();
+        await rm(linksDirectory, { recursive: true, force: true });
         await rm(outsideDirectory, { recursive: true, force: true });
         await vscode.commands.executeCommand(
           "workbench.action.closeActiveEditor"

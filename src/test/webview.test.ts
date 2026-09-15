@@ -3,6 +3,7 @@ import { JSDOM, DOMWindow } from "jsdom";
 import {
   escapeHtml,
   formatPermissionContent,
+  formatAgentIdentity,
   getToolsHtml,
   updateSelectLabel,
   getElements,
@@ -165,6 +166,17 @@ suite("Webview", () => {
 
     test("preserves normal text", () => {
       assert.strictEqual(escapeHtml("Hello World"), "Hello World");
+    });
+  });
+
+  suite("formatAgentIdentity", () => {
+    test("truncates metadata without splitting an astral code point", () => {
+      const name = "a".repeat(255) + "\u{10437}" + "b";
+
+      assert.strictEqual(
+        formatAgentIdentity({ name, version: "1.4.0" }),
+        `${"a".repeat(255)}\u{10437} 1.4.0`
+      );
     });
   });
 
@@ -840,6 +852,121 @@ suite("Webview", () => {
         assert.strictEqual(tools["tool-1"].input, "ls -la");
       });
 
+      test("keeps initial tool metadata through status-only updates", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-metadata",
+          title: '<img src=x onerror="alert(1)"> Read settings',
+          kind: "read",
+          rawInput: { command: "cat settings.json" },
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "initial content" },
+            },
+          ],
+          locations: [
+            {
+              path: '/workspace/" autofocus onfocus="alert(2)',
+              label: '<svg onload="alert(3)">settings.json',
+              line: 7,
+            },
+          ],
+        });
+        controller.handleMessage({
+          type: "toolCallUpdate",
+          toolCallId: "tool-metadata",
+          status: "completed",
+        });
+
+        controller.handleMessage({
+          type: "streamEnd",
+          stopReason: "end_turn",
+        });
+        const tool = elements.messagesEl.querySelector(".tool-item");
+        const location = tool?.querySelector(".tool-location-link");
+        assert.strictEqual(tool?.querySelector("img, svg"), null);
+        assert.strictEqual(
+          location?.textContent,
+          '<svg onload="alert(3)">settings.json:7'
+        );
+        assert.strictEqual(
+          location?.getAttribute("data-tool-location-path"),
+          '/workspace/" autofocus onfocus="alert(2)'
+        );
+        assert.strictEqual(location?.hasAttribute("autofocus"), false);
+        assert.strictEqual(
+          tool?.querySelector(".tool-input-preview")?.textContent,
+          "cat settings.json"
+        );
+        assert.strictEqual(
+          tool?.querySelector(".tool-output")?.textContent,
+          "initial content"
+        );
+      });
+
+      test("uses initial raw output when structured content is absent", () => {
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "tool-raw-output",
+          title: "Inspect output",
+          rawOutput: { output: "raw fallback" },
+        });
+
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".tool-output")?.textContent,
+          "raw fallback"
+        );
+      });
+
+      test("renders validated strings from otherwise opaque tool payloads", () => {
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "opaque-tool",
+          name: "Inspect output",
+        });
+        controller.handleMessage({
+          type: "toolCallUpdate",
+          toolCallId: "opaque-tool",
+          rawInput: {
+            command: ["not", "a", "string"],
+            description: "Safe input",
+          },
+          rawOutput: { output: { unexpected: true } },
+          status: "completed",
+        });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".tool-input-preview")?.textContent,
+          "Safe input"
+        );
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".tool-output"),
+          null
+        );
+      });
+
+      test("clears in-flight tool state before the next conversation", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "abandoned-tool",
+          title: "Abandoned tool",
+        });
+
+        controller.handleMessage({ type: "chatCleared" });
+
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".tool-item"),
+          null
+        );
+      });
+
       test("handles streaming", () => {
         controller.handleMessage({ type: "streamStart" });
         controller.handleMessage({ type: "streamChunk", text: "Hello " });
@@ -1058,6 +1185,28 @@ suite("Webview", () => {
         assert.strictEqual(document.activeElement, elements.inputEl);
       });
 
+      test("marks unfinished tools cancelled when the turn is cancelled", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({
+          type: "toolCallStart",
+          toolCallId: "cancelled-tool",
+          title: "Long-running task",
+          status: "in_progress",
+        });
+        controller.handleMessage({
+          type: "streamEnd",
+          stopReason: "cancelled",
+        });
+
+        const status = elements.messagesEl.querySelector(".tool-status");
+        assert.strictEqual(status?.getAttribute("aria-label"), "cancelled");
+        assert.strictEqual(status?.classList.contains("running"), false);
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".message.system")?.textContent,
+          "Response cancelled."
+        );
+      });
+
       for (const [stopReason, selector, text] of [
         ["end_turn", null, null],
         [
@@ -1073,7 +1222,7 @@ suite("Webview", () => {
         [
           "refusal",
           ".message.error",
-          "The agent refused to continue this turn. Try rephrasing the request.",
+          /prompt.*everything after it.*not be included.*next prompt/i,
         ],
         ["cancelled", ".message.system", "Response cancelled."],
       ] as const) {
@@ -1090,10 +1239,13 @@ suite("Webview", () => {
               0
             );
           } else {
-            assert.strictEqual(
-              elements.messagesEl.querySelector(selector)?.textContent,
-              text
-            );
+            const actual =
+              elements.messagesEl.querySelector(selector)?.textContent ?? "";
+            if (text instanceof RegExp) {
+              assert.match(actual, text);
+            } else {
+              assert.strictEqual(actual, text);
+            }
           }
           assert.strictEqual(elements.sendBtn.disabled, false);
           assert.strictEqual(document.activeElement, elements.inputEl);
@@ -1106,9 +1258,10 @@ suite("Webview", () => {
         controller.handleMessage({ type: "streamEnd", stopReason: "refusal" });
 
         assert.strictEqual(elements.messagesEl.style.display, "flex");
-        assert.strictEqual(
-          elements.messagesEl.querySelector(".message.error")?.textContent,
-          "The agent refused to continue this turn. Try rephrasing the request."
+        const refusal = elements.messagesEl.querySelector(".message.error");
+        assert.match(
+          refusal?.textContent ?? "",
+          /prompt.*everything after it.*not be included.*next prompt/i
         );
       });
 
@@ -1157,6 +1310,17 @@ suite("Webview", () => {
 
         controller.handleMessage({ type: "agentChanged" });
         assert.strictEqual(elements.statusText.textContent, "Disconnected");
+      });
+
+      test("removes an empty assistant bubble at the end of a zero-text turn", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "streamChunk", text: "" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".message.assistant"),
+          null
+        );
       });
     });
 

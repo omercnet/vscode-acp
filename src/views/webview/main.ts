@@ -63,7 +63,7 @@ export interface Tool {
   name: string;
   input: string | null;
   output: string | null;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   kind?: ToolKind;
   locations?: ToolLocation[];
 }
@@ -164,13 +164,10 @@ export interface ExtensionMessage {
     | "error";
   suppressStopReason?: boolean;
   agentInfo?: AgentInfo | null;
-  // Arbitrary agent-supplied tool input; `command`/`description` are the only
-  // fields this UI reads directly.
-  rawInput?: { command?: string; description?: string } & Record<
-    string,
-    unknown
-  >;
-  rawOutput?: { output?: string };
+  // ACP treats raw tool payloads as opaque. The UI only reads validated string
+  // values from the conventional command, description, and output fields.
+  rawInput?: unknown;
+  rawOutput?: unknown;
   status?: string;
   terminalOutput?: string;
   requestId?: string;
@@ -186,6 +183,19 @@ const METADATA_CONTROL_CHARACTERS =
 const MAX_METADATA_DISPLAY_LENGTH = 256;
 const MAX_TOOL_LOCATIONS = 20;
 
+function truncateMetadata(value: string, maxLength: number): string {
+  let end = 0;
+  let length = 0;
+  for (const character of value) {
+    if (length === maxLength) {
+      break;
+    }
+    end += character.length;
+    length++;
+  }
+  return value.slice(0, end);
+}
+
 export function formatAgentIdentity(agentInfo: unknown): string | null {
   if (typeof agentInfo !== "object" || agentInfo === null) {
     return null;
@@ -200,14 +210,14 @@ export function formatAgentIdentity(agentInfo: unknown): string | null {
   if (typeof candidate.version !== "string") {
     return null;
   }
-  const name = displayName
-    .replace(METADATA_CONTROL_CHARACTERS, " ")
-    .trim()
-    .slice(0, MAX_METADATA_DISPLAY_LENGTH);
-  const version = candidate.version
-    .replace(METADATA_CONTROL_CHARACTERS, " ")
-    .trim()
-    .slice(0, MAX_METADATA_DISPLAY_LENGTH);
+  const name = truncateMetadata(
+    displayName.replace(METADATA_CONTROL_CHARACTERS, " ").trim(),
+    MAX_METADATA_DISPLAY_LENGTH
+  );
+  const version = truncateMetadata(
+    candidate.version.replace(METADATA_CONTROL_CHARACTERS, " ").trim(),
+    MAX_METADATA_DISPLAY_LENGTH
+  );
   return name && version ? `${name} ${version}` : null;
 }
 
@@ -232,9 +242,10 @@ function normalizeToolLocations(value: unknown): ToolLocation[] {
       Number.isSafeInteger(candidate.line) && (candidate.line as number) > 0
         ? (candidate.line as number)
         : undefined;
-    const label = candidate.label
-      .replace(METADATA_CONTROL_CHARACTERS, " ")
-      .slice(0, 160);
+    const label = truncateMetadata(
+      candidate.label.replace(METADATA_CONTROL_CHARACTERS, " "),
+      160
+    );
     return [
       {
         path: candidate.path,
@@ -243,6 +254,46 @@ function normalizeToolLocations(value: unknown): ToolLocation[] {
       },
     ];
   });
+}
+
+function getToolInput(rawInput: unknown): string {
+  if (typeof rawInput !== "object" || rawInput === null) {
+    return "";
+  }
+  const candidate = rawInput as Record<string, unknown>;
+  if (typeof candidate.command === "string" && candidate.command.length > 0) {
+    return candidate.command;
+  }
+  return typeof candidate.description === "string" ? candidate.description : "";
+}
+
+function getToolOutput(msg: ExtensionMessage): string {
+  let output = "";
+  if (Array.isArray(msg.content) && msg.content.length > 0) {
+    const firstContent = msg.content[0];
+    if (
+      firstContent?.type === "content" &&
+      typeof firstContent.content?.text === "string"
+    ) {
+      output = firstContent.content.text;
+    } else if (firstContent?.type === "terminal") {
+      output = typeof msg.terminalOutput === "string" ? msg.terminalOutput : "";
+    } else if (firstContent?.type === "diff") {
+      output = renderDiff(
+        firstContent.path,
+        firstContent.oldText,
+        firstContent.newText
+      );
+    }
+  }
+  if (output) {
+    return output;
+  }
+  if (typeof msg.rawOutput !== "object" || msg.rawOutput === null) {
+    return "";
+  }
+  const rawOutput = msg.rawOutput as Record<string, unknown>;
+  return typeof rawOutput.output === "string" ? rawOutput.output : "";
 }
 
 /**
@@ -590,7 +641,9 @@ export function getToolsHtml(
           ? "✓"
           : tool.status === "failed"
             ? "✗"
-            : "⋯";
+            : tool.status === "cancelled"
+              ? "×"
+              : "⋯";
       const statusClass = tool.status === "running" ? "running" : "";
       const isExpanded = id === expandedToolId;
       const kindIcon = getToolKindIcon(tool.kind);
@@ -1554,9 +1607,13 @@ export class WebviewController {
   }
 
   private clearChatState(): void {
+    this.hideThinking();
     this.elements.messagesEl.innerHTML = "";
     this.currentAssistantMessage = null;
     this.currentAssistantText = "";
+    this.tools = {};
+    this.hasActiveTool = false;
+    this.expandedToolId = null;
     this.messageTexts.clear();
     this.availableCommands = [];
     this.hasCommandCatalog = false;
@@ -1565,6 +1622,7 @@ export class WebviewController {
     this.hideThought();
     this.hideReplayStatus();
     this.updateViewState();
+    this.updateInputControls();
   }
 
   private showReplayStatus(message = "Restoring conversation…"): void {
@@ -1800,6 +1858,13 @@ export class WebviewController {
         break;
       case "streamEnd": {
         this.hideThinking();
+        if (msg.stopReason === "cancelled") {
+          for (const tool of Object.values(this.tools)) {
+            if (tool.status === "running") {
+              tool.status = "cancelled";
+            }
+          }
+        }
 
         if (
           !this.currentAssistantMessage &&
@@ -1830,8 +1895,14 @@ export class WebviewController {
         }
         break;
       }
-      case "toolCallStart":
-        if (msg.toolCallId && msg.name) {
+      case "toolCallStart": {
+        const toolName =
+          typeof msg.title === "string" && msg.title.length > 0
+            ? msg.title
+            : typeof msg.name === "string" && msg.name.length > 0
+              ? msg.name
+              : null;
+        if (msg.toolCallId && toolName) {
           // Keep a whitespace-only bubble alive until stream end so its tool
           // card renders through the same finalized Markdown path.
           if (this.currentAssistantText.trim()) {
@@ -1841,59 +1912,20 @@ export class WebviewController {
           }
 
           this.tools[msg.toolCallId] = {
-            name: msg.name,
+            name: toolName,
             input: null,
             output: null,
-            status:
-              msg.status === "completed" || msg.status === "failed"
-                ? msg.status
-                : "running",
-            kind: msg.kind,
-            locations: normalizeToolLocations(msg.locations),
+            status: "running",
           };
+          this.applyToolMetadata(msg.toolCallId, msg);
           this.hasActiveTool = true;
           this.showThinking();
         }
         break;
+      }
       case "toolCallUpdate":
         if (msg.toolCallId && this.tools[msg.toolCallId]) {
-          const tool = this.tools[msg.toolCallId];
-
-          if (msg.content !== undefined || msg.rawOutput !== undefined) {
-            let output = "";
-            if (msg.content && msg.content.length > 0) {
-              const firstContent = msg.content[0];
-              if (
-                firstContent.type === "content" &&
-                firstContent.content?.text
-              ) {
-                output = firstContent.content.text;
-              } else if (firstContent.type === "terminal") {
-                output = msg.terminalOutput || "";
-              } else if (firstContent.type === "diff") {
-                output = renderDiff(
-                  firstContent.path,
-                  firstContent.oldText,
-                  firstContent.newText
-                );
-              }
-            }
-            tool.output = output || msg.rawOutput?.output || "";
-          }
-
-          if (msg.rawInput !== undefined) {
-            tool.input =
-              msg.rawInput?.command || msg.rawInput?.description || "";
-          }
-          if (msg.title) tool.name = msg.title;
-          if (msg.kind) tool.kind = msg.kind;
-          if (msg.locations !== undefined) {
-            tool.locations = normalizeToolLocations(msg.locations);
-          }
-          if (msg.status === "completed" || msg.status === "failed") {
-            tool.status = msg.status;
-            this.expandedToolId = msg.toolCallId;
-          }
+          this.applyToolMetadata(msg.toolCallId, msg);
           this.showThinking();
         }
         break;
@@ -2103,6 +2135,37 @@ export class WebviewController {
     }
   }
 
+  private applyToolMetadata(toolCallId: string, msg: ExtensionMessage): void {
+    const tool = this.tools[toolCallId];
+    if (msg.content !== undefined || msg.rawOutput !== undefined) {
+      tool.output = getToolOutput(msg);
+    }
+    if (msg.rawInput !== undefined) {
+      tool.input = getToolInput(msg.rawInput);
+    }
+    const updatedName =
+      typeof msg.title === "string" && msg.title.length > 0
+        ? msg.title
+        : typeof msg.name === "string" && msg.name.length > 0
+          ? msg.name
+          : null;
+    if (updatedName) {
+      tool.name = updatedName;
+    }
+    if (msg.kind) {
+      tool.kind = msg.kind;
+    }
+    if (msg.locations !== undefined) {
+      tool.locations = normalizeToolLocations(msg.locations);
+    }
+    if (msg.status === "completed" || msg.status === "failed") {
+      tool.status = msg.status;
+      this.expandedToolId = toolCallId;
+    } else if (msg.status === "pending" || msg.status === "in_progress") {
+      tool.status = "running";
+    }
+  }
+
   appendThought(text: string): void {
     this.thoughtText += text;
 
@@ -2154,7 +2217,7 @@ export class WebviewController {
         break;
       case "refusal":
         this.addMessage(
-          "The agent refused to continue this turn. Try rephrasing the request.",
+          "The agent refused this turn. This prompt and everything after it will not be included in the next prompt.",
           "error"
         );
         break;
@@ -2174,6 +2237,8 @@ export class WebviewController {
     // whitespace must still keep its completed tool card.
     const toolsHtml = getToolsHtml(this.tools, this.expandedToolId);
     if (!hasText && !toolsHtml) {
+      this.messageTexts.delete(this.currentAssistantMessage);
+      this.currentAssistantMessage.remove();
       return;
     }
 

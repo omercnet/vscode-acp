@@ -262,6 +262,44 @@ suite("ACPClient with Mock Server", () => {
       await assert.rejects(() => client.connect());
       assert.strictEqual(client.getAgentInfo(), null);
     });
+    test("normalizes initialized identity without splitting Unicode", async () => {
+      demoMode = "agent-info-normalization";
+
+      await client.connect();
+
+      assert.deepStrictEqual(client.getAgentInfo(), {
+        name: `${"a".repeat(255)}\u{10437}`,
+        title: "Metadata Agent",
+        version: "1.4.0",
+      });
+    });
+    for (const transportFailure of ["end", "error"] as const) {
+      test(`clears identity when the transport reports ${transportFailure} before process exit`, async () => {
+        demoMode = "agent-info";
+        await client.connect();
+        const previousProcess = mockProcesses[0];
+        const disconnected = new Promise<void>((resolve) => {
+          client.setOnStateChange((state) => {
+            if (state === "disconnected") resolve();
+          });
+        });
+
+        if (transportFailure === "end") {
+          previousProcess.stdout.push(null);
+        } else {
+          previousProcess.stdout.destroy(new Error("Transport failed"));
+        }
+        await disconnected;
+        assert.strictEqual(client.getAgentInfo(), null);
+        assert.strictEqual(client.isConnected(), false);
+
+        demoMode = "default";
+        await client.connect();
+        previousProcess.emit("exit", 0);
+        assert.strictEqual(client.isConnected(), true);
+        assert.strictEqual(client.getAgentInfo(), null);
+      });
+    }
     test("spawns the resolved absolute executable without a shell", async () => {
       let spawned:
         { command: string; args: string[]; options: SpawnOptions } | undefined;

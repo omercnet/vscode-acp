@@ -2253,16 +2253,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else {
         console.log("[Chat] Non-text chunk type:", update.content.type);
       }
-    } else if (update.sessionUpdate === "tool_call") {
-      this.postMessage({
-        type: "toolCallStart",
-        name: update.title,
-        toolCallId: update.toolCallId,
-        kind: update.kind,
-        status: update.status,
-        locations: this.toWebviewToolLocations(update.locations),
-      });
-    } else if (update.sessionUpdate === "tool_call_update") {
+    } else if (
+      update.sessionUpdate === "tool_call" ||
+      update.sessionUpdate === "tool_call_update"
+    ) {
       let terminalOutput: string | undefined;
 
       if (update.content && update.content.length > 0) {
@@ -2275,7 +2269,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       this.postMessage({
-        type: "toolCallUpdate",
+        type:
+          update.sessionUpdate === "tool_call"
+            ? "toolCallStart"
+            : "toolCallUpdate",
+        ...(update.sessionUpdate === "tool_call" && { name: update.title }),
         toolCallId: update.toolCallId,
         title: update.title,
         kind: update.kind,
