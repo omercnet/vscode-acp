@@ -2608,7 +2608,7 @@ suite("ChatViewProvider", () => {
           }),
         });
         fsPromises.realpath = (async (...args: Parameters<typeof realpath>) => {
-          if (args[0] === otherPath && !editDuringLookup) {
+          if (args[0] === other.uri.fsPath && !editDuringLookup) {
             editDuringLookup = true;
             const editTarget = new vscode.WorkspaceEdit();
             editTarget.replace(
@@ -2695,7 +2695,7 @@ suite("ChatViewProvider", () => {
             fsPromises.realpath = (async (
               ...args: Parameters<typeof realpath>
             ) => {
-              if (args[0] === documentPath) {
+              if (args[0] === document?.uri.fsPath) {
                 throw Object.assign(new Error("private path lookup failed"), {
                   code: "EACCES",
                 });
