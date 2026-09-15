@@ -983,6 +983,243 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.sessionCount, 2);
     });
 
+    test("drops a configuration snapshot completed after an agent restart", async () => {
+      let finishConfiguration!: (request: NewSessionRequest) => void;
+      let markConfigurationStarted!: () => void;
+      const configurationStarted = new Promise<void>((resolve) => {
+        markConfigurationStarted = resolve;
+      });
+      const configuration = new Promise<NewSessionRequest>((resolve) => {
+        finishConfiguration = resolve;
+      });
+
+      class RestartedClient extends TestACPClient {
+        public newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+        }
+      }
+
+      const client = new RestartedClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        ensureSession(): Promise<void>;
+        hasSession: boolean;
+      };
+      let requestedCwd = "";
+      let requestedResource: string | undefined;
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async (cwd: string, resource?: vscode.Uri) => {
+          requestedCwd = cwd;
+          requestedResource = resource?.toString();
+          markConfigurationStarted();
+          return configuration;
+        },
+      });
+
+      const starting = lifecycle.ensureSession();
+      await configurationStarted;
+      client.emitStateChange("disconnected");
+      finishConfiguration({ cwd: requestedCwd, mcpServers: [] });
+      await starting;
+
+      assert.strictEqual(client.newSessionCalls, 0);
+      assert.strictEqual(lifecycle.hasSession, false);
+      assert.strictEqual(
+        requestedResource,
+        vscode.workspace.workspaceFolders?.[0]?.uri.toString()
+      );
+    });
+
+    test("does not load a stale folder snapshot after the connection drops", async () => {
+      let finishConfiguration!: (request: NewSessionRequest) => void;
+      let markConfigurationStarted!: () => void;
+      const configurationStarted = new Promise<void>((resolve) => {
+        markConfigurationStarted = resolve;
+      });
+      const configuration = new Promise<NewSessionRequest>((resolve) => {
+        finishConfiguration = resolve;
+      });
+
+      class RestartedLoadClient extends TestACPClient {
+        public loadSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        supportsSessionLoad(): boolean {
+          return true;
+        }
+
+        async loadSession(): Promise<void> {
+          this.loadSessionCalls++;
+        }
+      }
+
+      const exactResource = vscode.workspace.workspaceFolders?.[0]?.uri;
+      assert.ok(exactResource);
+      const client = new RestartedLoadClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        hasSession: boolean;
+        loadStoredSession(session: {
+          sessionId: string;
+          agentId: string;
+          cwd: string;
+          configurationResource: string;
+          createdAt: number;
+          lastUsedAt: number;
+          preview: string;
+          messageCount: number;
+        }): Promise<void>;
+      };
+      lifecycle.hasSession = true;
+      let requestedResource: string | undefined;
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async (_cwd: string, resource?: vscode.Uri) => {
+          requestedResource = resource?.toString();
+          markConfigurationStarted();
+          return configuration;
+        },
+      });
+
+      const loading = lifecycle.loadStoredSession({
+        sessionId: "stored-session",
+        agentId: "test-agent",
+        cwd: "/stored-workspace",
+        configurationResource: exactResource.toString(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Stored conversation",
+        messageCount: 1,
+      });
+      await configurationStarted;
+      client.emitStateChange("disconnected");
+      finishConfiguration({ cwd: "/stored-workspace", mcpServers: [] });
+      await loading;
+
+      assert.strictEqual(requestedResource, exactResource.toString());
+      assert.strictEqual(client.loadSessionCalls, 0);
+      assert.strictEqual(lifecycle.hasSession, false);
+    });
+
+    test("drops an in-flight replacement snapshot after an agent switch", async () => {
+      let finishConfiguration!: (request: NewSessionRequest) => void;
+      let markConfigurationStarted!: () => void;
+      const configurationStarted = new Promise<void>((resolve) => {
+        markConfigurationStarted = resolve;
+      });
+      const configuration = new Promise<NewSessionRequest>((resolve) => {
+        finishConfiguration = resolve;
+      });
+
+      class SwitchedAgentClient extends TestACPClient {
+        public newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+        }
+      }
+
+      const client = new SwitchedAgentClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      Object.defineProperty(provider, "getConfiguredAgent", {
+        value: () => ({}),
+      });
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async () => {
+          markConfigurationStarted();
+          return configuration;
+        },
+      });
+      const lifecycle = provider as unknown as {
+        hasSession: boolean;
+        handleAgentChange(agentId: string): void;
+        handleNewChat(): Promise<void>;
+      };
+      lifecycle.hasSession = true;
+
+      const replacement = lifecycle.handleNewChat();
+      await configurationStarted;
+      lifecycle.handleAgentChange("replacement-agent");
+      finishConfiguration({ cwd: "/replacement", mcpServers: [] });
+      await replacement;
+
+      assert.strictEqual(client.newSessionCalls, 0);
+      assert.strictEqual(lifecycle.hasSession, false);
+    });
+
+    test("does not finish session creation after the provider is disposed", async () => {
+      let finishConfiguration!: (request: NewSessionRequest) => void;
+      let markConfigurationStarted!: () => void;
+      const configurationStarted = new Promise<void>((resolve) => {
+        markConfigurationStarted = resolve;
+      });
+      const configuration = new Promise<NewSessionRequest>((resolve) => {
+        finishConfiguration = resolve;
+      });
+
+      class DisposedClient extends TestACPClient {
+        public newSessionCalls = 0;
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+        }
+      }
+
+      const client = new DisposedClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async () => {
+          markConfigurationStarted();
+          return configuration;
+        },
+      });
+      const lifecycle = provider as unknown as {
+        ensureSession(): Promise<void>;
+        hasSession: boolean;
+      };
+
+      const starting = lifecycle.ensureSession();
+      await configurationStarted;
+      provider.dispose();
+      finishConfiguration({ cwd: "/disposed", mcpServers: [] });
+      await starting;
+
+      assert.strictEqual(client.newSessionCalls, 0);
+      assert.strictEqual(lifecycle.hasSession, false);
+    });
+
     test("queues a prompt until session restore finishes", async () => {
       let finishLoad!: () => void;
       let markLoadStarted!: () => void;
@@ -1669,13 +1906,13 @@ suite("ChatViewProvider", () => {
     });
   });
 
-  test("redacts MCP secrets from stderr, logs, and error messages", () => {
+  test("never includes agent stderr payloads in logs or UI", () => {
     const provider = new ChatViewProvider(
       mockExtensionUri,
       acpClient as unknown as ACPClient,
       memento as unknown as vscode.Memento
     );
-    const secret = "session-secret-value";
+    const secret = "session-}secret-value";
     const messages: Array<Record<string, unknown>> = [];
     const logs: string[] = [];
     Object.defineProperty(provider, "postMessage", {
@@ -1694,10 +1931,7 @@ suite("ChatViewProvider", () => {
         this: ChatViewProvider,
         text: string
       ) => void;
-      handleStderr.call(
-        provider,
-        'ProviderError:\ndata: {providerID: "session-'
-      );
+      handleStderr.call(provider, 'ProviderError:\ndata: {token: "session-}');
       handleStderr.call(provider, 'secret-value", modelID: "model"}');
       const postACPError = Reflect.get(provider, "postACPError") as (
         this: ChatViewProvider,
@@ -1710,11 +1944,21 @@ suite("ChatViewProvider", () => {
     }
 
     const visibleOutput = JSON.stringify(messages);
-    const bufferedStderr = Reflect.get(provider, "stderrBuffer") as string;
+    const emittedLogs = logs.join("\n");
+    for (const fragment of ["session-", "secret-value"]) {
+      assert.ok(!visibleOutput.includes(fragment));
+      assert.ok(!emittedLogs.includes(fragment));
+    }
     assert.ok(!visibleOutput.includes(secret));
-    assert.ok(!logs.join("\n").includes(secret));
-    assert.ok(!bufferedStderr.includes(secret));
+    assert.ok(!emittedLogs.includes(secret));
     assert.match(visibleOutput, /\[redacted\]/);
+    assert.ok(
+      messages.some(
+        (message) =>
+          message.type === "agentError" &&
+          message.text === "Agent reported an error."
+      )
+    );
   });
 
   test("redacts session creation errors without losing RequestError identity", async () => {
@@ -1809,7 +2053,7 @@ suite("ChatViewProvider", () => {
 
     assert.deepStrictEqual(messages.at(-1), {
       type: "agentError",
-      text: "Agent reported an error. See the Extension Host log for details.",
+      text: "Agent reported an error.",
     });
   });
 
@@ -1975,6 +2219,73 @@ suite("ChatViewProvider", () => {
         workspaceState.get("vscode-acp.sessionHistory") ?? [],
         []
       );
+    });
+
+    test("finishes saving a completed turn before releasing the session UI", async () => {
+      let finishSave!: () => void;
+      let markSaveStarted!: () => void;
+      const saveStarted = new Promise<void>((resolve) => {
+        markSaveStarted = resolve;
+      });
+      const saveGate = new Promise<void>((resolve) => {
+        finishSave = resolve;
+      });
+
+      class DelayedWorkspaceState extends TestMemento {
+        async update(key: string, value: unknown): Promise<void> {
+          if (key === "vscode-acp.sessionHistory") {
+            markSaveStarted();
+            await saveGate;
+          }
+          await super.update(key, value);
+        }
+      }
+
+      class ReplyingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        async sendMessage(): Promise<{ stopReason: string }> {
+          this.emitSessionUpdate({
+            sessionId: "test-session",
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              messageId: "reply",
+              content: { type: "text", text: "Saved reply" },
+            },
+          } satisfies SessionNotification);
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      const workspaceState = new DelayedWorkspaceState();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ReplyingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const sessionProvider = provider as unknown as {
+        hasSession: boolean;
+        handleUserMessage(text: string): Promise<void>;
+      };
+      sessionProvider.hasSession = true;
+
+      const prompt = sessionProvider.handleUserMessage("Persist this turn");
+      await saveStarted;
+      assert.ok(!messages.some((message) => message.type === "streamEnd"));
+
+      finishSave();
+      await prompt;
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "streamEnd",
+        stopReason: "end_turn",
+      });
     });
 
     test("rebuilds replayed messages without duplicating chunks", async () => {

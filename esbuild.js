@@ -14,7 +14,7 @@ const esbuildProblemMatcherPlugin = {
         console.error(`✘ [ERROR] ${text}`);
         if (location == null) return;
         console.error(
-          `    ${location.file}:${location.line}:${location.column}:`,
+          `    ${location.file}:${location.line}:${location.column}:`
         );
       });
       console.log("[watch] build finished");
@@ -33,6 +33,9 @@ async function main() {
     platform: "node",
     outfile: "dist/extension.js",
     external: ["vscode"],
+    alias: {
+      "jsonc-parser": require.resolve("jsonc-parser/lib/esm/main.js"),
+    },
     logLevel: "warning",
     plugins: [esbuildProblemMatcherPlugin],
   });

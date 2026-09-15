@@ -519,6 +519,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private conversationGeneration = 0;
   private activePromptGeneration: number | null = null;
   private replayGeneration: number | null = null;
+  private disposed = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private retiringTerminals = new Set<ManagedTerminal>();
   private terminalGeneration = 0;
@@ -585,6 +586,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
 
     this.acpClient.setOnStateChange((state) => {
+      if (this.disposed) {
+        return;
+      }
       if (state === "disconnected" || state === "error") {
         const interruptedReplay = this.isReplaying;
         this.conversationGeneration++;
@@ -995,6 +999,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
       await this.disposeTerminals();
+      if (!this.isCurrentConversation(generation)) {
+        return;
+      }
       this.isReplaying = true;
       this.replayGeneration = generation;
       this.replayMessages = [];
@@ -1002,15 +1009,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       try {
         await this.ensureConnection();
+        if (!this.isCurrentConversation(generation)) {
+          return;
+        }
         const resource = session.configurationResource
           ? vscode.Uri.parse(session.configurationResource)
           : undefined;
+        const parameters = await this.getSessionParameters(
+          session.cwd,
+          resource,
+          generation
+        );
+        if (!parameters || !this.isCurrentConversation(generation)) {
+          return;
+        }
         const request = {
           sessionId: session.sessionId,
-          ...this.getSessionParameters(session.cwd, resource),
+          ...parameters,
         };
         await this.acpClient.loadSession(request);
-        if (generation !== this.conversationGeneration) {
+        if (!this.isCurrentConversation(generation)) {
           return;
         }
         this.activeSessionContext = {
@@ -1049,16 +1067,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.replayMessages = [];
         this.sendSessionMetadata();
       } catch (error) {
-        if (generation !== this.conversationGeneration) {
+        if (!this.isCurrentConversation(generation)) {
           return;
         }
+        const redacted = this.mcpSecretRedactor.redactError(error);
 
         this.isReplaying = false;
         this.replayGeneration = null;
         this.replayMessages = [];
         this.hasSession = hadSession;
         this.hasRestoredModeModel = hadRestoredModeModel;
-        const redacted = this.mcpSecretRedactor.redactError(error);
         this.activeSessionContext = previousSessionContext;
         this.postMessage({
           type: "replayFailed",
@@ -1138,19 +1156,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly mcpSecretRedactor = new McpSecretRedactor();
 
   private handleStderr(text: string): void {
+    if (this.disposed) {
+      return;
+    }
     this.stderrBuffer += text;
 
     const errorMatch = this.stderrBuffer.match(
       /(\w+Error):\s*(\w+)?\s*\n?\s*data:\s*\{([^}]+)\}/
     );
     if (errorMatch) {
-      console.error(
-        "[ACP stderr]",
-        this.mcpSecretRedactor.redact(this.stderrBuffer)
-      );
+      console.error("[ACP stderr] Agent reported structured error output");
       this.postMessage({
         type: "agentError",
-        text: "Agent reported an error. See the Extension Host log for details.",
+        text: "Agent reported an error.",
       });
       this.stderrBuffer = "";
     }
@@ -2159,6 +2177,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    this.conversationGeneration++;
     void this.disposeTerminals();
     this.mcpSecretRedactor.clear();
     this.activeSessionContext = null;
@@ -2271,18 +2294,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return redacted;
   }
 
-  private getSessionParameters(
+  private async getSessionParameters(
     cwd: string,
-    resource?: vscode.Uri
-  ): NewSessionRequest {
-    const configured = getConfiguredSession(
+    resource: vscode.Uri | undefined,
+    generation: number
+  ): Promise<NewSessionRequest | null> {
+    const configured = await getConfiguredSession(
       cwd,
       this.acpClient.getMcpCapabilities(),
       process.env,
       resource
     );
+    if (!this.isCurrentConversation(generation)) {
+      return null;
+    }
     this.mcpSecretRedactor.add(configured.sensitiveValues);
     return configured.parameters;
+  }
+
+  private isCurrentConversation(generation: number): boolean {
+    return !this.disposed && generation === this.conversationGeneration;
   }
   private setSessionTransitionInputPaused(paused: boolean): void {
     this.sessionTransitionInputPaused = paused;
@@ -2368,12 +2399,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async createSessionWithAuthentication(
-    request: NewSessionRequest
+    request: NewSessionRequest,
+    generation: number
   ): Promise<void> {
     try {
       await this.acpClient.newSession(request);
     } catch (error) {
-      if (describeACPError(error).kind !== "authentication-required") {
+      if (
+        !this.isCurrentConversation(generation) ||
+        describeACPError(error).kind !== "authentication-required"
+      ) {
         throw error;
       }
 
@@ -2392,10 +2427,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } finally {
         this.setSessionTransitionInputPaused(false);
       }
+      if (!this.isCurrentConversation(generation)) {
+        return;
+      }
       if (!methodId) {
         throw new Error("Authentication cancelled");
       }
       await this.acpClient.authenticate(methodId, selectedGeneration);
+      if (!this.isCurrentConversation(generation)) {
+        return;
+      }
       await this.acpClient.newSession(request);
     }
   }
@@ -2427,7 +2468,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    if (this.hasSession) {
+    if (this.hasSession || this.disposed) {
       return;
     }
     if (!this.sessionStart) {
@@ -2437,17 +2478,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ? "Starting session…"
         : "Connecting to agent…";
       this.sessionStart = this.runSessionTransition(label, async () => {
-        await this.ensureConnection();
-        if (!this.hasSession) {
+        const generation = this.conversationGeneration;
+        try {
+          await this.ensureConnection();
+          if (!this.isCurrentConversation(generation) || this.hasSession) {
+            return;
+          }
           const resource = workspaceFolder?.uri;
-          const request = this.getSessionParameters(workingDir, resource);
-          await this.createSessionWithAuthentication(request);
+          const request = await this.getSessionParameters(
+            workingDir,
+            resource,
+            generation
+          );
+          if (
+            !request ||
+            !this.isCurrentConversation(generation) ||
+            this.hasSession
+          ) {
+            return;
+          }
+          await this.createSessionWithAuthentication(request, generation);
+          if (!this.isCurrentConversation(generation)) {
+            return;
+          }
           this.activeSessionContext = {
             cwd: workingDir,
             configurationResource: resource?.toString(),
           };
           this.hasSession = true;
           this.sendSessionMetadata();
+        } catch (error) {
+          if (!this.isCurrentConversation(generation)) {
+            return;
+          }
+          throw this.mcpSecretRedactor.redactError(error);
         }
       }).finally(() => {
         this.sessionStart = null;
@@ -2521,6 +2585,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
+      const preview =
+        text || attachments.map((attachment) => attachment.name).join(", ");
+      try {
+        await this.saveCurrentSession(preview);
+      } catch (error) {
+        console.warn("[Chat] Failed to save session metadata:", error);
+      }
+
       if (this.streamingText.length === 0) {
         console.warn("[Chat] No streaming text received from agent");
         if (this.stderrBuffer.length > 0) {
@@ -2538,11 +2610,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           stopReason: response.stopReason,
         });
       }
-      const preview =
-        text || attachments.map((attachment) => attachment.name).join(", ");
-      void this.saveCurrentSession(preview).catch((error) =>
-        console.warn("[Chat] Failed to save session metadata:", error)
-      );
       this.streamingText = "";
     } catch (error) {
       if (!promptStarted) {
@@ -2583,11 +2650,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private handleAgentChange(agentId: string): void {
     const agent = this.getConfiguredAgent(agentId);
     if (agent) {
+      this.conversationGeneration++;
+      this.mcpSecretRedactor.clear();
       this.expirePermissionRequests();
       void this.disposeTerminals();
       this.acpClient.setAgent(agent);
-      this.mcpSecretRedactor.clear();
-      this.conversationGeneration++;
       this.isReplaying = false;
       this.replayGeneration = null;
       this.replayMessages = [];
@@ -2635,9 +2702,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.streamingText = "";
 
     if (!this.acpClient.isConnected() && !this.sessionTransition) {
+      const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
       await this.disposeTerminals();
-      this.conversationGeneration++;
+      if (!this.isCurrentConversation(generation)) {
+        return;
+      }
       this.isReplaying = false;
       this.replayGeneration = null;
       this.replayMessages = [];
@@ -2655,22 +2725,35 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
       const hadRestoredModeModel = this.hasRestoredModeModel;
+      const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
       await this.disposeTerminals();
-      this.conversationGeneration++;
+      if (!this.isCurrentConversation(generation)) {
+        return;
+      }
       this.isReplaying = false;
       this.replayGeneration = null;
       this.replayMessages = [];
 
       try {
         await this.ensureConnection();
+        if (!this.isCurrentConversation(generation)) {
+          return;
+        }
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
-        const request = this.getSessionParameters(
+        const request = await this.getSessionParameters(
           workingDir,
-          workspaceFolder?.uri
+          workspaceFolder?.uri,
+          generation
         );
-        await this.createSessionWithAuthentication(request);
+        if (!request || !this.isCurrentConversation(generation)) {
+          return;
+        }
+        await this.createSessionWithAuthentication(request, generation);
+        if (!this.isCurrentConversation(generation)) {
+          return;
+        }
         this.hasSession = true;
         this.activeSessionContext = {
           cwd: workingDir,
@@ -2681,11 +2764,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postMessage({ type: "chatCleared" });
         this.sendSessionMetadata();
       } catch (error) {
+        if (!this.isCurrentConversation(generation)) {
+          return;
+        }
+        const redacted = this.mcpSecretRedactor.redactError(error);
         this.hasSession = hadSession;
         this.hasRestoredModeModel = hadRestoredModeModel;
-        this.postACPError("Failed to create new session", error);
-        this.sendSessionMetadata();
         this.activeSessionContext = previousSessionContext;
+        this.postACPError("Failed to create new session", redacted);
+        this.sendSessionMetadata();
       }
     });
   }

@@ -170,7 +170,7 @@
           "type": "array",
           "scope": "resource",
           "default": [],
-          "markdownDescription": "MCP servers connected when ACP sessions are created or loaded. Use `${env:NAME}` only in environment variable and HTTP header values; references are resolved when a session starts.",
+          "markdownDescription": "MCP servers connected when ACP sessions are created or loaded. User settings have the lowest precedence, followed by workspace and workspace-folder settings; a trusted `.vscode/mcp.json` has highest precedence by case-insensitive server name. Use `${env:NAME}` only in environment variable and HTTP header values; references are resolved when a session starts.",
           "items": {
             "oneOf": [
               {
@@ -396,6 +396,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
     "dompurify": "^3.4.15",
+    "jsonc-parser": "^3.3.1",
     "marked": "^17.0.1",
     "vscode-jsonrpc": "^8.2.0"
   },
