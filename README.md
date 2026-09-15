@@ -20,7 +20,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
 - **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user or workspace settings
-- **📎 File Attachments** — Reference current or workspace files without embedding their contents
+- **📎 Rich Attachments**: Send file links, embedded text context, and image prompts through one capability-aware attachment flow
 
 ## Requirements
 
@@ -52,9 +52,15 @@ You need at least one ACP-compatible agent installed:
 
 If an agent requires ACP authentication, choose one of its advertised sign-in methods. The agent owns that flow; VSCode ACP does not ask for, store, or log API keys or other credentials.
 
-### File Attachments
+### File and Image Attachments
 
-Use the paperclip button beside the prompt to select an open workspace file or browse for files inside a trusted local workspace. Selected files appear as removable chips and are sent as ACP `resource_link` blocks with their canonical file URI and name, plus MIME type and size when available. The extension stats the selected path but does not read or embed file contents when attaching it; the selected agent must be able to access the referenced URI.
+Use the paperclip button beside the prompt to select an open workspace file, including an image preview tab, or browse for files inside a trusted local workspace. You can also paste images or drop image and text files onto the composer. Selected items use the same removable, keyboard-accessible chips and retain their order after the prompt text.
+
+The extension follows the connected agent's ACP `promptCapabilities`: text files use embedded `resource` blocks, including current unsaved editor contents, only when `embeddedContext` is advertised; otherwise selected workspace files remain `resource_link` blocks. Supported PNG, JPEG, GIF, and WebP files use `image` blocks only when `image` is advertised. Pasted or dropped in-memory content is rejected with a visible error when the required capability is absent because it has no safe link fallback.
+
+Only explicitly selected files inside a trusted local workspace are read. Symlink escapes and replacement of an already-authorized workspace root are rejected. Embedded text is limited to 1 MiB per file, images to 5 MiB each, all inline content to 10 MiB per prompt, and every prompt to 10 attachments. Oversized picked files fall back to links; oversized pasted or dropped content is rejected. Image payloads must match their declared raster format; embedded resources remain UTF-8 text rather than an alternate image transport.
+
+You can keep typing while attachments are prepared, but Send waits until their chips are ready. If prompt preparation fails, the text and every selected attachment are restored for retry. Switching conversations discards stale preparation results. Replayed attachments use display-only chips and do not become new draft attachments.
 
 ### Session History
 

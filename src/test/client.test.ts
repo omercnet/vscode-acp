@@ -411,6 +411,18 @@ suite("ACPClient with Mock Server", () => {
       assert.deepStrictEqual(client.getMcpCapabilities(), {});
     });
 
+    test("exposes only explicitly advertised prompt capabilities", async () => {
+      demoMode = "rich-attachments";
+      await client.connect();
+
+      assert.deepStrictEqual(client.getPromptCapabilities(), {
+        image: true,
+        embeddedContext: true,
+      });
+      client.dispose();
+      assert.deepStrictEqual(client.getPromptCapabilities(), {});
+    });
+
     test("rejects an unsupported negotiated protocol version", async () => {
       demoMode = "invalid-version";
 
@@ -984,6 +996,94 @@ suite("ACPClient with Mock Server", () => {
           name: "file.ts",
           mimeType: "text/typescript",
           size: 321,
+        },
+      ]);
+    });
+
+    test("sends embedded resource and image blocks only with negotiated support", async () => {
+      demoMode = "rich-attachments";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.sendMessage("Inspect", [
+        {
+          id: "context",
+          uri: "file:///test/dir/context.ts",
+          name: "context.ts",
+          mimeType: "text/typescript",
+          size: 20,
+          source: "file",
+          kind: "file",
+          transport: "resource",
+          payload: { type: "text", text: "const unsaved = true;" },
+        },
+        {
+          id: "image",
+          uri: "vscode-acp-attachment:///memory/image/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          payload: { type: "image", data: "iVBORw0KGgo=" },
+        },
+      ]);
+
+      const process = mockProcesses.at(-1);
+      assert.ok(process);
+      assert.deepStrictEqual(process.server.lastPrompt, [
+        { type: "text", text: "Inspect" },
+        {
+          type: "resource",
+          resource: {
+            uri: "file:///test/dir/context.ts",
+            mimeType: "text/typescript",
+            text: "const unsaved = true;",
+          },
+        },
+        {
+          type: "image",
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
+        },
+      ]);
+    });
+
+    test("does not send optional content blocks without advertised support", async () => {
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.sendMessage("Inspect", [
+        {
+          id: "context",
+          uri: "file:///test/dir/context.ts",
+          name: "context.ts",
+          mimeType: "text/typescript",
+          source: "file",
+          payload: { type: "text", text: "secret context" },
+        },
+        {
+          id: "image",
+          uri: "vscode-acp-attachment:///memory/image/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          payload: { type: "image", data: "iVBORw0KGgo=" },
+        },
+      ]);
+
+      const process = mockProcesses.at(-1);
+      assert.ok(process);
+      assert.deepStrictEqual(process.server.lastPrompt, [
+        { type: "text", text: "Inspect" },
+        {
+          type: "resource_link",
+          uri: "file:///test/dir/context.ts",
+          name: "context.ts",
+          mimeType: "text/typescript",
         },
       ]);
     });
