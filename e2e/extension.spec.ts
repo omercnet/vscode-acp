@@ -25,6 +25,18 @@ test.describe("VSCode ACP Extension", () => {
     const welcomeText = frame.locator("text=Welcome to VSCode ACP");
     await expect(welcomeText).toBeVisible({ timeout: 15000 });
   });
+  test("chat defaults to the secondary side bar", async ({ window }) => {
+    await openACPView(window);
+
+    const webview = window.locator("iframe.webview").first();
+    await expect(webview).toBeVisible({ timeout: 15000 });
+    const bounds = await webview.boundingBox();
+    const viewport = window.viewportSize();
+
+    expect(bounds).not.toBeNull();
+    expect(viewport).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThan(viewport!.width / 2);
+  });
 
   test("sidebar shows Connect button", async ({ window }) => {
     await openACPView(window);

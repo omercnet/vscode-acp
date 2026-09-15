@@ -6,8 +6,11 @@ import type { AgentCommandResolutionOptions } from "./acp/agentCommand";
 let acpClient: ACPClient | undefined;
 let chatProvider: ChatViewProvider | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
+const CHAT_VIEW_LOCATION_INITIALIZED = "vscode-acp.chatViewSecondarySidebarV1";
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(
+  context: vscode.ExtensionContext
+): Promise<void> {
   console.log("VSCode ACP extension is now active");
 
   context.subscriptions.push(
@@ -59,6 +62,13 @@ export function activate(context: vscode.ExtensionContext) {
       }
     )
   );
+  if (!context.globalState.get<boolean>(CHAT_VIEW_LOCATION_INITIALIZED)) {
+    await vscode.commands.executeCommand("vscode.moveViews", {
+      viewIds: [ChatViewProvider.viewType],
+      destinationId: "workbench.panel.chat",
+    });
+    await context.globalState.update(CHAT_VIEW_LOCATION_INITIALIZED, true);
+  }
 
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.startChat", async () => {
