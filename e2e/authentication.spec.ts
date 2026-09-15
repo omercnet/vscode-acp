@@ -7,6 +7,7 @@ import {
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -186,7 +187,7 @@ test("authenticates through the Extension Development Host before creating a ses
     ]);
     expect(requests[2].params).toEqual({ methodId: "browser" });
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
   }
 });

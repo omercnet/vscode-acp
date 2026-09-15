@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -22,10 +23,12 @@ const BIN_DIR = join(DEMO_DIR, "bin");
 const AGENT_PATH = join(BIN_DIR, "opencode");
 const ALLOWED_PATH = join(DEMO_DIR, "allowed.txt");
 const ALLOWED_WRITE_PATH = join(DEMO_DIR, "written.txt");
+const DIRTY_PATH = join(DEMO_DIR, "filesystem-dirty-demo.txt");
 
 const AGENT_SOURCE = `#!/usr/bin/env node
 const allowedPath = process.env.VSCODE_ACP_ALLOWED_PATH;
 const allowedWritePath = process.env.VSCODE_ACP_ALLOWED_WRITE_PATH;
+const dirtyPath = process.env.VSCODE_ACP_DIRTY_PATH;
 const deniedPath = process.env.VSCODE_ACP_DENIED_PATH;
 const pending = new Map();
 let nextRequestId = 1000;
@@ -72,6 +75,15 @@ async function runFilesystemDemo(sessionId, promptId) {
       } catch (error) {
         update(sessionId, "denied-write", "\\n\\nDenied external write: " + JSON.stringify(error));
       }
+
+      try {
+        await requestClient("fs/write_text_file", { sessionId, path: dirtyPath, content: "overwritten-by-agent" });
+        update(sessionId, "dirty-write", "\\n\\nDirty editor write: unexpectedly allowed");
+      } catch (error) {
+        update(sessionId, "dirty-write", "\\n\\nDirty editor write: " + JSON.stringify(error));
+      }
+      const dirtyDisk = await requestClient("fs/read_text_file", { sessionId, path: dirtyPath });
+      update(sessionId, "dirty-disk", "\\n\\nDirty file on disk: " + dirtyDisk.content);
     } else {
       update(sessionId, "write-unavailable", "\\n\\nWorkspace write capability: unavailable on this host");
     }
@@ -128,7 +140,7 @@ async function launchHost(deniedPath: string) {
       "--skip-welcome",
       "--disable-telemetry",
       "--window-position=-2000,-2000",
-      PROJECT_ROOT,
+      DEMO_DIR,
     ],
     timeout: 60000,
     env: {
@@ -137,6 +149,7 @@ async function launchHost(deniedPath: string) {
       VSCODE_ACP_TEST_AGENT_COMMAND: AGENT_PATH,
       VSCODE_ACP_ALLOWED_PATH: ALLOWED_PATH,
       VSCODE_ACP_ALLOWED_WRITE_PATH: ALLOWED_WRITE_PATH,
+      VSCODE_ACP_DIRTY_PATH: DIRTY_PATH,
       VSCODE_ACP_DENIED_PATH: deniedPath,
       VSCODE_SKIP_PRELAUNCH: "1",
     },
@@ -182,13 +195,33 @@ async function focusChat(window: Page): Promise<Frame> {
   throw new Error("ACP chat frame disappeared after becoming ready");
 }
 
-test("allows workspace filesystem access and blocks escapes in an Extension Development Host", async () => {
+async function makeEditorDirty(window: Page): Promise<void> {
+  await window.waitForLoadState("domcontentloaded");
+  await window.keyboard.press(`${cmdOrCtrl()}+P`);
+  const quickInput = window.locator(".quick-input-widget input");
+  await expect(quickInput).toBeVisible({ timeout: 30000 });
+  await quickInput.fill("dirty.txt");
+  const file = window
+    .locator('.quick-input-list [role="option"]')
+    .filter({ hasText: "filesystem-dirty-demo.txt" })
+    .first();
+  await expect(file).toBeVisible({ timeout: 30000 });
+  await file.click();
+  await expect(
+    window.getByRole("tab", { name: /filesystem-dirty-demo\.txt/ })
+  ).toBeVisible({ timeout: 30000 });
+  await window.keyboard.press(`${cmdOrCtrl()}+A`);
+  await window.keyboard.type("unsaved-user-edit");
+}
+
+test("allows contained access, blocks escapes, and preserves dirty editors", async () => {
   const deniedRoot = await mkdtemp(join(tmpdir(), "vscode-acp-denied-demo-"));
   const deniedPath = join(deniedRoot, "secret.txt");
   await rm(DEMO_DIR, { recursive: true, force: true });
   await mkdir(BIN_DIR, { recursive: true });
   await writeFile(ALLOWED_PATH, "workspace-content");
   await writeFile(deniedPath, "outside-secret");
+  await writeFile(DIRTY_PATH, "saved-before-edit");
   await writeFile(AGENT_PATH, AGENT_SOURCE, { mode: 0o755 });
   await mkdir(SCREENSHOTS_DIR, { recursive: true });
 
@@ -197,6 +230,14 @@ test("allows workspace filesystem access and blocks escapes in an Extension Deve
     const window = await host.firstWindow();
     const frame = await focusChat(window);
     await expect(frame.locator("#connect-btn")).toBeHidden({ timeout: 30000 });
+    const builtInChat = window
+      .locator('.pane-header[aria-expanded="true"]')
+      .filter({ hasText: /^Chat$/ });
+    if (await builtInChat.count()) {
+      await builtInChat.click();
+    }
+    await makeEditorDirty(window);
+    await expect(frame.locator("#input")).toBeVisible({ timeout: 30000 });
     await frame.locator("#input").fill("Exercise filesystem boundary");
     await frame.locator("#input").press("Enter");
 
@@ -220,18 +261,39 @@ test("allows workspace filesystem access and blocks escapes in an Extension Deve
       expect(await readFile(ALLOWED_WRITE_PATH, "utf8")).toBe(
         "written-by-agent"
       );
+      await expect(frame.getByText(/Dirty editor write:/)).toContainText(
+        "ACP write refused because the file has unsaved editor changes. Save or revert the file, then retry."
+      );
+      await expect(
+        frame.getByText("Dirty file on disk: saved-before-edit")
+      ).toBeVisible();
+      expect(await readFile(DIRTY_PATH, "utf8")).toBe("saved-before-edit");
     }
     // Denials must not echo the path the agent was refused.
     await expect(frame.locator("#messages")).not.toContainText(deniedPath);
+    await expect(
+      window
+        .locator(".monaco-editor .view-lines")
+        .filter({ hasText: "unsaved-user-edit" })
+    ).toBeVisible();
+    await expect(frame.locator("#send")).toBeEnabled({ timeout: 30000 });
 
-    await frame.locator("#messages").screenshot({
+    const messagesBox = await frame.locator("#messages").boundingBox();
+    expect(messagesBox).not.toBeNull();
+    await window.screenshot({
       path: join(SCREENSHOTS_DIR, "filesystem-boundary.png"),
+      clip: messagesBox!,
+      animations: "disabled",
+    });
+    await window.screenshot({
+      path: join(SCREENSHOTS_DIR, "filesystem-safety-dirty-editor.png"),
+      animations: "disabled",
     });
 
     // A denied write never touched the outside target.
     expect(await readFile(deniedPath, "utf8")).toBe("outside-secret");
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
     await rm(deniedRoot, { recursive: true, force: true });
   }

@@ -8,7 +8,12 @@ import {
 } from "@playwright/test";
 import { join } from "path";
 import { mkdir, rm, writeFile } from "fs/promises";
-import { findVSCodeExecutable, cmdOrCtrl, PROJECT_ROOT } from "./utils";
+import {
+  closeVSCode,
+  findVSCodeExecutable,
+  cmdOrCtrl,
+  PROJECT_ROOT,
+} from "./utils";
 
 const USER_DATA_DIR = join(PROJECT_ROOT, ".vscode-test/user-data-e2e");
 const EXTENSIONS_DIR = join(PROJECT_ROOT, ".vscode-test/extensions-e2e");
@@ -64,7 +69,7 @@ export const test = base.extend<TestFixtures>({
     });
 
     await use(electronApp);
-    await electronApp.close();
+    await closeVSCode(electronApp);
   },
 
   window: async ({ vscode }, use) => {

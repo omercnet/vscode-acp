@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
-import { realpath } from "fs/promises";
-import { isAbsolute, join, relative, resolve } from "path";
+import { realpath, stat } from "fs/promises";
+import { isAbsolute, join, parse, relative, resolve } from "path";
 import {
   ACPClient,
   describeACPError,
@@ -24,9 +24,12 @@ import {
 import { selectAgentPaths } from "../acp/agentPaths";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
+  canonicalizeUnder,
   openTrustedWorkspaceFile,
   readOpenedWorkspaceFile,
+  writeOpenedWorkspaceFile,
   workspaceFileCapabilities,
+  type OpenedWorkspaceFile,
 } from "../acp/workspace-files";
 import type {
   AuthMethodId,
@@ -55,6 +58,9 @@ import {
   isAttachmentMetadataValid,
   type FileAttachment,
 } from "../shared/attachments";
+
+export const DIRTY_EDITOR_WRITE_CONFLICT =
+  "ACP write refused because the file has unsaved editor changes. Save or revert the file, then retry.";
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
@@ -1179,13 +1185,88 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return { content };
   }
 
+  private async assertNoDirtyEditor(
+    canonicalPath: string,
+    opened?: OpenedWorkspaceFile
+  ): Promise<void> {
+    const openedStats = await opened?.fileHandle.stat();
+    const checked = new Set<vscode.TextDocument>();
+    for (;;) {
+      const documents = vscode.workspace.textDocuments.filter(
+        (document) =>
+          document.isDirty &&
+          document.uri.scheme === "file" &&
+          !checked.has(document)
+      );
+      if (documents.length === 0) {
+        return;
+      }
+      for (const document of documents) {
+        const documentPath = document.uri.fsPath;
+        if (
+          documentPath === canonicalPath ||
+          documentPath === opened?.requestUri.fsPath
+        ) {
+          throw new Error(DIRTY_EDITOR_WRITE_CONFLICT);
+        }
+        let resolvedPath: string;
+        let documentStats;
+        try {
+          const root = parse(documentPath).root;
+          // Reuse missing-path resolution so deleted files and parents still
+          // conflict through directory aliases before a write recreates them.
+          resolvedPath = await canonicalizeUnder(
+            root,
+            relative(root, documentPath)
+          );
+          if (openedStats) {
+            documentStats = await stat(documentPath).catch(
+              (error: NodeJS.ErrnoException) => {
+                if (error.code !== "ENOENT") {
+                  throw error;
+                }
+                return undefined;
+              }
+            );
+          }
+        } catch {
+          throw new Error(
+            "ACP write refused because an unsaved editor file could not be identified. Save or close that editor, then retry."
+          );
+        }
+        if (
+          resolvedPath === canonicalPath ||
+          (openedStats &&
+            documentStats &&
+            openedStats.ino !== 0 &&
+            documentStats.ino !== 0 &&
+            openedStats.ino === documentStats.ino &&
+            openedStats.dev === documentStats.dev)
+        ) {
+          throw new Error(DIRTY_EDITOR_WRITE_CONFLICT);
+        }
+        checked.add(document);
+      }
+      // Identity lookup yields to editor events. Check documents that became
+      // dirty (or were opened) while the preceding batch was being resolved.
+    }
+  }
+
   private async handleWriteTextFile(
     params: WriteTextFileRequest
   ): Promise<WriteTextFileResponse> {
-    const opened = await this.openWorkspaceFile(params.path, "write");
+    const opened = await this.openWorkspaceFile(
+      params.path,
+      "write",
+      vscode.workspace,
+      undefined,
+      (canonicalPath) => this.assertNoDirtyEditor(canonicalPath)
+    );
     try {
-      await opened.fileHandle.writeFile(
-        new TextEncoder().encode(params.content)
+      await writeOpenedWorkspaceFile(
+        opened,
+        new TextEncoder().encode(params.content),
+        () => this.assertNoDirtyEditor(opened.canonicalPath, opened)
       );
     } finally {
       await opened.fileHandle.close();
