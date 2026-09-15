@@ -91,11 +91,19 @@ function normalizeAgentInfo(value: unknown): acp.Implementation | null {
   ) {
     return null;
   }
-  const normalizeField = (field: string): string =>
-    field
-      .replace(AGENT_INFO_CONTROL_CHARACTERS, " ")
-      .trim()
-      .slice(0, MAX_AGENT_INFO_FIELD_LENGTH);
+  const normalizeField = (field: string): string => {
+    const sanitized = field.replace(AGENT_INFO_CONTROL_CHARACTERS, " ").trim();
+    let normalized = "";
+    let length = 0;
+    for (const character of sanitized) {
+      if (length === MAX_AGENT_INFO_FIELD_LENGTH) {
+        break;
+      }
+      normalized += character;
+      length++;
+    }
+    return normalized;
+  };
   const name = normalizeField(candidate.name);
   const version = normalizeField(candidate.version);
   if (!name || !version) {
@@ -613,6 +621,11 @@ export class ACPClient {
         })
         .connect(stream);
       this.connection = connection;
+      void connection.closed.then(() => {
+        if (this.connection === connection && this.state === "connected") {
+          this.dispose();
+        }
+      });
 
       const clientCapabilities: acp.ClientCapabilities = {};
       const readTextFile =
@@ -649,7 +662,8 @@ export class ACPClient {
       if (
         attemptGeneration !== this.connectionGeneration ||
         this.connection !== connection ||
-        this.process !== child
+        this.process !== child ||
+        connection.signal.aborted
       ) {
         throw new Error("Connection attempt was disposed");
       }

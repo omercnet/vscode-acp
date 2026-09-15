@@ -65,6 +65,7 @@ export type DemoMode =
   | ProtocolErrorDemoMode
   | AuthenticationDemoMode
   | "agent-info"
+  | "agent-info-normalization"
   | "ansi"
   | "capabilities"
   | "deferred-config"
@@ -245,6 +246,13 @@ export class MockACPServer {
                 name: "metadata-agent",
                 title: "Metadata Agent",
                 version: "1.4.0",
+              },
+            }),
+            ...(this.demoMode === "agent-info-normalization" && {
+              agentInfo: {
+                name: `\u0000${"a".repeat(255)}\u{10437}ignored`,
+                title: "\u0000Metadata\u202eAgent\u0007",
+                version: "\u00001.4.0\u0007",
               },
             }),
           });

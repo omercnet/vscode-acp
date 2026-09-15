@@ -48,6 +48,8 @@ process.stdin.on("data", (chunk) => {
         title: "Inspect source",
         kind: "read",
         status: "pending",
+        rawInput: { description: "Inspect initialized source metadata" },
+        content: [{ type: "content", content: { type: "text", text: "Inspected source metadata." } }],
         locations: [{ path: ${JSON.stringify(INITIAL_LOCATION)}, line: 5 }]
       });
       update(params.sessionId, {
@@ -59,8 +61,7 @@ process.stdin.on("data", (chunk) => {
       update(params.sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId: "inspect-source",
-        status: "completed",
-        rawOutput: { output: "Inspected source metadata." }
+        status: "completed"
       });
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "max_tokens" } });
     } else if (message.id !== undefined) {
@@ -116,6 +117,14 @@ async function focusChat(window: Page) {
   await window.waitForTimeout(300);
   await window.keyboard.press("Enter");
   await window.waitForTimeout(3000);
+  const builtInChat = window
+    .locator(".pane-header")
+    .filter({ hasText: /^Chat$/ });
+  await expect(builtInChat).toBeVisible();
+  if ((await builtInChat.getAttribute("aria-expanded")) === "true") {
+    await builtInChat.click();
+  }
+  await expect(builtInChat).toHaveAttribute("aria-expanded", "false");
   return window
     .frameLocator("iframe.webview")
     .first()
@@ -141,13 +150,23 @@ test("shows protocol metadata and opens a trusted tool location", async () => {
     await frame.locator("#send").click();
 
     const location = frame.locator(".tool-location-link");
-    await expect(location).toHaveText("src/extension.ts:10", {
+    await expect(location).toHaveText(`${join("src", "extension.ts")}:10`, {
       timeout: 15000,
     });
     await expect(frame.locator(".message.warning")).toHaveText(
       "Response stopped because the agent reached its token limit."
     );
     await expect(frame.locator(".message.assistant .tool-item")).toBeVisible();
+    await expect(frame.locator(".message.assistant .tool-input")).toContainText(
+      "Inspect initialized source metadata"
+    );
+    await expect(frame.locator(".message.assistant .tool-output")).toHaveText(
+      "Inspected source metadata."
+    );
+    await expect(frame.locator("#status-text")).toBeInViewport({ ratio: 1 });
+    await expect(frame.locator(".message.warning")).toBeInViewport({
+      ratio: 1,
+    });
     await window.screenshot({
       path: join(SCREENSHOTS_DIR, "protocol-metadata-turn.png"),
     });
