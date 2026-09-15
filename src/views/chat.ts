@@ -2682,10 +2682,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.postMessage({ type: "restoreInput", text });
       }
       if (queuedGeneration === this.conversationGeneration) {
-        const retryAttachments =
-          attachments.length > 0 ? attachments : selectedAttachments;
         const metadata: FileAttachment[] = [];
-        for (const attachment of retryAttachments) {
+        for (const attachment of selectedAttachments) {
           if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
             break;
           }

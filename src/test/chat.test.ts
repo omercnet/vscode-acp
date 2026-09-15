@@ -5682,5 +5682,83 @@ suite("ChatViewProvider", () => {
         { type: "filesAttached", attachments: [attachment] }
       );
     });
+
+    test("restores every selected attachment when preparation fails partway", async () => {
+      const originalPrepare = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(originalPrepare);
+      let preparationCount = 0;
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: async (attachment: FileAttachment) => {
+          preparationCount += 1;
+          if (preparationCount === 2) {
+            throw new Error("preparation failed");
+          }
+          return { attachment, inlineBytes: 0 };
+        },
+      });
+
+      class ConnectedClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          new ConnectedClient() as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          hasSession: boolean;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(text: string, ids: string[]): Promise<void>;
+        };
+        internals.hasSession = true;
+        const attachments: FileAttachment[] = [
+          {
+            id: "att-first",
+            uri: "file:///workspace/first.ts",
+            name: "first.ts",
+          },
+          {
+            id: "att-second",
+            uri: "file:///workspace/second.ts",
+            name: "second.ts",
+          },
+        ];
+        for (const attachment of attachments) {
+          internals.pendingAttachments.set(attachment.id, attachment);
+        }
+
+        await internals.handleUserMessage(
+          "Review",
+          attachments.map(({ id }) => id)
+        );
+
+        assert.deepStrictEqual(
+          Array.from(internals.pendingAttachments.keys()),
+          attachments.map(({ id }) => id)
+        );
+        assert.deepStrictEqual(
+          messages.find((message) => message.type === "filesAttached"),
+          { type: "filesAttached", attachments }
+        );
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "prepareFileAttachment",
+          originalPrepare
+        );
+      }
+    });
   });
 });
