@@ -2,8 +2,10 @@ import * as path from "path";
 import * as vscode from "vscode";
 import * as acp from "@agentclientprotocol/sdk";
 import {
+  createScanner,
   getNodeValue,
   parseTree,
+  SyntaxKind,
   type Node as JsonNode,
   type ParseError,
 } from "jsonc-parser";
@@ -41,6 +43,7 @@ const MAX_STRING_LENGTH = 8_192;
 const MAX_ARGS = 64;
 const MAX_VALUES = 64;
 const MAX_CONFIGURATION_BYTES = 256 * 1024;
+const MAX_JSON_DEPTH = 16;
 const MAX_HEADER_BYTES = 64 * 1024;
 const ENV_REFERENCE = /\$\{env:([^}]*)\}/g;
 const INTERPOLATION = /\$\{[^}]*\}/;
@@ -52,14 +55,7 @@ export function getMcpConfigurationResource(
   workspaceFolders = vscode.workspace.workspaceFolders,
   resource?: vscode.Uri
 ): vscode.Uri {
-  const exactResource = resource
-    ? workspaceFolders?.find(
-        (folder) => folder.uri.toString() === resource.toString()
-      )
-    : undefined;
-  if (exactResource) {
-    return exactResource.uri;
-  }
+  if (resource) return resource;
 
   const cwdMatches =
     workspaceFolders?.filter((folder) => folder.uri.fsPath === cwd) ?? [];
@@ -144,6 +140,41 @@ export function parseMcpProjectConfiguration(contents: Uint8Array): unknown[] {
       `${MCP_PROJECT_CONFIG_PATH} must contain valid UTF-8`
     );
   }
+  const scanner = createScanner(text, true);
+  const containers: SyntaxKind[] = [];
+  for (
+    let token = scanner.scan();
+    token !== SyntaxKind.EOF;
+    token = scanner.scan()
+  ) {
+    if (
+      token === SyntaxKind.OpenBraceToken ||
+      token === SyntaxKind.OpenBracketToken
+    ) {
+      if (containers.length === MAX_JSON_DEPTH) {
+        fail(
+          "MCP_CONFIG_UNSAFE",
+          `${MCP_PROJECT_CONFIG_PATH} exceeds the nesting limit at offset ${scanner.getTokenOffset()}`
+        );
+      }
+      containers.push(token);
+    } else if (
+      token === SyntaxKind.CloseBraceToken ||
+      token === SyntaxKind.CloseBracketToken
+    ) {
+      const opening = containers.pop();
+      const expected =
+        token === SyntaxKind.CloseBraceToken
+          ? SyntaxKind.OpenBraceToken
+          : SyntaxKind.OpenBracketToken;
+      if (opening !== expected) {
+        fail(
+          "MCP_CONFIG_MALFORMED",
+          `${MCP_PROJECT_CONFIG_PATH} contains invalid JSONC at offset ${scanner.getTokenOffset()}`
+        );
+      }
+    }
+  }
   const errors: ParseError[] = [];
   const parsedTree = parseTree(text, errors, {
     allowTrailingComma: true,
@@ -164,8 +195,8 @@ export function parseMcpProjectConfiguration(contents: Uint8Array): unknown[] {
     root.servers,
     `${MCP_PROJECT_CONFIG_PATH}.servers`
   );
-  return Object.entries(servers).map(([name, value]) => {
-    const location = `${MCP_PROJECT_CONFIG_PATH}.servers[${JSON.stringify(name)}]`;
+  return Object.entries(servers).map(([name, value], index) => {
+    const location = `${MCP_PROJECT_CONFIG_PATH}.servers[${index}]`;
     const server = requireObject(value, location);
     if (Object.prototype.hasOwnProperty.call(server, "name")) {
       fail(
@@ -199,7 +230,7 @@ function rejectDuplicateJsonProperties(root: JsonNode): void {
           if (names.has(name)) {
             fail(
               "MCP_CONFIG_DUPLICATE",
-              `${MCP_PROJECT_CONFIG_PATH} contains duplicate property ${JSON.stringify(name)} at offset ${property.offset}`
+              `${MCP_PROJECT_CONFIG_PATH} contains a duplicate property at offset ${property.offset}`
             );
           }
           names.add(name);
@@ -208,7 +239,7 @@ function rejectDuplicateJsonProperties(root: JsonNode): void {
         if (value) pending.push(value);
       }
     } else {
-      pending.push(...(node.children ?? []));
+      for (const child of node.children ?? []) pending.push(child);
     }
   }
 }
@@ -267,13 +298,12 @@ export async function getConfiguredSession(
     configurationResource
   );
   const inspected = configuration.inspect<unknown>("mcpServers");
-  const sources = selectMcpSettingSources(
-    inspected,
-    vscode.workspace.isTrusted
-  );
+  const projectUri = getMcpProjectConfigurationUri(cwd, undefined, resource);
+  const useRepositorySources =
+    vscode.workspace.isTrusted && (!resource || !!projectUri);
+  const sources = selectMcpSettingSources(inspected, useRepositorySources);
 
-  if (vscode.workspace.isTrusted) {
-    const projectUri = getMcpProjectConfigurationUri(cwd, undefined, resource);
+  if (useRepositorySources) {
     if (projectUri) {
       const projectConfiguration =
         await readMcpProjectConfiguration(projectUri);
@@ -288,7 +318,9 @@ export async function getConfiguredSession(
 
   const sensitiveValues = new Set<string>();
   const mcpServers = configureMcpServers(
-    sources,
+    vscode.workspace.isTrusted
+      ? sources
+      : selectMcpSettingSources(inspected, false),
     capabilities,
     environment,
     sensitiveValues
@@ -302,6 +334,27 @@ export async function getConfiguredSession(
 async function readMcpProjectConfiguration(
   uri: vscode.Uri
 ): Promise<unknown[] | undefined> {
+  let stat: vscode.FileStat;
+  try {
+    stat = await vscode.workspace.fs.stat(uri);
+  } catch (error) {
+    if (isFileNotFound(error)) return undefined;
+    fail("MCP_CONFIG_READ", `${MCP_PROJECT_CONFIG_PATH} could not be read`);
+  }
+  if (!vscode.workspace.isTrusted) return undefined;
+  if (!(stat.type & vscode.FileType.File)) {
+    fail("MCP_CONFIG_READ", `${MCP_PROJECT_CONFIG_PATH} must be a file`);
+  }
+  if (
+    !Number.isSafeInteger(stat.size) ||
+    stat.size < 0 ||
+    stat.size > MAX_CONFIGURATION_BYTES
+  ) {
+    fail(
+      "MCP_CONFIG_UNSAFE",
+      `${MCP_PROJECT_CONFIG_PATH} exceeds the ${MAX_CONFIGURATION_BYTES}-byte limit`
+    );
+  }
   let contents: Uint8Array;
   try {
     contents = await vscode.workspace.fs.readFile(uri);
@@ -309,6 +362,7 @@ async function readMcpProjectConfiguration(
     if (isFileNotFound(error)) return undefined;
     fail("MCP_CONFIG_READ", `${MCP_PROJECT_CONFIG_PATH} could not be read`);
   }
+  if (!vscode.workspace.isTrusted) return undefined;
   return parseMcpProjectConfiguration(contents);
 }
 
@@ -326,9 +380,9 @@ function projectNamedValues(
   location: string
 ): Array<{ name: string; value: string }> {
   const object = requireObject(value, location);
-  return Object.entries(object).map(([name, entryValue]) => {
+  return Object.entries(object).map(([name, entryValue], index) => {
     if (typeof entryValue !== "string") {
-      fail("MCP_CONFIG_MALFORMED", `${location}.${name} must be a string`);
+      fail("MCP_CONFIG_MALFORMED", `${location}[${index}] must be a string`);
     }
     return { name, value: entryValue };
   });
@@ -339,7 +393,9 @@ export class McpSecretRedactor {
 
   add(values: Iterable<string>): void {
     for (const value of values) {
-      if (value.length > 0) this.sensitiveValues.add(value);
+      if (value.length === 0) continue;
+      this.sensitiveValues.add(value);
+      this.sensitiveValues.add(JSON.stringify(value).slice(1, -1));
     }
   }
 
@@ -466,6 +522,12 @@ function validateStdio(
     fail(
       "MCP_CONFIG_UNSAFE",
       `${location}.command must be a printable absolute executable path`
+    );
+  }
+  if (process.platform === "win32" && !/\.(?:exe|com)$/i.test(command)) {
+    fail(
+      "MCP_CONFIG_UNSAFE",
+      `${location}.command must name a native .exe or .com executable on Windows; pass scripts as arguments to their interpreter`
     );
   }
 

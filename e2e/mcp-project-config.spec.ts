@@ -21,7 +21,8 @@ const BIN_DIR = join(DEMO_DIR, "bin");
 const AGENT_PATH = join(BIN_DIR, "opencode");
 const JOURNAL_PATH = join(DEMO_DIR, "agent-requests.jsonl");
 const SCREENSHOTS_DIR = join(PROJECT_ROOT, "screenshots");
-const RESOLVED_SECRET = "project-secret-that-must-not-persist";
+const RESOLVED_SECRET = 'project-"secret\\value-that-must-not-persist';
+const JSON_ESCAPED_SECRET = JSON.stringify(RESOLVED_SECRET).slice(1, -1);
 
 interface AgentRequest {
   method: string;
@@ -75,7 +76,7 @@ process.stdin.on("data", (chunk) => {
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
     } else if (message.method === "session/load") {
       update(params.sessionId, { sessionUpdate: "user_message_chunk", messageId: "loaded-user", content: { type: "text", text: "Inspect configured MCP invocation" } });
-      update(params.sessionId, { sessionUpdate: "agent_message_chunk", messageId: "loaded-agent", content: { type: "text", text: "Loaded the same validated MCP snapshot without persisting its resolved secret." } });
+      update(params.sessionId, { sessionUpdate: "agent_message_chunk", messageId: "loaded-agent", content: { type: "text", text: "Loaded freshly validated MCP configuration without persisting its resolved secret." } });
       send({ jsonrpc: "2.0", id: message.id, result: { modes: null } });
     } else if (message.id !== undefined) {
       send({ jsonrpc: "2.0", id: message.id, result: {} });
@@ -89,6 +90,24 @@ async function readRequestJournal(): Promise<AgentRequest[]> {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line) as AgentRequest);
+}
+
+function projectMcpConfiguration(name: string, source: string): string {
+  return `{
+    // The project source uses VS Code's established mcp.json object shape.
+    "servers": {
+      "${name}": {
+        "type": "http",
+        "url": "https://${source}.example.com/mcp",
+        "headers": { "X-Source": "${source}" },
+      },
+      "projectSecret": {
+        "type": "http",
+        "url": "https://secret.example.com/mcp",
+        "headers": { "Authorization": "Bearer \${env:MCP_PROJECT_TOKEN}" },
+      },
+    },
+  }`;
 }
 
 async function containsText(
@@ -111,22 +130,40 @@ async function containsText(
 
 async function runCommand(window: Page, command: string): Promise<void> {
   await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
-  await window.waitForTimeout(300);
-  await window.keyboard.type(command);
-  await window.waitForTimeout(300);
-  await window.keyboard.press("Enter");
+  const commandInput = window.locator(".quick-input-widget input");
+  await expect(commandInput).toBeVisible({ timeout: 30000 });
+  await commandInput.fill(`>${command}`);
+  const commandOption = window
+    .locator('.quick-input-list [role="option"]')
+    .filter({ hasText: command })
+    .first();
+  await expect(commandOption).toBeVisible({ timeout: 30000 });
+  await commandInput.press("Enter");
+  await expect(commandInput).toBeHidden({ timeout: 30000 });
 }
 
 async function openChat(window: Page) {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
-  await window.waitForTimeout(3000);
+  await expect(window.getByRole("tab", { name: "VSCode ACP" })).toBeVisible({
+    timeout: 30000,
+  });
   await runCommand(window, "VSCode ACP: Focus on Chat View");
-  await window.waitForTimeout(3000);
+  await expect
+    .poll(
+      async () => {
+        for (const frame of window.frames()) {
+          if ((await frame.locator("#welcome-view").count()) > 0) return true;
+        }
+        return false;
+      },
+      { timeout: 30000 }
+    )
+    .toBe(true);
   return getWebviewContentFrame(window);
 }
 
-test("passes trusted project MCP configuration unchanged through auth retry and load", async () => {
+test("keeps auth retries on one MCP snapshot and reloads config at the next session boundary", async () => {
   await rm(DEMO_DIR, { recursive: true, force: true });
   await mkdir(join(USER_DATA_DIR, "User"), { recursive: true });
   await mkdir(join(WORKSPACE_DIR, ".vscode"), { recursive: true });
@@ -168,23 +205,10 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
       ],
     })
   );
+  const projectConfigurationPath = join(WORKSPACE_DIR, ".vscode", "mcp.json");
   await writeFile(
-    join(WORKSPACE_DIR, ".vscode", "mcp.json"),
-    `{
-      // The project source uses VS Code's established mcp.json object shape.
-      "servers": {
-        "SHARED": {
-          "type": "http",
-          "url": "https://project.example.com/mcp",
-          "headers": { "X-Source": "project" },
-        },
-        "projectSecret": {
-          "type": "http",
-          "url": "https://secret.example.com/mcp",
-          "headers": { "Authorization": "Bearer \${env:MCP_PROJECT_TOKEN}" },
-        },
-      },
-    }`
+    projectConfigurationPath,
+    projectMcpConfiguration("SHARED", "project")
   );
 
   const executablePath = await findVSCodeExecutable();
@@ -223,6 +247,10 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
     await expect(authPicker.locator(".quick-input-title")).toHaveText(
       "Authentication required"
     );
+    await writeFile(
+      projectConfigurationPath,
+      projectMcpConfiguration("loadOnly", "load-boundary")
+    );
     const inputContainer = frame.locator("#input-container");
     const transitionComplete = inputContainer.evaluate(
       (element) =>
@@ -251,10 +279,11 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
     await window.keyboard.press("Enter");
     await transitionComplete;
     await expect
-      .poll(async () =>
-        (await readRequestJournal()).filter(
-          (request) => request.method === "session/new"
-        ).length
+      .poll(
+        async () =>
+          (await readRequestJournal()).filter(
+            (request) => request.method === "session/new"
+          ).length
       )
       .toBe(2);
 
@@ -291,7 +320,7 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
       path: join(SCREENSHOTS_DIR, "mcp-project-config.png"),
     });
 
-    await window.waitForTimeout(500);
+    await expect(inputContainer).toHaveAttribute("aria-busy", "false");
     await runCommand(window, "ACP: Load Session");
     const sessionItem = frame.locator("#session-picker").getByRole("button", {
       name: "Load Inspect configured MCP invocation",
@@ -300,7 +329,7 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
     await sessionItem.click();
     await expect(
       frame.getByText(
-        "Loaded the same validated MCP snapshot without persisting its resolved secret."
+        "Loaded freshly validated MCP configuration without persisting its resolved secret."
       )
     ).toBeVisible();
     await frame.locator("body").screenshot({
@@ -321,20 +350,43 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
     );
     const newSnapshot = newRequests[1].params as {
       cwd: string;
-      mcpServers: unknown[];
+      mcpServers: Array<{
+        name: string;
+        headers?: Array<{ name: string; value: string }>;
+      }>;
     };
     const loaded = loadRequest!.params as {
       cwd: string;
-      mcpServers: unknown[];
+      mcpServers: Array<{
+        name: string;
+        headers?: Array<{ name: string; value: string }>;
+      }>;
     };
-    expect(
-      JSON.stringify({ cwd: loaded.cwd, mcpServers: loaded.mcpServers })
-    ).toBe(JSON.stringify(newSnapshot));
-    expect(JSON.stringify(newSnapshot)).toContain(RESOLVED_SECRET);
+    expect(loaded.mcpServers.map((server) => server.name)).toEqual([
+      "userOnly",
+      "shared",
+      "workspaceOnly",
+      "loadOnly",
+      "projectSecret",
+    ]);
+    expect(JSON.stringify(loaded.mcpServers)).not.toBe(
+      JSON.stringify(newSnapshot.mcpServers)
+    );
+    for (const snapshot of [newSnapshot, loaded]) {
+      const secretServer = snapshot.mcpServers.find(
+        (server) => server.name === "projectSecret"
+      );
+      expect(
+        secretServer?.headers?.find((header) => header.name === "Authorization")
+          ?.value
+      ).toBe(`Bearer ${RESOLVED_SECRET}`);
+    }
     await host.close();
     hostClosed = true;
-    expect(await containsText(USER_DATA_DIR, RESOLVED_SECRET)).toBe(false);
-    expect(await containsText(WORKSPACE_DIR, RESOLVED_SECRET)).toBe(false);
+    for (const secretForm of [RESOLVED_SECRET, JSON_ESCAPED_SECRET]) {
+      expect(await containsText(USER_DATA_DIR, secretForm)).toBe(false);
+      expect(await containsText(WORKSPACE_DIR, secretForm)).toBe(false);
+    }
   } finally {
     if (!hostClosed) await host.close();
     await rm(DEMO_DIR, { recursive: true, force: true });

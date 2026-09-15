@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import { RequestError } from "@agentclientprotocol/sdk";
 import {
   configureMcpServers,
+  getConfiguredSession,
   getMcpConfigurationResource,
   getMcpProjectConfigurationUri,
   McpConfigurationError,
@@ -50,6 +51,21 @@ suite("MCP server configuration", () => {
     assert.strictEqual(
       getMcpConfigurationResource(remoteUri.fsPath, workspaceFolders).scheme,
       "file"
+    );
+  });
+
+  test("preserves a saved remote URI when another host has the same path", () => {
+    const saved = vscode.Uri.parse("vscode-remote://ssh-remote+old/workspace");
+    const replacement = vscode.Uri.parse(
+      "vscode-remote://ssh-remote+new/workspace"
+    );
+    assert.strictEqual(
+      getMcpConfigurationResource(
+        saved.fsPath,
+        [{ index: 0, name: "replacement", uri: replacement }],
+        saved
+      ),
+      saved
     );
   });
 
@@ -241,8 +257,63 @@ suite("MCP server configuration", () => {
     for (const { contents, code } of invalidInputs) {
       assert.throws(
         () => parseMcpProjectConfiguration(contents),
-        (error) =>
-          error instanceof McpConfigurationError && error.code === code
+        (error) => error instanceof McpConfigurationError && error.code === code
+      );
+    }
+  });
+
+  test("rejects excessive JSONC nesting before recursive parsing", () => {
+    const contents = Buffer.from(
+      '{"servers":' + "[".repeat(20_000) + "0" + "]".repeat(20_000) + "}"
+    );
+    assert.throws(
+      () => parseMcpProjectConfiguration(contents),
+      (error) =>
+        error instanceof McpConfigurationError &&
+        error.code === "MCP_CONFIG_UNSAFE"
+    );
+    const literal = "[".repeat(128);
+    const parsed = parseMcpProjectConfiguration(
+      Buffer.from(
+        `/* ${literal} */` +
+          JSON.stringify({
+            servers: {
+              safe: { command: process.execPath, args: [literal] },
+            },
+          })
+      )
+    );
+    assert.deepStrictEqual(
+      configureMcpServers([{ location: "project", configuration: parsed }], {}),
+      [{ name: "safe", command: process.execPath, args: [literal], env: [] }]
+    );
+  });
+
+  test("rejects wide JSONC arrays without exceeding the argument stack", () => {
+    const contents = Buffer.from('{"servers":[' + "0,".repeat(131_000) + "0]}");
+    assert.throws(
+      () => parseMcpProjectConfiguration(contents),
+      (error) =>
+        error instanceof McpConfigurationError &&
+        error.code === "MCP_CONFIG_MALFORMED"
+    );
+  });
+
+  test("does not echo untrusted JSONC keys in configuration errors", () => {
+    const secret = "credential-that-must-not-appear";
+    for (const text of [
+      `{"servers":{"one":{"headers":{"${secret}":1,"${secret}":2}}}}`,
+      JSON.stringify({ servers: { [secret]: { name: "invalid" } } }),
+      JSON.stringify({ servers: { one: { env: { [secret]: 42 } } } }),
+    ]) {
+      assert.throws(
+        () => parseMcpProjectConfiguration(Buffer.from(text)),
+        (error) => {
+          assert.ok(error instanceof McpConfigurationError);
+          assert.ok(!error.message.includes(secret));
+          assert.ok(!error.stack?.includes(secret));
+          return true;
+        }
       );
     }
   });
@@ -530,6 +601,26 @@ suite("MCP server configuration", () => {
     );
   });
 
+  test("rejects Windows scripts that trigger an implicit command shell", function () {
+    if (process.platform !== "win32") this.skip();
+    for (const extension of [".cmd", ".bat", ".js"]) {
+      assertMcpError(
+        () =>
+          validateMcpServers(
+            [
+              {
+                name: "script",
+                command: process.execPath + extension,
+                args: ["literal&argument"],
+              },
+            ],
+            {}
+          ),
+        "MCP_CONFIG_UNSAFE"
+      );
+    }
+  });
+
   test("resolves environment references freshly without mutating configuration", () => {
     const configuration = [
       {
@@ -669,6 +760,30 @@ suite("MCP server configuration", () => {
     assert.ok(!diagnostic.includes("top-secret"));
   });
 
+  test("redacts resolved secrets when agent errors JSON-escape them", () => {
+    const values = new Set<string>();
+    const servers = validateMcpServers(
+      [
+        {
+          name: "stdio",
+          command: process.execPath,
+          env: [{ name: "TOKEN", value: "${env:TOKEN}" }],
+        },
+      ],
+      {},
+      { TOKEN: 'secret"with\\slashes\nand-lines' },
+      values
+    );
+    const redactor = new McpSecretRedactor();
+    redactor.add(values);
+    const redacted = redactor.redactError(
+      new RequestError(-32000, JSON.stringify(servers))
+    );
+    const logged = JSON.parse(redacted.message);
+    assert.strictEqual(logged[0].env[0].value, "[redacted]");
+    assert.strictEqual((redacted as RequestError).code, -32000);
+  });
+
   test("preserves RequestError identity and code while dropping secret data", () => {
     const redactor = new McpSecretRedactor();
     redactor.add(["top-secret"]);
@@ -700,6 +815,184 @@ suite("MCP server configuration", () => {
         ),
       "MCP_CONFIG_ENV"
     );
+  });
+
+  suite("project file loading", () => {
+    let filesystemDescriptor: PropertyDescriptor;
+    let originalConfiguration: typeof vscode.workspace.getConfiguration;
+    let trustDescriptor: PropertyDescriptor;
+    let reads: number;
+    let stats: number;
+    let contents: Uint8Array;
+    let metadata: vscode.FileStat;
+    let trusted: boolean;
+
+    setup(() => {
+      filesystemDescriptor = Object.getOwnPropertyDescriptor(
+        vscode.workspace,
+        "fs"
+      )!;
+      originalConfiguration = vscode.workspace.getConfiguration;
+      trustDescriptor = Object.getOwnPropertyDescriptor(
+        vscode.workspace,
+        "isTrusted"
+      )!;
+      trusted = true;
+      reads = 0;
+      stats = 0;
+      contents = Buffer.from(
+        JSON.stringify({
+          servers: {
+            project: { command: process.execPath },
+          },
+        })
+      );
+      metadata = {
+        type: vscode.FileType.File,
+        size: contents.byteLength,
+        ctime: 0,
+        mtime: 0,
+      };
+      Object.defineProperty(vscode.workspace, "isTrusted", {
+        configurable: true,
+        get: () => trusted,
+      });
+      Object.defineProperty(vscode.workspace, "fs", {
+        configurable: true,
+        value: {
+          ...vscode.workspace.fs,
+          stat: async () => {
+            stats++;
+            return metadata;
+          },
+          readFile: async () => {
+            reads++;
+            return contents;
+          },
+        },
+      });
+    });
+
+    teardown(() => {
+      Object.defineProperty(vscode.workspace, "fs", filesystemDescriptor);
+      vscode.workspace.getConfiguration = originalConfiguration;
+      Object.defineProperty(vscode.workspace, "isTrusted", trustDescriptor);
+    });
+
+    function loadProject() {
+      const folder = vscode.workspace.workspaceFolders![0];
+      return getConfiguredSession(folder.uri.fsPath, {}, {}, folder.uri);
+    }
+
+    test("does not inherit another folder's settings for a missing saved URI", async () => {
+      const folder = vscode.workspace.workspaceFolders![0];
+      const saved = folder.uri.with({
+        scheme: "vscode-remote",
+        authority: "ssh-remote+removed",
+      });
+      vscode.workspace.getConfiguration = () =>
+        ({
+          inspect: () => ({
+            globalValue: [{ name: "user", command: process.execPath }],
+            workspaceValue: [
+              { name: "other-workspace", command: process.execPath },
+            ],
+            workspaceFolderValue: [
+              { name: "other-folder", command: process.execPath },
+            ],
+          }),
+        }) as unknown as vscode.WorkspaceConfiguration;
+      const configured = await getConfiguredSession(
+        folder.uri.fsPath,
+        {},
+        {},
+        saved
+      );
+      assert.deepStrictEqual(
+        configured.parameters.mcpServers.map((server) => server.name),
+        ["user"]
+      );
+      assert.strictEqual(stats, 0);
+      assert.strictEqual(reads, 0);
+    });
+
+    test("refuses an oversized project before reading its bytes", async () => {
+      metadata.size = 256 * 1024 + 1;
+      await assert.rejects(
+        loadProject(),
+        (error) =>
+          error instanceof McpConfigurationError &&
+          error.code === "MCP_CONFIG_UNSAFE"
+      );
+      assert.strictEqual(reads, 0);
+    });
+
+    test("rejects a project that grows past its stat size", async () => {
+      contents = new Uint8Array(256 * 1024 + 1);
+      await assert.rejects(
+        loadProject(),
+        (error) =>
+          error instanceof McpConfigurationError &&
+          error.code === "MCP_CONFIG_UNSAFE"
+      );
+    });
+
+    test("refuses directories and special files without reading them", async () => {
+      for (const type of [vscode.FileType.Directory, vscode.FileType.Unknown]) {
+        metadata.type = type;
+        await assert.rejects(
+          loadProject(),
+          (error) =>
+            error instanceof McpConfigurationError &&
+            error.code === "MCP_CONFIG_READ"
+        );
+      }
+      assert.strictEqual(reads, 0);
+    });
+
+    test("ignores project files in Restricted Mode", async () => {
+      trusted = false;
+      const configured = await loadProject();
+      assert.deepStrictEqual(configured.parameters.mcpServers, []);
+      assert.strictEqual(stats, 0);
+      assert.strictEqual(reads, 0);
+    });
+
+    test("does not read a project after trust changes during stat", async () => {
+      vscode.workspace.fs.stat = async () => {
+        trusted = false;
+        return metadata;
+      };
+      const configured = await loadProject();
+      assert.deepStrictEqual(configured.parameters.mcpServers, []);
+      assert.strictEqual(reads, 0);
+    });
+
+    test("discards project contents after trust changes during read", async () => {
+      vscode.workspace.fs.readFile = async () => {
+        trusted = false;
+        return contents;
+      };
+      const configured = await loadProject();
+      assert.deepStrictEqual(configured.parameters.mcpServers, []);
+    });
+
+    test("ignores absent files but fails closed on provider read errors", async () => {
+      vscode.workspace.fs.stat = async () => {
+        throw vscode.FileSystemError.FileNotFound();
+      };
+      assert.deepStrictEqual((await loadProject()).parameters.mcpServers, []);
+      vscode.workspace.fs.stat = async () => metadata;
+      vscode.workspace.fs.readFile = async () => {
+        throw vscode.FileSystemError.NoPermissions("provider-secret");
+      };
+      await assert.rejects(loadProject(), (error) => {
+        assert.ok(error instanceof McpConfigurationError);
+        assert.strictEqual(error.code, "MCP_CONFIG_READ");
+        assert.ok(!error.message.includes("provider-secret"));
+        return true;
+      });
+    });
   });
 });
 
