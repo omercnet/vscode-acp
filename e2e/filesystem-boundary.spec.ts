@@ -22,7 +22,7 @@ const BIN_DIR = join(DEMO_DIR, "bin");
 const AGENT_PATH = join(BIN_DIR, "opencode");
 const ALLOWED_PATH = join(DEMO_DIR, "allowed.txt");
 const ALLOWED_WRITE_PATH = join(DEMO_DIR, "written.txt");
-const DIRTY_PATH = join(PROJECT_ROOT, "filesystem-dirty-demo.txt");
+const DIRTY_PATH = join(DEMO_DIR, "filesystem-dirty-demo.txt");
 
 const AGENT_SOURCE = `#!/usr/bin/env node
 const allowedPath = process.env.VSCODE_ACP_ALLOWED_PATH;
@@ -139,7 +139,7 @@ async function launchHost(deniedPath: string) {
       "--skip-welcome",
       "--disable-telemetry",
       "--window-position=-2000,-2000",
-      PROJECT_ROOT,
+      DEMO_DIR,
     ],
     timeout: 60000,
     env: {
@@ -229,6 +229,12 @@ test("allows contained access, blocks escapes, and preserves dirty editors", asy
     const window = await host.firstWindow();
     const frame = await focusChat(window);
     await expect(frame.locator("#connect-btn")).toBeHidden({ timeout: 30000 });
+    const builtInChat = window
+      .locator('.pane-header[aria-expanded="true"]')
+      .filter({ hasText: /^Chat$/ });
+    if (await builtInChat.count()) {
+      await builtInChat.click();
+    }
     await makeEditorDirty(window);
     await expect(frame.locator("#input")).toBeVisible({ timeout: 30000 });
     await frame.locator("#input").fill("Exercise filesystem boundary");
@@ -264,6 +270,11 @@ test("allows contained access, blocks escapes, and preserves dirty editors", asy
     }
     // Denials must not echo the path the agent was refused.
     await expect(frame.locator("#messages")).not.toContainText(deniedPath);
+    await expect(
+      window
+        .locator(".monaco-editor .view-lines")
+        .filter({ hasText: "unsaved-user-edit" })
+    ).toBeVisible();
     await expect(frame.locator("#send")).toBeEnabled({ timeout: 30000 });
 
     const messagesBox = await frame.locator("#messages").boundingBox();
@@ -283,7 +294,6 @@ test("allows contained access, blocks escapes, and preserves dirty editors", asy
   } finally {
     await host.close();
     await rm(DEMO_DIR, { recursive: true, force: true });
-    await rm(DIRTY_PATH, { force: true });
     await rm(deniedRoot, { recursive: true, force: true });
   }
 });

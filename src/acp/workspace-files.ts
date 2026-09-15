@@ -271,7 +271,7 @@ export function isPathWithin(
  * kept for the open to create; an entry that exists but cannot be resolved is
  * a dangling link and stays denied.
  */
-async function canonicalizeUnder(
+export async function canonicalizeUnder(
   basePath: string,
   relativeRequestPath: string
 ): Promise<string> {
@@ -660,12 +660,16 @@ function toAccessError(error: unknown, requestPath: string): unknown {
  * their own conflict checks. ACP exposes filesystem paths rather than URIs, so
  * non-file and virtual workspace providers are denied rather than coerced into
  * a local path.
+ * `beforeWriteOpen` checks the canonical target before any missing file or
+ * parents can be created; descriptor conflicts must also be checked before
+ * replacement, because opening the file can yield to editor events.
  */
 export async function openTrustedWorkspaceFile(
   requestPath: string,
   operation: WorkspaceFileOperation,
   context: WorkspaceFileAccessContext = vscode.workspace,
-  strategy?: WorkspaceFileOpenStrategy
+  strategy?: WorkspaceFileOpenStrategy,
+  beforeWriteOpen?: (canonicalPath: string) => Promise<void>
 ): Promise<OpenedWorkspaceFile> {
   const workspaceFolders = context.workspaceFolders;
   if (
@@ -712,6 +716,11 @@ export async function openTrustedWorkspaceFile(
       // A root that cannot be canonicalized, or a request that escapes it,
       // must not authorize the file through another root either.
       continue;
+    }
+
+    // Opening a write can create the file and parents, even without O_TRUNC.
+    if (operation === "write") {
+      await beforeWriteOpen?.(canonicalPath);
     }
 
     let fileHandle: FileHandle;

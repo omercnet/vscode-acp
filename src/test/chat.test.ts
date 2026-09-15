@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import { EventEmitter } from "events";
 import * as vscode from "vscode";
-import {
+import fsPromises, {
   chmod,
   copyFile,
   mkdir,
@@ -12,6 +12,7 @@ import {
   rm,
   writeFile,
 } from "fs/promises";
+import type { FileHandle } from "fs/promises";
 import { tmpdir } from "os";
 import { isAbsolute, join } from "path";
 import {
@@ -2502,6 +2503,234 @@ suite("ChatViewProvider", () => {
         await rm(sandbox, { recursive: true, force: true });
       }
     });
+
+    test("refuses to recreate deleted dirty editor files or parents", async function () {
+      const sandbox = await realpath(
+        await mkdtemp(join(tmpdir(), "vscode-acp-deleted-editor-"))
+      );
+      const parent = join(sandbox, "nested");
+      const filePath = join(parent, "notes.txt");
+      const context: WorkspaceFileAccessContext = {
+        isTrusted: true,
+        workspaceFolders: [
+          { uri: vscode.Uri.file(sandbox) } as vscode.WorkspaceFolder,
+        ],
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const handler = provider as unknown as TestableCapabilityHandlers;
+      let document: vscode.TextDocument | undefined;
+      try {
+        await mkdir(parent);
+        await writeFile(filePath, "saved");
+        if (!(await workspaceFileCapabilities(context)).writeTextFile) {
+          this.skip();
+        }
+        const aliasRoot = join(sandbox, "alias");
+        await fsPromises.symlink(sandbox, aliasRoot, "dir");
+        Object.defineProperty(provider, "openWorkspaceFile", {
+          value: (...args: Parameters<typeof openTrustedWorkspaceFile>) => {
+            args[2] = context;
+            return openTrustedWorkspaceFile(...args);
+          },
+        });
+        document = await vscode.workspace.openTextDocument(
+          join(sandbox, "alias", "nested", "notes.txt")
+        );
+        await vscode.window.showTextDocument(document);
+        const edit = new vscode.WorkspaceEdit();
+        edit.replace(document.uri, new vscode.Range(0, 0, 1, 0), "unsaved");
+        await vscode.workspace.applyEdit(edit);
+        await rm(parent, { recursive: true });
+        await assert.rejects(
+          () =>
+            handler.handleWriteTextFile({
+              sessionId: "session",
+              path: filePath,
+              content: "agent",
+            }),
+          /unsaved editor/
+        );
+        assert.strictEqual(document.getText(), "unsaved");
+        assert.strictEqual(document.isDirty, true);
+        await assert.rejects(() => readFile(filePath), { code: "ENOENT" });
+        await assert.rejects(() => readFile(parent), { code: "ENOENT" });
+      } finally {
+        if (document) {
+          await vscode.commands.executeCommand(
+            "workbench.action.revertAndCloseActiveEditor"
+          );
+        }
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    });
+
+    test("rechecks editors dirtied during asynchronous identity resolution", async () => {
+      const sandbox = await realpath(
+        await mkdtemp(join(tmpdir(), "vscode-acp-editor-race-"))
+      );
+      const targetPath = join(sandbox, "target.txt");
+      const otherPath = join(sandbox, "other.txt");
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const handler = provider as unknown as TestableCapabilityHandlers;
+      const originalRealpath = fsPromises.realpath;
+      const documents: vscode.TextDocument[] = [];
+      let editDuringLookup = false;
+      try {
+        await writeFile(targetPath, "saved target");
+        await writeFile(otherPath, "saved other");
+        const target = await vscode.workspace.openTextDocument(targetPath);
+        const other = await vscode.workspace.openTextDocument(otherPath);
+        documents.push(target, other);
+        await vscode.window.showTextDocument(target);
+        const editOther = new vscode.WorkspaceEdit();
+        editOther.replace(
+          other.uri,
+          new vscode.Range(0, 0, 1, 0),
+          "unrelated user edit"
+        );
+        await vscode.workspace.applyEdit(editOther);
+        Object.defineProperty(provider, "openWorkspaceFile", {
+          value: async () => ({
+            requestUri: target.uri,
+            canonicalPath: targetPath,
+            canonicalRootPath: sandbox,
+            fileHandle: await open(targetPath, "r+"),
+            strategy: "descriptor" as const,
+            byteLength: 12,
+          }),
+        });
+        fsPromises.realpath = (async (...args: Parameters<typeof realpath>) => {
+          if (args[0] === otherPath && !editDuringLookup) {
+            editDuringLookup = true;
+            const editTarget = new vscode.WorkspaceEdit();
+            editTarget.replace(
+              target.uri,
+              new vscode.Range(0, 0, 1, 0),
+              "concurrent user edit"
+            );
+            await vscode.workspace.applyEdit(editTarget);
+          }
+          return originalRealpath(...args);
+        }) as typeof realpath;
+        await assert.rejects(
+          () =>
+            handler.handleWriteTextFile({
+              sessionId: "session",
+              path: targetPath,
+              content: "agent",
+            }),
+          /unsaved editor/
+        );
+        assert.strictEqual(target.getText(), "concurrent user edit");
+        assert.strictEqual(target.isDirty, true);
+        assert.strictEqual(await readFile(targetPath, "utf8"), "saved target");
+        await vscode.commands.executeCommand("undo");
+        assert.strictEqual(target.getText(), "saved target");
+        await vscode.commands.executeCommand("redo");
+        assert.strictEqual(target.getText(), "concurrent user edit");
+      } finally {
+        fsPromises.realpath = originalRealpath;
+        for (const document of documents) {
+          await vscode.window.showTextDocument(document);
+          await vscode.commands.executeCommand(
+            "workbench.action.revertAndCloseActiveEditor"
+          );
+        }
+        await rm(sandbox, { recursive: true, force: true });
+      }
+    });
+
+    for (const scenario of [
+      "renamed inode",
+      "unavailable direct path",
+    ] as const) {
+      test(`preserves a dirty editor with ${scenario}`, async () => {
+        const sandbox = await realpath(
+          await mkdtemp(join(tmpdir(), "vscode-acp-editor-identity-"))
+        );
+        const filePath = join(sandbox, "notes.txt");
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const handler = provider as unknown as TestableCapabilityHandlers;
+        const originalRealpath = fsPromises.realpath;
+        let document: vscode.TextDocument | undefined;
+        let fileHandle: FileHandle | undefined;
+        try {
+          await writeFile(filePath, "saved");
+          fileHandle = await open(filePath, "r+");
+          const documentPath =
+            scenario === "renamed inode"
+              ? join(sandbox, "renamed.txt")
+              : filePath;
+          if (scenario === "renamed inode") {
+            await fsPromises.rename(filePath, documentPath);
+          }
+          Object.defineProperty(provider, "openWorkspaceFile", {
+            value: async () => ({
+              requestUri: vscode.Uri.file(filePath),
+              canonicalPath: filePath,
+              canonicalRootPath: sandbox,
+              fileHandle,
+              strategy: "descriptor" as const,
+              byteLength: 5,
+            }),
+          });
+          document = await vscode.workspace.openTextDocument(documentPath);
+          await vscode.window.showTextDocument(document);
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(document.uri, new vscode.Range(0, 0, 1, 0), "unsaved");
+          await vscode.workspace.applyEdit(edit);
+          if (scenario === "unavailable direct path") {
+            fsPromises.realpath = (async (
+              ...args: Parameters<typeof realpath>
+            ) => {
+              if (args[0] === documentPath) {
+                throw Object.assign(new Error("private path lookup failed"), {
+                  code: "EACCES",
+                });
+              }
+              return originalRealpath(...args);
+            }) as typeof realpath;
+          }
+          await assert.rejects(
+            () =>
+              handler.handleWriteTextFile({
+                sessionId: "session",
+                path: filePath,
+                content: "agent",
+              }),
+            /unsaved editor/
+          );
+          assert.strictEqual(await readFile(documentPath, "utf8"), "saved");
+          assert.strictEqual(document.getText(), "unsaved");
+          assert.strictEqual(document.isDirty, true);
+          await vscode.commands.executeCommand("undo");
+          assert.strictEqual(document.getText(), "saved");
+          await vscode.commands.executeCommand("redo");
+          assert.strictEqual(document.getText(), "unsaved");
+        } finally {
+          fsPromises.realpath = originalRealpath;
+          await fileHandle?.close();
+          if (document) {
+            await vscode.commands.executeCommand(
+              "workbench.action.revertAndCloseActiveEditor"
+            );
+          }
+          await rm(sandbox, { recursive: true, force: true });
+        }
+      });
+    }
 
     test("enforces containment through the chat read handler", async () => {
       const provider = new ChatViewProvider(
