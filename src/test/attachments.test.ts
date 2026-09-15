@@ -1,6 +1,15 @@
+import type { ContentBlock } from "@agentclientprotocol/sdk";
 import * as assert from "assert";
 import * as vscode from "vscode";
-import { mkdtemp, rm, symlink, writeFile } from "fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
@@ -8,20 +17,27 @@ import {
   canonicalFileUri,
   createFileAttachment,
   createInlineAttachment,
+  createReplayAttachment,
   escapeQuickPickLabel,
   guessMimeType,
   isTrustedWorkspaceFile,
   prepareFileAttachment,
 } from "../attachments";
-import { workspaceFileCapabilities } from "../acp/workspace-files";
+import {
+  MAX_WORKSPACE_FILE_BYTES,
+  workspaceFileCapabilities,
+} from "../acp/workspace-files";
 import {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_MIME_LENGTH,
   MAX_ATTACHMENT_NAME_LENGTH,
   MAX_ATTACHMENT_URI_LENGTH,
+  MAX_EMBEDDED_RESOURCE_BYTES,
   MAX_IMAGE_BYTES,
   buildPromptContent,
+  decodedBase64Size,
   isAttachmentMetadataValid,
+  isFileAttachmentValid,
   sanitizeAttachmentLabel,
   type FileAttachment,
   type PromptAttachment,
@@ -169,6 +185,60 @@ suite("Resource link attachments", () => {
       } finally {
         await rm(root, { recursive: true, force: true });
         await rm(outside, { recursive: true, force: true });
+      }
+    });
+
+    test("rejects a workspace root replaced by an outside symlink", async () => {
+      const parent = await mkdtemp(join(tmpdir(), "acp-root-swap-"));
+      const root = join(parent, "workspace");
+      const originalRoot = join(parent, "workspace-original");
+      const outside = join(parent, "outside");
+      const originalPath = join(root, "original.ts");
+      const replacementPath = join(root, "replacement.ts");
+      const folders = [
+        { uri: vscode.Uri.file(root) } as vscode.WorkspaceFolder,
+      ];
+
+      try {
+        await mkdir(root);
+        await mkdir(outside);
+        await writeFile(originalPath, "original");
+        await writeFile(join(outside, "replacement.ts"), "outside");
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(originalPath),
+            folders,
+            true
+          ),
+          true
+        );
+
+        await rename(root, originalRoot);
+        await symlink(
+          outside,
+          root,
+          process.platform === "win32" ? "junction" : "dir"
+        );
+
+        assert.strictEqual(
+          await isTrustedWorkspaceFile(
+            vscode.Uri.file(replacementPath),
+            folders,
+            true
+          ),
+          false
+        );
+        assert.strictEqual(
+          await createFileAttachment(
+            vscode.Uri.file(replacementPath),
+            "replacement",
+            folders,
+            true
+          ),
+          null
+        );
+      } finally {
+        await rm(parent, { recursive: true, force: true });
       }
     });
   });
@@ -335,6 +405,59 @@ suite("Resource link attachments", () => {
       );
     });
 
+    test("rejects forged source, transport, and preview combinations", () => {
+      const memoryUri = "vscode-acp-attachment:///memory/attachment/image.png";
+      assert.strictEqual(
+        isFileAttachmentValid({
+          id: "forged-source",
+          uri: memoryUri,
+          name: "image.png",
+          mimeType: "image/png",
+          source: "remote" as "memory",
+          kind: "image",
+          transport: "image",
+        }),
+        false
+      );
+      assert.strictEqual(
+        isFileAttachmentValid({
+          id: "wrong-transport",
+          uri: memoryUri,
+          name: "image.png",
+          mimeType: "image/png",
+          source: "memory",
+          kind: "image",
+          transport: "resource",
+        }),
+        false
+      );
+      assert.strictEqual(
+        isFileAttachmentValid({
+          id: "memory-link",
+          uri: memoryUri,
+          name: "image.png",
+          mimeType: "image/png",
+          source: "memory",
+          kind: "image",
+          transport: "resource_link",
+        }),
+        false
+      );
+      assert.strictEqual(
+        isFileAttachmentValid({
+          id: "wrong-preview",
+          uri: memoryUri,
+          name: "image.png",
+          mimeType: "image/png",
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          previewDataUrl: `data:image/png;base64,${Buffer.from("not a png").toString("base64")}`,
+        }),
+        false
+      );
+    });
+
     test("strips control characters from a real file's name", async function () {
       if (process.platform === "win32") {
         // Windows rejects control characters and ':' in file names, so this
@@ -475,6 +598,52 @@ suite("Resource link attachments", () => {
       assert.ok(!JSON.stringify(blocks).includes("must not leak"));
     });
 
+    test("drops mismatched image bytes and cross-kind payloads", () => {
+      const invalid: PromptAttachment[] = [
+        {
+          id: "wrong-mime",
+          uri: "vscode-acp-attachment:///memory/wrong-mime/image.jpg",
+          name: "image.jpg",
+          mimeType: "image/jpeg",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          payload: { type: "image", data: "iVBORw0KGgo=" },
+        },
+        {
+          id: "wrong-kind",
+          uri: "vscode-acp-attachment:///memory/wrong-kind/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 4,
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          payload: { type: "text", text: "text" },
+        },
+        {
+          id: "noncanonical",
+          uri: "vscode-acp-attachment:///memory/noncanonical/image.png",
+          name: "image.png",
+          mimeType: "image/png",
+          size: 8,
+          source: "memory",
+          kind: "image",
+          transport: "image",
+          payload: { type: "image", data: "iVBORw0KGgp=" },
+        },
+      ];
+
+      assert.deepStrictEqual(
+        buildPromptContent("Keep the text", invalid, {
+          image: true,
+          embeddedContext: true,
+        }),
+        [{ type: "text", text: "Keep the text" }]
+      );
+    });
+
     test("supports an attachment-only prompt without an empty text block", () => {
       const blocks = buildPromptContent("", [first]);
 
@@ -569,6 +738,80 @@ suite("Resource link attachments", () => {
       );
     });
 
+    test("accepts empty text and rejects image bytes disguised as text", () => {
+      const empty = createInlineAttachment(
+        { name: "empty.txt", mimeType: "text/plain", data: "" },
+        "empty",
+        { embeddedContext: true },
+        0
+      );
+      assert.strictEqual(empty.size, 0);
+      assert.deepStrictEqual(empty.payload, { type: "text", text: "" });
+
+      const gif = Buffer.from("GIF89a");
+      assert.throws(
+        () =>
+          createInlineAttachment(
+            {
+              name: "disguised.gif",
+              mimeType: "text/plain",
+              data: gif.toString("base64"),
+            },
+            "disguised",
+            { embeddedContext: true },
+            0
+          ),
+        /image bytes do not match the declared MIME type/
+      );
+    });
+
+    test("rejects noncanonical base64 padding bits", () => {
+      assert.strictEqual(decodedBase64Size("AA=="), 1);
+      assert.strictEqual(decodedBase64Size("AB=="), null);
+      assert.strictEqual(decodedBase64Size("iVBORw0KGgp="), null);
+    });
+
+    test("rejects hostile or cross-kind replay resources", () => {
+      const replayContent = (resource: Record<string, unknown>): ContentBlock =>
+        ({ type: "resource", resource }) as unknown as ContentBlock;
+
+      assert.strictEqual(
+        createReplayAttachment(
+          replayContent({
+            uri: "file:///workspace/context.ts",
+            text: "context",
+            blob: "Y29udGV4dA==",
+          }),
+          "duplicate-payload"
+        ),
+        null
+      );
+      assert.strictEqual(
+        createReplayAttachment(
+          replayContent({
+            uri: "file:///workspace/image.png",
+            text: "not an image block",
+            mimeType: "image/png",
+          }),
+          "wrong-kind"
+        ),
+        null
+      );
+      assert.doesNotThrow(() => {
+        assert.strictEqual(
+          createReplayAttachment(
+            replayContent({
+              uri: "file:///workspace/context.ts",
+              text: 42,
+              mimeType: "text/plain",
+            }),
+            "wrong-text-type"
+          ),
+          null
+        );
+      });
+    });
+
     test("rejects image bytes beyond the strict per-image limit", () => {
       const oversized = Buffer.alloc(MAX_IMAGE_BYTES + 1);
       oversized.set(png);
@@ -585,6 +828,26 @@ suite("Resource link attachments", () => {
             0
           ),
         /5 MB or smaller/
+      );
+    });
+
+    test("revalidates per-resource limits before sending memory payloads", async () => {
+      const text = "x".repeat(MAX_EMBEDDED_RESOURCE_BYTES + 1);
+      const oversized: PromptAttachment = {
+        id: "oversized-text",
+        uri: "vscode-acp-attachment:///memory/oversized-text/context.txt",
+        name: "context.txt",
+        mimeType: "text/plain",
+        size: Buffer.byteLength(text, "utf8"),
+        source: "memory",
+        kind: "file",
+        transport: "resource",
+        payload: { type: "text", text },
+      };
+
+      await assert.rejects(
+        () => prepareFileAttachment(oversized, { embeddedContext: true }, 0),
+        AttachmentInputError
       );
     });
 
@@ -624,6 +887,68 @@ suite("Resource link attachments", () => {
       }
     });
 
+    test("omits a guessed image MIME after the file signature disproves it", async () => {
+      const workspace = vscode.workspace.workspaceFolders?.[0];
+      assert.ok(workspace);
+      await workspaceFileCapabilities();
+      const dir = await mkdtemp(
+        join(workspace.uri.fsPath, ".attachment-mime-test-")
+      );
+      const path = join(dir, "not-really.png");
+      try {
+        await writeFile(path, "plain text");
+        const metadata = await createFileAttachment(
+          vscode.Uri.file(path),
+          "wrong-mime"
+        );
+        assert.ok(metadata);
+
+        const prepared = await prepareFileAttachment(
+          { ...metadata, source: "file" },
+          { image: true },
+          0
+        );
+        assert.ok(prepared);
+        assert.strictEqual(prepared.attachment.transport, "resource_link");
+        assert.strictEqual(prepared.attachment.mimeType, undefined);
+        assert.strictEqual(prepared.attachment.kind, "file");
+        assert.strictEqual(prepared.attachment.payload, undefined);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("links oversized selected text without attempting a bounded read", async () => {
+      const workspace = vscode.workspace.workspaceFolders?.[0];
+      assert.ok(workspace);
+      await workspaceFileCapabilities();
+      const dir = await mkdtemp(
+        join(workspace.uri.fsPath, ".attachment-large-text-test-")
+      );
+      const path = join(dir, "large.txt");
+      try {
+        await writeFile(path, "");
+        await truncate(path, MAX_WORKSPACE_FILE_BYTES + 1);
+        const metadata = await createFileAttachment(
+          vscode.Uri.file(path),
+          "large-text"
+        );
+        assert.ok(metadata);
+
+        const prepared = await prepareFileAttachment(
+          { ...metadata, source: "file" },
+          { embeddedContext: true },
+          0
+        );
+        assert.ok(prepared);
+        assert.strictEqual(prepared.attachment.transport, "resource_link");
+        assert.strictEqual(prepared.inlineBytes, 0);
+        assert.match(prepared.warning ?? "", /exceeds the context limit/);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
     test("embeds the current unsaved editor buffer", async () => {
       const workspace = vscode.workspace.workspaceFolders?.[0];
       assert.ok(workspace);
@@ -633,7 +958,7 @@ suite("Resource link attachments", () => {
       );
       const path = join(dir, "current.ts");
       try {
-        await writeFile(path, "const saved = true;\n");
+        await writeFile(path, " ".repeat(MAX_EMBEDDED_RESOURCE_BYTES + 1));
         const uri = vscode.Uri.file(path);
         const metadata = await createFileAttachment(uri, "current");
         assert.ok(metadata);

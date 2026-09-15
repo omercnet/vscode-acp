@@ -54,7 +54,6 @@ import {
   createFileAttachment,
   createInlineAttachment,
   createReplayAttachment,
-  isEmbeddableTextMimeType,
   pickAttachmentUris,
   prepareFileAttachment,
 } from "../attachments";
@@ -62,6 +61,7 @@ import {
   MAX_ATTACHMENTS,
   MAX_INLINE_ATTACHMENT_BYTES,
   decodedBase64Size,
+  isEmbeddableTextMimeType,
   toAttachmentMetadata,
   type FileAttachment,
   type PromptAttachment,
@@ -2496,7 +2496,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
       this.streamingText = "";
     } catch (error) {
-      if (!promptStarted) {
+      if (!promptStarted && queuedGeneration === this.conversationGeneration) {
         this.postMessage({ type: "restoreInput", text });
       }
       if (queuedGeneration === this.conversationGeneration) {
@@ -2697,22 +2697,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private handleAttachContent(message: WebviewMessage): void {
-    if (this.sessionTransition || this.isReplaying) {
+    const reply = (result: Record<string, unknown>): void => {
       this.postMessage({
+        ...result,
+        ...(message.requestId ? { requestId: message.requestId } : {}),
+      });
+    };
+    if (this.sessionTransition || this.isReplaying) {
+      reply({
         type: "attachmentError",
         text: "Wait for the session transition to finish before attaching files.",
       });
       return;
     }
     if (!this.acpClient.isConnected()) {
-      this.postMessage({
+      reply({
         type: "attachmentError",
         text: "Connect to an agent before pasting or dropping file content.",
       });
       return;
     }
     if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
-      this.postMessage({
+      reply({
         type: "attachmentLimitReached",
         max: MAX_ATTACHMENTS,
       });
@@ -2723,7 +2729,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       typeof message.data !== "string" ||
       (message.mimeType !== undefined && typeof message.mimeType !== "string")
     ) {
-      this.postMessage({
+      reply({
         type: "attachmentError",
         text: "The dropped or pasted attachment is invalid.",
       });
@@ -2742,12 +2748,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingInlineBytes()
       );
       this.pendingAttachments.set(attachment.id, attachment);
-      this.postMessage({
+      reply({
         type: "filesAttached",
         attachments: [toAttachmentMetadata(attachment)],
       });
     } catch (error) {
-      this.postMessage({
+      reply({
         type: "attachmentError",
         text:
           error instanceof AttachmentInputError
@@ -2774,9 +2780,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         type: "attachmentLimitReached",
         max: MAX_ATTACHMENTS,
       });
+      this.postMessage({ type: "attachmentPreparation", active: false });
       return;
     }
 
+    const attachments: PromptAttachment[] = [];
+    let published = false;
     this.attachmentPickerActive = true;
     try {
       const uris = await pickAttachmentUris(remaining);
@@ -2788,7 +2797,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
-      const attachments: PromptAttachment[] = [];
       let skippedCount = 0;
       let inlineBytes = this.pendingInlineBytes();
       const capabilities = this.acpClient.getPromptCapabilities();
@@ -2801,9 +2809,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       for (let index = 0; index < uris.length; index += 1) {
         if (
           generation !== this.conversationGeneration ||
-          draftVersion !== this.attachmentDraftVersion ||
-          this.pendingAttachments.size >= MAX_ATTACHMENTS
+          draftVersion !== this.attachmentDraftVersion
         ) {
+          return;
+        }
+        if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
           skippedCount += uris.length - index;
           break;
         }
@@ -2873,6 +2883,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           skippedCount,
         });
       }
+      published = true;
     } catch (error) {
       console.error("[Chat] Failed to attach files:", error);
       this.postMessage({
@@ -2880,7 +2891,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         text: "The selected files could not be attached.",
       });
     } finally {
+      if (!published) {
+        for (const attachment of attachments) {
+          this.pendingAttachments.delete(attachment.id);
+        }
+      }
       this.attachmentPickerActive = false;
+      this.postMessage({ type: "attachmentPreparation", active: false });
     }
   }
 
