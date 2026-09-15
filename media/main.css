@@ -746,6 +746,10 @@ body {
   border-top: 1px solid var(--vscode-panel-border);
 }
 
+.config-options {
+  display: contents;
+}
+
 #options-bar:empty {
   display: none;
 }

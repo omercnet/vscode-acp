@@ -113,6 +113,7 @@ suite("Client capabilities", () => {
       {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
+        session: { configOptions: {} },
       }
     );
     const response = await client.sendMessage("Exercise capabilities");
@@ -148,7 +149,7 @@ suite("Client capabilities", () => {
 
     assert.deepStrictEqual(
       mockProcess.server.getInitializeRequest()?.clientCapabilities,
-      {}
+      { session: { configOptions: {} } }
     );
   });
 
@@ -164,7 +165,10 @@ suite("Client capabilities", () => {
 
     assert.deepStrictEqual(
       mockProcess.server.getInitializeRequest()?.clientCapabilities,
-      { fs: { readTextFile: true, writeTextFile: false } }
+      {
+        fs: { readTextFile: true, writeTextFile: false },
+        session: { configOptions: {} },
+      }
     );
   });
 });

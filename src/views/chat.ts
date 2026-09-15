@@ -94,7 +94,6 @@ export const DIRTY_EDITOR_WRITE_CONFLICT =
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
-const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 
 type SessionContext = Pick<
   StoredSession,
@@ -140,7 +139,7 @@ interface WebviewMessage {
     | "ready"
     | "selectAgent"
     | "selectMode"
-    | "selectModel"
+    | "selectConfigOption"
     | "connect"
     | "newChat"
     | "clearChat"
@@ -158,7 +157,8 @@ interface WebviewMessage {
   mimeType?: string;
   agentId?: string;
   modeId?: string;
-  modelId?: string;
+  configId?: string;
+  value?: string;
   requestId?: string;
   sessionId?: string;
   optionId?: string;
@@ -554,7 +554,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private globalState: vscode.Memento;
   private workspaceState: vscode.Memento;
   private streamingText = "";
-  private hasRestoredModeModel = false;
+  private hasRestoredLegacyMode = false;
   private isReplaying = false;
   private replayMessages: ReplayMessage[] = [];
   private connectionStart: Promise<void> | null = null;
@@ -653,6 +653,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.connectionStart = null;
         this.sessionStart = null;
         this.activeSessionContext = null;
+        this.hasRestoredLegacyMode = false;
         this.clearPendingAttachments();
         // A dropped agent leaves its child processes running and its terminal
         // handles reachable if the next session reuses the same id, so the
@@ -770,9 +771,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             await this.handleModeChange(message.modeId);
           }
           break;
-        case "selectModel":
-          if (message.modelId) {
-            await this.handleModelChange(message.modelId);
+        case "selectConfigOption":
+          if (message.configId !== undefined && message.value !== undefined) {
+            await this.handleConfigOptionChange(
+              message.configId,
+              message.value
+            );
           }
           break;
         case "connect":
@@ -3059,10 +3063,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.expirePermissionRequests();
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
+      this.hasRestoredLegacyMode = false;
       this.activeSessionContext = null;
       this.clearPendingAttachments();
       this.postMessage({ type: "agentChanged", agentId });
-      this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      this.postMessage({
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        configOptions: null,
+      });
     }
   }
 
@@ -3077,13 +3087,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleModelChange(modelId: string): Promise<void> {
+  private async handleConfigOptionChange(
+    configId: string,
+    value: string
+  ): Promise<void> {
     try {
-      await this.acpClient.setModel(modelId);
-      await this.globalState.update(SELECTED_MODEL_KEY, modelId);
+      await this.acpClient.setSessionConfigOption(configId, value);
       this.sendSessionMetadata();
     } catch (error) {
-      this.postACPError("Failed to set model", error);
+      this.postACPError("Failed to set session option", error);
       this.sendSessionMetadata();
     }
   }
@@ -3110,11 +3122,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.replayGeneration = null;
       this.replayMessages = [];
       this.hasSession = false;
-      this.hasRestoredModeModel = false;
+      this.hasRestoredLegacyMode = false;
       this.activeSessionContext = null;
       this.clearPendingAttachments();
       this.postMessage({ type: "chatCleared" });
-      this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      this.postMessage({
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        configOptions: null,
+      });
       this.settleSessionLock();
       return;
     }
@@ -3122,7 +3139,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.runSessionTransition("Starting a new session…", async () => {
       const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
-      const hadRestoredModeModel = this.hasRestoredModeModel;
+      const hadRestoredModeModel = this.hasRestoredLegacyMode;
       const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
       await this.disposeTerminals();
@@ -3160,7 +3177,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           cwd: workingDir,
           configurationResource: workspaceFolder?.uri.toString(),
         };
-        this.hasRestoredModeModel = false;
+        this.hasRestoredLegacyMode = false;
         this.clearPendingAttachments();
         this.postMessage({ type: "chatCleared" });
         this.sendSessionMetadata();
@@ -3170,7 +3187,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         const redacted = this.mcpSecretRedactor.redactError(error);
         this.hasSession = hadSession;
-        this.hasRestoredModeModel = hadRestoredModeModel;
+        this.hasRestoredLegacyMode = hadRestoredModeModel;
         this.activeSessionContext = previousSessionContext;
         this.postACPError("Failed to create new session", redacted);
         this.sendSessionMetadata();
@@ -3549,52 +3566,39 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postMessage({
       type: "sessionMetadata",
       modes: metadata?.modes ?? null,
-      models: metadata?.models ?? null,
+      models: null,
+      configOptions: metadata?.configOptions ?? null,
       commands: metadata?.commands ?? null,
       promptCapabilities: this.acpClient.getPromptCapabilities(),
     });
 
-    if (!this.hasRestoredModeModel && this.hasSession) {
-      this.hasRestoredModeModel = true;
-      this.restoreSavedModeAndModel().catch((error) =>
-        this.postACPError("Failed to restore saved mode/model", error)
+    if (!this.hasRestoredLegacyMode && this.hasSession) {
+      this.hasRestoredLegacyMode = true;
+      this.restoreSavedMode().catch((error) =>
+        this.postACPError("Failed to restore saved mode", error)
       );
     }
   }
 
-  private async restoreSavedModeAndModel(): Promise<void> {
+  private async restoreSavedMode(): Promise<void> {
     const metadata = this.acpClient.getSessionMetadata();
+    if (metadata?.configOptions !== null) {
+      return;
+    }
     const availableModes = Array.isArray(metadata?.modes?.availableModes)
       ? metadata.modes.availableModes
       : [];
-    const availableModels = Array.isArray(metadata?.models?.availableModels)
-      ? metadata.models.availableModels
-      : [];
-
     const savedModeId = this.globalState.get<string>(SELECTED_MODE_KEY);
-    const savedModelId = this.globalState.get<string>(SELECTED_MODEL_KEY);
-
-    let modeRestored = false;
-    let modelRestored = false;
-
-    if (savedModeId && availableModes.some((mode) => mode.id === savedModeId)) {
-      await this.acpClient.setMode(savedModeId);
-      console.log("[Chat] Restored saved mode");
-      modeRestored = true;
-    }
-
     if (
-      savedModelId &&
-      availableModels.some((model) => model.modelId === savedModelId)
+      !savedModeId ||
+      !availableModes.some((mode) => mode.id === savedModeId)
     ) {
-      await this.acpClient.setModel(savedModelId);
-      console.log("[Chat] Restored saved model");
-      modelRestored = true;
+      return;
     }
 
-    if (modeRestored || modelRestored) {
-      this.sendSessionMetadata();
-    }
+    await this.acpClient.setMode(savedModeId);
+    console.log("[Chat] Restored saved mode");
+    this.sendSessionMetadata();
   }
 
   private postMessage(message: Record<string, unknown>): void {
@@ -3671,6 +3675,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <span id="input-hint" class="sr-only" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.</span>
   
   <div id="options-bar" role="toolbar" aria-label="Session options">
+    <div id="config-options" class="config-options" role="group" aria-label="Session configuration"></div>
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
   </div>

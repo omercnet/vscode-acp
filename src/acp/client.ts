@@ -15,46 +15,32 @@ import {
   type AgentCommandResolutionOptions,
 } from "./agentCommand";
 
-interface ModelSelectionState {
-  configId: string;
-  availableModels: Array<{ modelId: string; name: string }>;
-  currentModelId: string;
+export type SupportedSessionConfigOption = Extract<
+  acp.SessionConfigOption,
+  { type: "select" }
+>;
+
+function getSupportedConfigOptions(
+  configOptions: readonly acp.SessionConfigOption[] | null | undefined
+): SupportedSessionConfigOption[] | null {
+  if (configOptions == null) {
+    return null;
+  }
+  return configOptions.filter(
+    (option): option is SupportedSessionConfigOption =>
+      option.type === "select" && hasConfigValue(option, option.currentValue)
+  );
 }
 
-function getModelState(
-  configOptions: readonly acp.SessionConfigOption[] | null | undefined
-): ModelSelectionState | null {
-  const modelConfig = configOptions?.find(
-    (option): option is Extract<acp.SessionConfigOption, { type: "select" }> =>
-      option.type === "select" && option.category === "model"
+function hasConfigValue(
+  option: SupportedSessionConfigOption,
+  value: string
+): boolean {
+  return option.options.some((candidate) =>
+    "value" in candidate
+      ? candidate.value === value
+      : candidate.options.some((grouped) => grouped.value === value)
   );
-
-  if (!modelConfig) {
-    return null;
-  }
-
-  const availableModels: ModelSelectionState["availableModels"] = [];
-  for (const option of modelConfig.options) {
-    if ("value" in option) {
-      availableModels.push({ modelId: option.value, name: option.name });
-    } else {
-      for (const value of option.options) {
-        availableModels.push({ modelId: value.value, name: value.name });
-      }
-    }
-  }
-
-  if (
-    !availableModels.some((model) => model.modelId === modelConfig.currentValue)
-  ) {
-    return null;
-  }
-
-  return {
-    configId: modelConfig.id,
-    availableModels,
-    currentModelId: modelConfig.currentValue,
-  };
 }
 /**
  * ACP discriminates auth methods on `type`, and treats a missing `type` as
@@ -121,7 +107,7 @@ function normalizeAgentInfo(value: unknown): acp.Implementation | null {
 
 export interface SessionMetadata {
   modes: acp.SessionModeState | null;
-  models: ModelSelectionState | null;
+  configOptions: SupportedSessionConfigOption[] | null;
   commands: acp.AvailableCommand[] | null;
 }
 export interface ACPSessionCapabilities {
@@ -322,6 +308,8 @@ export class ACPClient {
   private loadingSessionId: acp.SessionId | null = null;
   private mcpCapabilities: acp.McpCapabilities = {};
   private promptCapabilities: acp.PromptCapabilities = {};
+  private configOptionsRevision = 0;
+  private configOptionRequestGeneration = 0;
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -501,6 +489,15 @@ export class ACPClient {
     this.supportsSessionListing = false;
     this.supportsSessionResuming = false;
     this.supportsAdditionalSessionDirectories = false;
+    this.currentSessionId = null;
+    this.sessionMetadata = null;
+    this.pendingCommandsBySession.clear();
+    this.pendingConfigOptionsBySession.clear();
+    this.pendingModeBySession.clear();
+    this.pendingSessionRequestGeneration = null;
+    this.loadingSessionId = null;
+    this.configOptionsRevision++;
+    this.configOptionRequestGeneration++;
     this.setState("connecting");
 
     try {
@@ -680,6 +677,7 @@ export class ACPClient {
       ) {
         clientCapabilities.terminal = true;
       }
+      clientCapabilities.session = { configOptions: {} };
 
       const initResponse = await connection.agent.request(
         acp.methods.agent.initialize,
@@ -783,7 +781,10 @@ export class ACPClient {
       console.log("[ACP] Commands updated:", update.availableCommands.length);
     } else if (update.sessionUpdate === "config_option_update") {
       if (isCurrentSession && this.sessionMetadata) {
-        this.sessionMetadata.models = getModelState(update.configOptions);
+        this.sessionMetadata.configOptions = getSupportedConfigOptions(
+          update.configOptions
+        );
+        this.configOptionsRevision++;
       } else if (this.pendingSessionRequestGeneration !== null) {
         this.pendingConfigOptionsBySession.set(
           params.sessionId,
@@ -828,6 +829,8 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
+    this.configOptionsRevision++;
+    this.configOptionRequestGeneration++;
 
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
@@ -850,6 +853,9 @@ export class ACPClient {
         return response;
       }
 
+      const hasBufferedConfigOptions = this.pendingConfigOptionsBySession.has(
+        response.sessionId
+      );
       const bufferedConfigOptions = this.pendingConfigOptionsBySession.get(
         response.sessionId
       );
@@ -865,13 +871,14 @@ export class ACPClient {
       this.currentSessionId = response.sessionId;
       this.sessionMetadata = {
         modes,
-        models: getModelState(
-          response.configOptions === undefined
+        configOptions: getSupportedConfigOptions(
+          hasBufferedConfigOptions
             ? bufferedConfigOptions
             : response.configOptions
         ),
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
+      this.configOptionsRevision++;
       if (replacedSessionId && this.canCloseSessions) {
         void connection.agent
           .request(acp.methods.agent.session.close, {
@@ -904,7 +911,8 @@ export class ACPClient {
             replacedSessionMetadata.commands = commands;
           }
           if (configOptions) {
-            replacedSessionMetadata.models = getModelState(configOptions);
+            replacedSessionMetadata.configOptions =
+              getSupportedConfigOptions(configOptions);
           }
           if (
             modeId &&
@@ -979,6 +987,8 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
+    this.configOptionsRevision++;
+    this.configOptionRequestGeneration++;
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
     try {
@@ -1006,6 +1016,8 @@ export class ACPClient {
         return response;
       }
 
+      const hasBufferedConfigOptions =
+        this.pendingConfigOptionsBySession.has(sessionId);
       const bufferedConfigOptions =
         this.pendingConfigOptionsBySession.get(sessionId);
       const modes = response.modes ?? null;
@@ -1020,13 +1032,14 @@ export class ACPClient {
       this.currentSessionId = sessionId;
       this.sessionMetadata = {
         modes,
-        models: getModelState(
-          response.configOptions === undefined
+        configOptions: getSupportedConfigOptions(
+          hasBufferedConfigOptions
             ? bufferedConfigOptions
             : response.configOptions
         ),
         commands: this.pendingCommandsBySession.get(sessionId) ?? null,
       };
+      this.configOptionsRevision++;
       if (
         replacedSessionId &&
         replacedSessionId !== sessionId &&
@@ -1136,34 +1149,40 @@ export class ACPClient {
     }
   }
 
-  async setModel(modelId: string): Promise<void> {
+  async setSessionConfigOption(configId: string, value: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
-    const models = this.sessionMetadata?.models;
+    const configOptions = this.sessionMetadata?.configOptions;
     if (!connection || !sessionId) {
       throw new Error("No active session");
     }
-    if (!models) {
-      throw new Error("Agent does not support model selection");
+    const option = configOptions?.find(
+      (candidate) => candidate.id === configId
+    );
+    if (!option) {
+      throw new Error(`Configuration option is not available: ${configId}`);
     }
-    if (!models.availableModels.some((model) => model.modelId === modelId)) {
-      throw new Error(`Model is not available: ${modelId}`);
+    if (!hasConfigValue(option, value)) {
+      throw new Error(`Configuration value is not available: ${value}`);
     }
 
+    const requestGeneration = ++this.configOptionRequestGeneration;
+    const configRevision = this.configOptionsRevision;
     const response = await connection.agent.request(
       acp.methods.agent.session.setConfigOption,
-      {
-        sessionId,
-        configId: models.configId,
-        value: modelId,
-      }
+      { sessionId, configId, value }
     );
     if (
       connection === this.connection &&
       sessionId === this.currentSessionId &&
-      this.sessionMetadata
+      this.sessionMetadata &&
+      requestGeneration === this.configOptionRequestGeneration &&
+      configRevision === this.configOptionsRevision
     ) {
-      this.sessionMetadata.models = getModelState(response.configOptions);
+      this.sessionMetadata.configOptions = getSupportedConfigOptions(
+        response.configOptions
+      );
+      this.configOptionsRevision++;
     }
   }
 
@@ -1237,6 +1256,8 @@ export class ACPClient {
     this.pendingConfigOptionsBySession.clear();
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
+    this.configOptionsRevision++;
+    this.configOptionRequestGeneration++;
     this.canCloseSessions = false;
     this.supportsSessionLoading = false;
     this.supportsSessionListing = false;

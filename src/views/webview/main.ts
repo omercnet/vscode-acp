@@ -9,6 +9,7 @@ import {
   isSupportedImageAttachment,
   type FileAttachment,
 } from "../../shared/attachments";
+import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 
 const markdown = new Marked({ breaks: true, gfm: true });
 
@@ -143,6 +144,7 @@ export interface ExtensionMessage {
     availableModels: Array<{ modelId: string; name: string }>;
     currentModelId: string;
   } | null;
+  configOptions?: SessionConfigOption[] | null;
   commands?: AvailableCommand[] | null;
   attachments?: FileAttachment[];
   skippedCount?: number;
@@ -787,6 +789,7 @@ export interface WebviewElements {
   agentSelector: HTMLSelectElement;
   connectBtn: HTMLButtonElement;
   welcomeConnectBtn: HTMLButtonElement;
+  configOptionsContainer: HTMLElement;
   modeSelector: HTMLSelectElement;
   modelSelector: HTMLSelectElement;
   welcomeView: HTMLElement;
@@ -812,6 +815,7 @@ export function getElements(doc: Document): WebviewElements {
     welcomeConnectBtn: doc.getElementById(
       "welcome-connect-btn"
     ) as HTMLButtonElement,
+    configOptionsContainer: doc.getElementById("config-options")!,
     modeSelector: doc.getElementById("mode-selector") as HTMLSelectElement,
     modelSelector: doc.getElementById("model-selector") as HTMLSelectElement,
     welcomeView: doc.getElementById("welcome-view")!,
@@ -857,6 +861,7 @@ export class WebviewController {
   private inputLocks = new Map<string, string>();
   private restoreInputFocus = false;
   private promptPending = false;
+  private hasSessionConfigOptions = false;
   private attachments: FileAttachment[] = [];
   private attachmentReadGeneration = 0;
   private attachmentPickerPending = false;
@@ -907,9 +912,13 @@ export class WebviewController {
       connectBtn,
       welcomeConnectBtn,
     } = this.elements;
-    const { agentSelector, modeSelector, modelSelector } = this.elements;
-
-    const { commandAutocomplete } = this.elements;
+    const {
+      agentSelector,
+      configOptionsContainer,
+      modeSelector,
+      modelSelector,
+      commandAutocomplete,
+    } = this.elements;
 
     sendBtn.addEventListener("click", () => this.send());
 
@@ -1105,6 +1114,20 @@ export class WebviewController {
         type: "selectModel",
         modelId: modelSelector.value,
       });
+    });
+    configOptionsContainer.addEventListener("change", (event) => {
+      const select = (event.target as HTMLElement).closest<HTMLSelectElement>(
+        ".session-config-select"
+      );
+      const configId = select?.dataset.configId;
+      if (select && configId !== undefined) {
+        updateSelectLabel(select, select.dataset.label || configId);
+        this.vscode.postMessage({
+          type: "selectConfigOption",
+          configId,
+          value: select.value,
+        });
+      }
     });
 
     this.win.addEventListener("message", (e: MessageEvent<ExtensionMessage>) =>
@@ -1565,6 +1588,11 @@ export class WebviewController {
     this.elements.agentSelector.disabled = inputLocked;
     this.elements.modeSelector.disabled = inputLocked;
     this.elements.modelSelector.disabled = inputLocked;
+    for (const select of this.elements.configOptionsContainer.querySelectorAll(
+      ".session-config-select"
+    )) {
+      (select as HTMLSelectElement).disabled = inputLocked;
+    }
     this.elements.inputContainer.setAttribute(
       "aria-busy",
       String(composerBusy)
@@ -1963,6 +1991,75 @@ export class WebviewController {
     this.updateInputControls();
   }
 
+  private clearSessionOptions(): void {
+    this.hasSessionConfigOptions = false;
+    this.elements.configOptionsContainer.replaceChildren();
+    this.elements.modeSelector.replaceChildren();
+    this.elements.modeSelector.style.display = "none";
+    this.elements.modelSelector.replaceChildren();
+    this.elements.modelSelector.style.display = "none";
+  }
+
+  private renderSessionConfigOptions(
+    configOptions: readonly SessionConfigOption[]
+  ): void {
+    this.clearSessionOptions();
+    this.hasSessionConfigOptions = true;
+
+    for (const configOption of configOptions) {
+      if (configOption.type !== "select") {
+        continue;
+      }
+      const label = configOption.name || configOption.id;
+      const select = this.doc.createElement("select");
+      select.className = "inline-select session-config-select";
+      select.dataset.configId = configOption.id;
+      select.dataset.label = label;
+      select.setAttribute("aria-label", `Select ${label}`);
+      if (configOption.description) {
+        select.title = configOption.description;
+      }
+
+      for (const entry of configOption.options) {
+        if ("value" in entry) {
+          const element = this.doc.createElement("option");
+          element.value = entry.value;
+          element.textContent = entry.name || entry.value;
+          element.dataset.label = entry.name || entry.value;
+          if (entry.description) {
+            element.title = entry.description;
+          }
+          select.appendChild(element);
+          continue;
+        }
+
+        const group = this.doc.createElement("optgroup");
+        group.label = entry.name || entry.group;
+        group.dataset.group = entry.group;
+        for (const value of entry.options) {
+          const element = this.doc.createElement("option");
+          element.value = value.value;
+          element.textContent = value.name || value.value;
+          element.dataset.label = value.name || value.value;
+          if (value.description) {
+            element.title = value.description;
+          }
+          group.appendChild(element);
+        }
+        select.appendChild(group);
+      }
+
+      if (select.options.length === 0) {
+        continue;
+      }
+      select.value = configOption.currentValue;
+      select.style.display = "inline-block";
+      updateSelectLabel(select, label);
+      this.elements.configOptionsContainer.appendChild(select);
+    }
+    this.updateInputControls(false);
+  }
+
   handleMessage(msg: ExtensionMessage): void {
     const { modeSelector, modelSelector, agentSelector, connectBtn } =
       this.elements;
@@ -2192,6 +2289,7 @@ export class WebviewController {
       case "sessionTransition":
         if (msg.active === true) {
           this.cancelAttachmentPreparation();
+          this.clearSessionOptions();
         }
         this.setInputLock(
           "session",
@@ -2216,6 +2314,9 @@ export class WebviewController {
             };
             this.renderAttachments();
           }
+          if (msg.state !== "connected") {
+            this.clearSessionOptions();
+          }
           connectBtn.style.display =
             msg.state === "connected" ? "none" : "inline-block";
         }
@@ -2238,8 +2339,7 @@ export class WebviewController {
         this.updateStatus("disconnected");
         this.clearChatState();
         this.clearAttachments();
-        modeSelector.style.display = "none";
-        modelSelector.style.display = "none";
+        this.clearSessionOptions();
         this.clearPermissionModal();
         this.saveState();
         break;
@@ -2247,8 +2347,7 @@ export class WebviewController {
         this.hideSessionHistory();
         this.clearChatState();
         this.clearAttachments();
-        modeSelector.style.display = "none";
-        modelSelector.style.display = "none";
+        this.clearSessionOptions();
         this.clearPermissionModal();
         this.saveState();
         break;
@@ -2270,6 +2369,7 @@ export class WebviewController {
       case "replayStart":
         this.cancelAttachmentPreparation();
         this.promptPending = false;
+        this.clearSessionOptions();
         this.setInputLock("replay", true, "Restoring conversation…");
         this.hideSessionHistory();
         this.showReplayStatus();
@@ -2311,45 +2411,46 @@ export class WebviewController {
           embeddedContext: msg.promptCapabilities?.embeddedContext === true,
         };
         this.renderAttachments();
-        const hasModes =
-          msg.modes &&
-          msg.modes.availableModes &&
-          msg.modes.availableModes.length > 0;
-        const hasModels =
-          msg.models &&
-          msg.models.availableModels &&
-          msg.models.availableModels.length > 0;
-
-        if (hasModes && msg.modes) {
-          modeSelector.style.display = "inline-block";
-          modeSelector.innerHTML = "";
-          msg.modes.availableModes.forEach((m) => {
-            const opt = this.doc.createElement("option");
-            opt.value = m.id;
-            opt.textContent = m.name || m.id;
-            opt.dataset.label = m.name || m.id;
-            if (m.id === msg.modes?.currentModeId) opt.selected = true;
-            modeSelector.appendChild(opt);
-          });
-          updateSelectLabel(modeSelector, "Mode");
+        if (Array.isArray(msg.configOptions)) {
+          this.renderSessionConfigOptions(msg.configOptions);
         } else {
-          modeSelector.style.display = "none";
-        }
+          this.clearSessionOptions();
+          const hasModes =
+            msg.modes &&
+            msg.modes.availableModes &&
+            msg.modes.availableModes.length > 0;
+          const hasModels =
+            msg.models &&
+            msg.models.availableModels &&
+            msg.models.availableModels.length > 0;
 
-        if (hasModels && msg.models) {
-          modelSelector.style.display = "inline-block";
-          modelSelector.innerHTML = "";
-          msg.models.availableModels.forEach((m) => {
-            const opt = this.doc.createElement("option");
-            opt.value = m.modelId;
-            opt.textContent = m.name || m.modelId;
-            opt.dataset.label = m.name || m.modelId;
-            if (m.modelId === msg.models?.currentModelId) opt.selected = true;
-            modelSelector.appendChild(opt);
-          });
-          updateSelectLabel(modelSelector, "Model");
-        } else {
-          modelSelector.style.display = "none";
+          if (hasModes && msg.modes) {
+            modeSelector.style.display = "inline-block";
+            msg.modes.availableModes.forEach((mode) => {
+              const option = this.doc.createElement("option");
+              option.value = mode.id;
+              option.textContent = mode.name || mode.id;
+              option.dataset.label = mode.name || mode.id;
+              if (mode.id === msg.modes?.currentModeId) option.selected = true;
+              modeSelector.appendChild(option);
+            });
+            updateSelectLabel(modeSelector, "Mode");
+          }
+
+          if (hasModels && msg.models) {
+            modelSelector.style.display = "inline-block";
+            msg.models.availableModels.forEach((model) => {
+              const option = this.doc.createElement("option");
+              option.value = model.modelId;
+              option.textContent = model.name || model.modelId;
+              option.dataset.label = model.name || model.modelId;
+              if (model.modelId === msg.models?.currentModelId) {
+                option.selected = true;
+              }
+              modelSelector.appendChild(option);
+            });
+            updateSelectLabel(modelSelector, "Model");
+          }
         }
 
         if (msg.commands && Array.isArray(msg.commands)) {
@@ -2358,7 +2459,7 @@ export class WebviewController {
         break;
       }
       case "modeUpdate":
-        if (msg.modeId) {
+        if (!this.hasSessionConfigOptions && msg.modeId) {
           modeSelector.value = msg.modeId;
           updateSelectLabel(modeSelector, "Mode");
         }

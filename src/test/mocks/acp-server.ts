@@ -70,6 +70,7 @@ export type DemoMode =
   | "capabilities"
   | "rich-attachments"
   | "deferred-config"
+  | "cascading-config"
   | "invalid-config"
   | "invalid-version"
   | "late-permission"
@@ -121,6 +122,7 @@ export class MockACPServer {
   private loadSessionRequests: acp.LoadSessionRequest[] = [];
   private listSessionRequests: acp.ListSessionsRequest[] = [];
   private resumeSessionRequests: acp.ResumeSessionRequest[] = [];
+  private configOptionRequests: acp.SetSessionConfigOptionRequest[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -135,6 +137,9 @@ export class MockACPServer {
   }
   getNewSessionRequests(): readonly acp.NewSessionRequest[] {
     return this.newSessionRequests;
+  }
+  getConfigOptionRequests(): readonly acp.SetSessionConfigOptionRequest[] {
+    return this.configOptionRequests;
   }
 
   getLoadSessionRequests(): readonly acp.LoadSessionRequest[] {
@@ -436,30 +441,74 @@ export class MockACPServer {
               ],
             },
           ]
-        : [
-            {
-              id: "model",
-              type: "select",
-              name: "Model",
-              category: "model",
-              currentValue:
-                this.demoMode === "invalid-config"
-                  ? "missing-model"
-                  : this.demoMode === "session-isolation"
-                    ? isolatedModel
-                    : "claude-3-sonnet",
-              options:
-                this.demoMode === "session-isolation"
-                  ? [{ value: isolatedModel, name: isolatedModel }]
-                  : [
-                      {
-                        value: "claude-3-sonnet",
-                        name: "Claude 3 Sonnet",
-                      },
-                      { value: "claude-3-opus", name: "Claude 3 Opus" },
-                    ],
-            },
-          ];
+        : this.demoMode === "cascading-config"
+          ? [
+              {
+                id: "interaction",
+                type: "select",
+                name: "Interaction",
+                category: "mode",
+                currentValue: "build",
+                options: [
+                  { value: "build", name: "Build" },
+                  { value: "review", name: "Review" },
+                ],
+              },
+              {
+                id: "model",
+                type: "select",
+                name: "Model",
+                category: "model",
+                currentValue: "fast",
+                options: [
+                  {
+                    group: "speed",
+                    name: "Fast models",
+                    options: [{ value: "fast", name: "Fast" }],
+                  },
+                  {
+                    group: "quality",
+                    name: "Quality models",
+                    options: [{ value: "accurate", name: "Accurate" }],
+                  },
+                ],
+              },
+              {
+                id: "thought",
+                type: "select",
+                name: "Thought level",
+                category: "thought_level",
+                currentValue: "medium",
+                options: [
+                  { value: "low", name: "Low" },
+                  { value: "medium", name: "Medium" },
+                ],
+              },
+            ]
+          : [
+              {
+                id: "model",
+                type: "select",
+                name: "Model",
+                category: "model",
+                currentValue:
+                  this.demoMode === "invalid-config"
+                    ? "missing-model"
+                    : this.demoMode === "session-isolation"
+                      ? isolatedModel
+                      : "claude-3-sonnet",
+                options:
+                  this.demoMode === "session-isolation"
+                    ? [{ value: isolatedModel, name: isolatedModel }]
+                    : [
+                        {
+                          value: "claude-3-sonnet",
+                          name: "Claude 3 Sonnet",
+                        },
+                        { value: "claude-3-opus", name: "Claude 3 Opus" },
+                      ],
+              },
+            ];
 
     this.sessions.set(sessionId, {
       id: sessionId,
@@ -656,20 +705,62 @@ export class MockACPServer {
     const value = typeof params?.value === "string" ? params.value : null;
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
     const configOption = session?.configOptions.find(
-      (option) => option.id === configId && option.type === "select"
+      (
+        option
+      ): option is Extract<acp.SessionConfigOption, { type: "select" }> =>
+        option.id === configId && option.type === "select"
+    );
+    const valueAvailable = configOption?.options.some((entry) =>
+      "value" in entry
+        ? entry.value === value
+        : entry.options.some((option) => option.value === value)
     );
 
-    if (!session || !configOption || !value) {
+    if (
+      !session ||
+      sessionId === null ||
+      !configOption ||
+      configId === null ||
+      value === null ||
+      !valueAvailable
+    ) {
       this.sendError(id, -32602, "Invalid session configuration option");
       return;
     }
 
-    configOption.currentValue = value;
+    this.configOptionRequests.push({ sessionId, configId, value });
+    if (
+      this.demoMode === "cascading-config" &&
+      configId === "interaction" &&
+      value === "review"
+    ) {
+      session.configOptions = [
+        { ...configOption, currentValue: value },
+        {
+          id: "model",
+          type: "select",
+          name: "Model",
+          category: "model",
+          currentValue: "accurate",
+          options: [
+            {
+              group: "quality",
+              name: "Quality models",
+              options: [{ value: "accurate", name: "Accurate" }],
+            },
+          ],
+        },
+      ];
+    } else {
+      configOption.currentValue = value;
+    }
     this.sendResponse(id, { configOptions: session.configOptions });
-    this.sendSessionUpdate(session.id, {
-      sessionUpdate: "config_option_update",
-      configOptions: session.configOptions,
-    });
+    if (this.demoMode !== "cascading-config") {
+      this.sendSessionUpdate(session.id, {
+        sessionUpdate: "config_option_update",
+        configOptions: session.configOptions,
+      });
+    }
   }
 
   private async handlePrompt(

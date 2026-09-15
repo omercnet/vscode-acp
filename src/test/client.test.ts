@@ -451,7 +451,7 @@ suite("ACPClient with Mock Server", () => {
 
       assert.deepStrictEqual(
         mockProcesses[0].server.getInitializeRequest()?.clientCapabilities,
-        {}
+        { session: { configOptions: {} } }
       );
     });
     test("exposes negotiated MCP transport capabilities", async () => {
@@ -684,9 +684,14 @@ suite("ACPClient with Mock Server", () => {
       const metadata = client.getSessionMetadata();
       assert.ok(metadata);
       assert.ok(metadata.modes);
-      assert.ok(metadata.models);
+      assert.deepStrictEqual(
+        metadata.configOptions?.map(({ id, currentValue }) => ({
+          id,
+          currentValue,
+        })),
+        [{ id: "model", currentValue: "claude-3-sonnet" }]
+      );
       assert.strictEqual(metadata.modes?.currentModeId, "code");
-      assert.strictEqual(metadata.models?.currentModelId, "claude-3-sonnet");
     });
 
     test("should receive available commands update", async () => {
@@ -711,20 +716,33 @@ suite("ACPClient with Mock Server", () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      const models = client.getSessionMetadata()?.models;
-      assert.deepStrictEqual(models?.availableModels, [
-        { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-        { modelId: "claude-3-opus", name: "Claude 3 Opus" },
+      assert.deepStrictEqual(client.getSessionMetadata()?.configOptions, [
+        {
+          id: "model",
+          type: "select",
+          name: "Model",
+          category: "model",
+          currentValue: "claude-3-opus",
+          options: [
+            {
+              group: "anthropic",
+              name: "Anthropic",
+              options: [
+                { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+                { value: "claude-3-opus", name: "Claude 3 Opus" },
+              ],
+            },
+          ],
+        },
       ]);
-      assert.strictEqual(models?.currentModelId, "claude-3-opus");
     });
 
-    test("does not expose a model selector with an invalid current value", async () => {
+    test("drops a select option with an invalid current value", async () => {
       demoMode = "invalid-config";
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      assert.strictEqual(client.getSessionMetadata()?.models, null);
+      assert.deepStrictEqual(client.getSessionMetadata()?.configOptions, []);
     });
 
     test("tracks current mode updates in session metadata", async () => {
@@ -759,7 +777,10 @@ suite("ACPClient with Mock Server", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       const metadata = client.getSessionMetadata();
-      assert.strictEqual(metadata?.models?.currentModelId, "session-2-model");
+      assert.strictEqual(
+        metadata?.configOptions?.[0]?.currentValue,
+        "session-2-model"
+      );
       assert.strictEqual(metadata?.commands?.[0]?.name, "session-2");
       assert.deepStrictEqual(observedSessionIds, []);
       assert.strictEqual(staleReadCount, 0);
@@ -926,6 +947,10 @@ suite("ACPClient with Mock Server", () => {
 
       assert.strictEqual(client.supportsSessionLoad(), true);
       assert.strictEqual(client.getCurrentSessionId(), created.sessionId);
+      assert.strictEqual(
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
+        "claude-3-sonnet"
+      );
       assert.deepStrictEqual(updates, [
         { sessionUpdate: "user_message_chunk", text: "Restored " },
         { sessionUpdate: "user_message_chunk", text: "question" },
@@ -1360,27 +1385,48 @@ suite("ACPClient with Mock Server", () => {
     });
   });
 
-  suite("setModel", () => {
-    test("should change model", async () => {
+  suite("setSessionConfigOption", () => {
+    test("replaces the full option set returned by a cascading change", async () => {
+      demoMode = "cascading-config";
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      await client.setModel("claude-3-opus");
+      await client.setSessionConfigOption("interaction", "review");
 
-      const metadata = client.getSessionMetadata();
-      assert.strictEqual(metadata?.models?.currentModelId, "claude-3-opus");
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        [
+          {
+            sessionId: "mock-session-1",
+            configId: "interaction",
+            value: "review",
+          },
+        ]
+      );
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
     });
 
-    test("rejects a model value that the agent did not offer", async () => {
+    test("rejects values that the advertised option does not offer", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await assert.rejects(
-        () => client.setModel("missing-model"),
-        /Model is not available: missing-model/
+        () => client.setSessionConfigOption("model", "missing-model"),
+        /Configuration value is not available: missing-model/
       );
       assert.strictEqual(
-        client.getSessionMetadata()?.models?.currentModelId,
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
         "claude-3-sonnet"
       );
     });
@@ -1389,7 +1435,7 @@ suite("ACPClient with Mock Server", () => {
       await client.connect();
 
       await assert.rejects(async () => {
-        await client.setModel("claude-3-opus");
+        await client.setSessionConfigOption("model", "claude-3-opus");
       }, /No active session/);
     });
   });
