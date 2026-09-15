@@ -949,50 +949,55 @@ suite("Resource link attachments", () => {
       }
     });
 
-    test("embeds the current unsaved editor buffer", async () => {
-      const workspace = vscode.workspace.workspaceFolders?.[0];
-      assert.ok(workspace);
-      await workspaceFileCapabilities();
-      const dir = await mkdtemp(
-        join(workspace.uri.fsPath, ".attachment-test-")
-      );
-      const path = join(dir, "current.ts");
-      try {
-        await writeFile(path, " ".repeat(MAX_EMBEDDED_RESOURCE_BYTES + 1));
-        const uri = vscode.Uri.file(path);
-        const metadata = await createFileAttachment(uri, "current");
-        assert.ok(metadata);
-        const document = await vscode.workspace.openTextDocument(uri);
-        await vscode.window.showTextDocument(document, { preview: true });
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
-          uri,
-          new vscode.Range(
-            document.positionAt(0),
-            document.positionAt(document.getText().length)
-          ),
-          "const unsaved = true;\n"
+    for (const lineEnding of ["\n", "\r\n"]) {
+      test(`embeds the current unsaved editor buffer with ${lineEnding === "\n" ? "LF" : "CRLF"}`, async () => {
+        const workspace = vscode.workspace.workspaceFolders?.[0];
+        assert.ok(workspace);
+        await workspaceFileCapabilities();
+        const dir = await mkdtemp(
+          join(workspace.uri.fsPath, ".attachment-test-")
         );
-        assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+        const path = join(dir, "current.ts");
+        try {
+          await writeFile(
+            path,
+            " ".repeat(MAX_EMBEDDED_RESOURCE_BYTES + 1) + lineEnding
+          );
+          const uri = vscode.Uri.file(path);
+          const metadata = await createFileAttachment(uri, "current");
+          assert.ok(metadata);
+          const document = await vscode.workspace.openTextDocument(uri);
+          await vscode.window.showTextDocument(document, { preview: true });
+          const edit = new vscode.WorkspaceEdit();
+          edit.replace(
+            uri,
+            new vscode.Range(
+              document.positionAt(0),
+              document.positionAt(document.getText().length)
+            ),
+            "const unsaved = true;\n"
+          );
+          assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
 
-        const prepared = await prepareFileAttachment(
-          { ...metadata, source: "file" },
-          { embeddedContext: true },
-          0
-        );
-        assert.ok(prepared);
-        assert.deepStrictEqual(prepared.attachment.payload, {
-          type: "text",
-          text: "const unsaved = true;\n",
-        });
-        assert.strictEqual(prepared.attachment.transport, "resource");
-        await vscode.commands.executeCommand("workbench.action.files.revert");
-        await vscode.commands.executeCommand(
-          "workbench.action.closeActiveEditor"
-        );
-      } finally {
-        await rm(dir, { recursive: true, force: true });
-      }
-    });
+          const prepared = await prepareFileAttachment(
+            { ...metadata, source: "file" },
+            { embeddedContext: true },
+            0
+          );
+          assert.ok(prepared);
+          assert.deepStrictEqual(prepared.attachment.payload, {
+            type: "text",
+            text: `const unsaved = true;${lineEnding}`,
+          });
+          assert.strictEqual(prepared.attachment.transport, "resource");
+          await vscode.commands.executeCommand("workbench.action.files.revert");
+          await vscode.commands.executeCommand(
+            "workbench.action.closeActiveEditor"
+          );
+        } finally {
+          await rm(dir, { recursive: true, force: true });
+        }
+      });
+    }
   });
 });
