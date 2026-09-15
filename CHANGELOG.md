@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0](https://github.com/omercnet/vscode-acp/compare/v1.5.0...v1.6.0) (2026-09-15)
+
+
+### Features
+
+* **chat:** default ACP view to secondary sidebar ([#119](https://github.com/omercnet/vscode-acp/issues/119)) ([ae7023d](https://github.com/omercnet/vscode-acp/commit/ae7023d2c4bd12f1c10db26fd86f17ba27195425))
+* **mcp:** load trusted project configuration ([#123](https://github.com/omercnet/vscode-acp/issues/123)) ([6dec1a2](https://github.com/omercnet/vscode-acp/commit/6dec1a24a769ee5c2490a5ee1609f30858e08a7a))
+
+
+### Bug Fixes
+
+* **acp:** preserve dirty editor changes ([#122](https://github.com/omercnet/vscode-acp/issues/122)) ([4c351ab](https://github.com/omercnet/vscode-acp/commit/4c351ab8f2f0f904495db196cb779bcff8eabdb9))
+* **ci:** harden extension publication ([#115](https://github.com/omercnet/vscode-acp/issues/115)) ([4b55bc5](https://github.com/omercnet/vscode-acp/commit/4b55bc597f6903a407f06049e50ee608aaa946a1))
+* **commands:** clarify agent-advertised slash commands ([#118](https://github.com/omercnet/vscode-acp/issues/118)) ([4b40c75](https://github.com/omercnet/vscode-acp/commit/4b40c75cc0196e82ec480c7aecd72e5041d38224))
+
 ## [1.5.0](https://github.com/omercnet/vscode-acp/compare/v1.4.0...v1.5.0) (2026-09-14)
 
 
