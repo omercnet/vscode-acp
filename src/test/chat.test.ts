@@ -8,6 +8,7 @@ import {
   mkdtemp,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "fs/promises";
 import { tmpdir } from "os";
@@ -44,6 +45,11 @@ interface MockACPClient {
   setAgent: (config: any) => void;
   getAgentId: () => string;
   getCurrentSessionId: () => string | null;
+  getAgentInfo: () => {
+    name: string;
+    title?: string | null;
+    version: string;
+  } | null;
   getAuthenticationMethods: () => readonly AuthMethod[];
   getConnectionGeneration: () => number;
   authenticate: (
@@ -140,6 +146,11 @@ class TestMemento implements MockMemento {
 class TestACPClient implements MockACPClient {
   private agentIdValue = "test-agent";
   private setModeCallCount = 0;
+  public agentInfo: {
+    name: string;
+    title?: string | null;
+    version: string;
+  } | null = null;
   private setModelCallCount = 0;
   private stateChangeCallback:
     | ((state: "disconnected" | "connecting" | "connected" | "error") => void)
@@ -154,6 +165,9 @@ class TestACPClient implements MockACPClient {
   setAgent(): void {}
   getAgentId(): string {
     return this.agentIdValue;
+  }
+  getAgentInfo() {
+    return this.agentInfo ? { ...this.agentInfo } : null;
   }
   getCurrentSessionId(): string | null {
     return this.currentSessionId;
@@ -4106,12 +4120,176 @@ suite("ChatViewProvider", () => {
       assert.deepStrictEqual(await promise, {
         outcome: { outcome: "cancelled" },
       });
+
       assert.strictEqual((provider as any).permissionRequests.size, 0);
       assert.ok(
         fakeWebview.messages.some(
           (message) => message.type === "permissionRequestExpired"
         )
       );
+    });
+  });
+  suite("Protocol metadata", () => {
+    for (const stopReason of [
+      "end_turn",
+      "max_tokens",
+      "max_turn_requests",
+      "refusal",
+      "cancelled",
+    ]) {
+      test(`forwards a zero-text ${stopReason} completion`, async () => {
+        class StopReasonClient extends TestACPClient {
+          isConnected(): boolean {
+            return true;
+          }
+
+          async sendMessage(): Promise<{ stopReason: string }> {
+            return { stopReason };
+          }
+        }
+
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          new StopReasonClient() as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          hasSession: boolean;
+          handleUserMessage(text: string): Promise<void>;
+        };
+        internals.hasSession = true;
+
+        await internals.handleUserMessage("Continue");
+
+        assert.deepStrictEqual(messages.at(-1), {
+          type: "streamEnd",
+          stopReason,
+        });
+        assert.ok(!messages.some((message) => message.type === "error"));
+      });
+    }
+
+    test("publishes identity only while its initialized connection is active", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      acpClient.agentInfo = {
+        name: "metadata-agent",
+        title: "Metadata Agent",
+        version: "1.4.0",
+      };
+
+      acpClient.emitStateChange("connected");
+      acpClient.emitStateChange("error");
+
+      assert.deepStrictEqual(messages[0], {
+        type: "connectionState",
+        state: "connected",
+        agentInfo: {
+          name: "metadata-agent",
+          title: "Metadata Agent",
+          version: "1.4.0",
+        },
+      });
+      assert.deepStrictEqual(messages.at(-1), {
+        type: "connectionState",
+        state: "error",
+        agentInfo: null,
+      });
+    });
+
+    test("opens only canonical tool locations inside the trusted workspace", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const internals = provider as unknown as {
+        view: FakeWebview["view"];
+        handleOpenToolLocation(path: unknown, line: unknown): Promise<void>;
+      };
+      internals.view = fakeWebview.view;
+      const handleOpenToolLocation = internals.handleOpenToolLocation;
+      const projectFile = join(workspaceRoot(), "README.md");
+      const outsideDirectory = await mkdtemp(join(tmpdir(), "acp-location-"));
+      const outsideFile = join(outsideDirectory, "outside.ts");
+      const linksDirectory = await mkdtemp(join(workspaceRoot(), "locations-"));
+      await writeFile(outsideFile, "outside\n");
+
+      try {
+        await symlink(
+          workspaceRoot(),
+          join(linksDirectory, "inside"),
+          "junction"
+        );
+        await symlink(
+          outsideDirectory,
+          join(linksDirectory, "outside"),
+          "junction"
+        );
+        await handleOpenToolLocation.call(provider, projectFile, 5);
+        assert.strictEqual(
+          await realpath(vscode.window.activeTextEditor!.document.uri.fsPath),
+          await realpath(projectFile)
+        );
+        assert.strictEqual(
+          vscode.window.activeTextEditor?.selection.active.line,
+          4
+        );
+        await handleOpenToolLocation.call(
+          provider,
+          join(linksDirectory, "inside", "README.md"),
+          Number.MAX_SAFE_INTEGER
+        );
+        assert.strictEqual(
+          await realpath(vscode.window.activeTextEditor!.document.uri.fsPath),
+          await realpath(projectFile)
+        );
+        assert.strictEqual(
+          vscode.window.activeTextEditor?.selection.active.line,
+          vscode.window.activeTextEditor!.document.lineCount - 1
+        );
+        const activeDocument =
+          vscode.window.activeTextEditor?.document.uri.fsPath;
+
+        for (const rejectedPath of [
+          outsideFile,
+          join(linksDirectory, "outside", "outside.ts"),
+          join(workspaceRoot(), "missing-location.ts"),
+          vscode.Uri.file(projectFile).toString(),
+          "relative.ts",
+          `${projectFile}\u0000`,
+        ]) {
+          fakeWebview.messages.length = 0;
+          await handleOpenToolLocation.call(provider, rejectedPath, 1);
+          assert.strictEqual(
+            vscode.window.activeTextEditor?.document.uri.fsPath,
+            activeDocument
+          );
+          assert.strictEqual(
+            fakeWebview.messages[0]?.type,
+            "toolLocationError"
+          );
+        }
+      } finally {
+        provider.dispose();
+        await rm(linksDirectory, { recursive: true, force: true });
+        await rm(outsideDirectory, { recursive: true, force: true });
+        await vscode.commands.executeCommand(
+          "workbench.action.closeActiveEditor"
+        );
+      }
     });
   });
 
