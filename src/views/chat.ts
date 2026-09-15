@@ -601,6 +601,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private disposed = false;
   private terminals: Map<string, ManagedTerminal> = new Map();
   private retiringTerminals = new Set<ManagedTerminal>();
+  private terminalCleanup: Promise<void> = Promise.resolve();
   private terminalGeneration = 0;
   private pendingTerminalCreates = 0;
   /**
@@ -676,28 +677,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (state === "disconnected" || state === "error") {
-        const interruptedReplay = this.isReplaying;
-        this.conversationGeneration++;
-        this.hasSession = false;
-        this.isReplaying = false;
-        this.replayGeneration = null;
-        this.replayMessages = [];
-        this.connectionStart = null;
-        this.sessionStart = null;
-        this.activeSessionContext = null;
-        this.hasRestoredLegacyMode = false;
-        this.clearPendingAttachments();
-        // A dropped agent leaves its child processes running and its terminal
-        // handles reachable if the next session reuses the same id, so the
-        // whole capability is torn down with the connection.
-        void this.disposeTerminals();
-        this.expirePermissionRequests();
-        if (interruptedReplay) {
-          this.postMessage({
-            type: "replayFailed",
-            text: "The agent disconnected while restoring this session.",
-          });
-        }
+        this.handleConnectionEnded();
       }
       this.sendConnectionState(state);
     });
@@ -1035,6 +1015,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public async deleteSession(): Promise<void> {
     await this.showSessionHistory("delete");
+  }
+
+  public async disconnectAgent(): Promise<void> {
+    await this.runSessionTransition("Disconnecting agent…", async () => {
+      await this.disconnectCurrentAgent();
+    });
+  }
+
+  public async restartAgent(): Promise<void> {
+    await this.runSessionTransition("Restarting agent…", async () => {
+      await this.disconnectCurrentAgent();
+      const generation = this.conversationGeneration;
+      try {
+        await this.startWorkspaceSession(generation);
+        if (this.isCurrentConversation(generation)) {
+          this.clearPendingAttachments();
+          this.postMessage({ type: "chatCleared" });
+        }
+      } catch (error) {
+        throw this.mcpSecretRedactor.redactError(error);
+      }
+    });
   }
 
   private refreshAgentConfiguration(): void {
@@ -2520,6 +2522,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private handleConnectionEnded(): void {
+    const interruptedReplay = this.isReplaying;
+    this.conversationGeneration++;
+    this.hasSession = false;
+    this.hasRestoredLegacyMode = false;
+    this.isReplaying = false;
+    this.replayGeneration = null;
+    this.replayMessages = [];
+    this.connectionStart = null;
+    this.sessionStart = null;
+    this.activeSessionContext = null;
+    this.stderrBuffer = "";
+    this.clearPendingAttachments();
+    const cleanup = this.disposeTerminals();
+    this.terminalCleanup = Promise.all([this.terminalCleanup, cleanup]).then(
+      () => undefined
+    );
+    this.expirePermissionRequests();
+    if (interruptedReplay) {
+      this.postMessage({
+        type: "replayFailed",
+        text: "The agent disconnected while restoring this session.",
+      });
+    }
+  }
+
+  private async disconnectCurrentAgent(): Promise<void> {
+    const wasDisconnected = this.acpClient.getState() === "disconnected";
+    this.acpClient.dispose();
+    if (wasDisconnected) {
+      this.handleConnectionEnded();
+    }
+    await this.terminalCleanup;
+    this.mcpSecretRedactor.clear();
+  }
+
   private async disposeTerminals(): Promise<void> {
     this.terminalGeneration++;
     const terminals = Array.from(this.terminals.values());
@@ -2833,6 +2871,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.connectionStart;
   }
 
+  private async startWorkspaceSession(generation: number): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+    await this.ensureConnection();
+    if (!this.isCurrentConversation(generation) || this.hasSession) {
+      return;
+    }
+    const resource = workspaceFolder?.uri;
+    const request = await this.getSessionParameters(
+      workingDir,
+      resource,
+      generation
+    );
+    if (
+      !request ||
+      !this.isCurrentConversation(generation) ||
+      this.hasSession
+    ) {
+      return;
+    }
+    await this.requestSessionWithAuthentication(
+      () => this.acpClient.newSession(request),
+      generation
+    );
+    if (!this.isCurrentConversation(generation)) {
+      return;
+    }
+    this.activeSessionContext = {
+      cwd: workingDir,
+      configurationResource: resource?.toString(),
+    };
+    this.hasSession = true;
+    this.sendSessionMetadata();
+  }
+
   private async ensureSession(): Promise<void> {
     while (this.sessionTransition) {
       const transition = this.sessionTransition;
@@ -2849,44 +2922,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (!this.sessionStart) {
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
       const label = this.acpClient.isConnected()
         ? "Starting session…"
         : "Connecting to agent…";
       this.sessionStart = this.runSessionTransition(label, async () => {
         const generation = this.conversationGeneration;
         try {
-          await this.ensureConnection();
-          if (!this.isCurrentConversation(generation) || this.hasSession) {
-            return;
-          }
-          const resource = workspaceFolder?.uri;
-          const request = await this.getSessionParameters(
-            workingDir,
-            resource,
-            generation
-          );
-          if (
-            !request ||
-            !this.isCurrentConversation(generation) ||
-            this.hasSession
-          ) {
-            return;
-          }
-          await this.requestSessionWithAuthentication(
-            () => this.acpClient.newSession(request),
-            generation
-          );
-          if (!this.isCurrentConversation(generation)) {
-            return;
-          }
-          this.activeSessionContext = {
-            cwd: workingDir,
-            configurationResource: resource?.toString(),
-          };
-          this.hasSession = true;
-          this.sendSessionMetadata();
+          await this.startWorkspaceSession(generation);
         } catch (error) {
           if (!this.isCurrentConversation(generation)) {
             return;

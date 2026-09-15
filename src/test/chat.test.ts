@@ -1944,6 +1944,135 @@ suite("ChatViewProvider", () => {
     });
   });
 
+  suite("Agent lifecycle commands", () => {
+    class LifecycleClient extends TestACPClient {
+      public calls: string[] = [];
+      private connectionState:
+        "disconnected" | "connecting" | "connected" | "error" = "connected";
+
+      getState(): "disconnected" | "connecting" | "connected" | "error" {
+        return this.connectionState;
+      }
+
+      isConnected(): boolean {
+        return this.connectionState === "connected";
+      }
+
+      async connect(): Promise<void> {
+        this.calls.push("connect");
+        this.connectionState = "connected";
+        this.emitStateChange("connected");
+      }
+
+      async newSession(): Promise<void> {
+        this.calls.push("newSession");
+        this.currentSessionId = "replacement-session";
+      }
+
+      dispose(): void {
+        this.calls.push("dispose");
+        this.currentSessionId = null;
+        if (this.connectionState !== "disconnected") {
+          this.connectionState = "disconnected";
+          this.emitStateChange("disconnected");
+        }
+      }
+    }
+
+    test("disconnect reuses cleanup and revokes pending permissions", async () => {
+      const client = new LifecycleClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const lifecycle = provider as unknown as {
+        view: FakeWebview["view"];
+        disconnectAgent(): Promise<void>;
+        handleRequestPermission(
+          request: RequestPermissionRequest
+        ): Promise<RequestPermissionResponse>;
+        terminalPermissionGrants: Map<string, unknown>;
+      };
+      lifecycle.view = fakeWebview.view;
+      lifecycle.terminalPermissionGrants.set("approved", {});
+      const permission = lifecycle.handleRequestPermission(
+        makePermissionRequest()
+      );
+      await waitForPermissionRequest(fakeWebview, 0, permission);
+
+      await lifecycle.disconnectAgent();
+
+      assert.deepStrictEqual(client.calls, ["dispose"]);
+      assert.deepStrictEqual(await permission, {
+        outcome: { outcome: "cancelled" },
+      });
+      assert.strictEqual(lifecycle.terminalPermissionGrants.size, 0);
+      assert.ok(
+        fakeWebview.messages.some(
+          (entry) =>
+            entry.type === "connectionState" && entry.state === "disconnected"
+        )
+      );
+    });
+
+    test("restart waits for terminal cleanup before starting one new session", async () => {
+      const client = new LifecycleClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (entry: Record<string, unknown>) => messages.push(entry),
+      });
+      let releaseCleanup!: () => void;
+      let markCleanupStarted!: () => void;
+      const cleanupStarted = new Promise<void>((resolve) => {
+        markCleanupStarted = resolve;
+      });
+      const cleanupGate = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      });
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          client.calls.push("cleanupTerminals");
+          markCleanupStarted();
+          await cleanupGate;
+        },
+      });
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async (cwd: string) => ({ cwd, mcpServers: [] }),
+      });
+      const lifecycle = provider as unknown as {
+        restartAgent(): Promise<void>;
+        hasSession: boolean;
+      };
+
+      const restarting = lifecycle.restartAgent();
+      await cleanupStarted;
+      assert.deepStrictEqual(client.calls, ["dispose", "cleanupTerminals"]);
+
+      releaseCleanup();
+      await restarting;
+
+      assert.deepStrictEqual(client.calls, [
+        "dispose",
+        "cleanupTerminals",
+        "connect",
+        "newSession",
+      ]);
+      assert.strictEqual(lifecycle.hasSession, true);
+      assert.ok(messages.some((entry) => entry.type === "chatCleared"));
+      assert.deepStrictEqual(
+        messages.filter((entry) => entry.type === "sessionTransition").at(-1),
+        { type: "sessionTransition", active: false }
+      );
+    });
+  });
+
   suite("authentication", () => {
     test("offers only agent-managed methods and neutralizes agent-supplied icon syntax", async () => {
       class AuthenticationClient extends TestACPClient {

@@ -132,6 +132,24 @@
         "title": "Sign In to Agent",
         "category": "ACP",
         "icon": "$(account)"
+      },
+      {
+        "command": "vscode-acp.showDiagnostics",
+        "title": "Show Diagnostics",
+        "category": "ACP",
+        "icon": "$(output)"
+      },
+      {
+        "command": "vscode-acp.restartAgent",
+        "title": "Restart Agent",
+        "category": "ACP",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "vscode-acp.disconnectAgent",
+        "title": "Disconnect Agent",
+        "category": "ACP",
+        "icon": "$(debug-disconnect)"
       }
     ],
     "viewsContainers": {
@@ -181,6 +199,21 @@
           "command": "vscode-acp.clearChat",
           "when": "view == vscode-acp.chatView",
           "group": "navigation@4"
+        },
+        {
+          "command": "vscode-acp.restartAgent",
+          "when": "view == vscode-acp.chatView",
+          "group": "navigation@5"
+        },
+        {
+          "command": "vscode-acp.disconnectAgent",
+          "when": "view == vscode-acp.chatView",
+          "group": "navigation@6"
+        },
+        {
+          "command": "vscode-acp.showDiagnostics",
+          "when": "view == vscode-acp.chatView",
+          "group": "navigation@7"
         },
         {
           "command": "vscode-acp.sessions.refresh",
@@ -255,6 +288,18 @@
         {
           "command": "vscode-acp.sessions.authenticate",
           "when": "false"
+        },
+        {
+          "command": "vscode-acp.showDiagnostics",
+          "when": "true"
+        },
+        {
+          "command": "vscode-acp.restartAgent",
+          "when": "true"
+        },
+        {
+          "command": "vscode-acp.disconnectAgent",
+          "when": "true"
         }
       ]
     },
@@ -441,6 +486,11 @@
               }
             ]
           }
+        },
+        "vscode-acp.diagnostics.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Record bounded, secret-safe ACP traffic metadata in the dedicated ACP Diagnostics output channel. Protocol bodies, credentials, file contents, terminal output, and agent stderr are never recorded."
         },
         "vscode-acp.sessions.autoSave": {
           "type": "boolean",

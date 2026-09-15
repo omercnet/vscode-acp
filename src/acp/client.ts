@@ -1,6 +1,7 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
 import * as acp from "@agentclientprotocol/sdk";
+import { ACPDiagnostics } from "./diagnostics";
 import {
   buildPromptContent,
   type PromptAttachment,
@@ -498,6 +499,7 @@ export interface ACPClientOptions {
   agentConfig?: AgentConfig;
   spawn?: SpawnFunction;
   resolutionOptions?: () => AgentCommandResolutionOptions;
+  diagnostics?: ACPDiagnostics;
 }
 
 export class ACPClient {
@@ -553,16 +555,19 @@ export class ACPClient {
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private resolutionOptions: () => AgentCommandResolutionOptions;
+  private diagnostics: ACPDiagnostics | null;
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
       this.agentConfig = options;
       this.spawnFn = nodeSpawn as SpawnFunction;
       this.resolutionOptions = () => ({});
+      this.diagnostics = null;
     } else {
       this.agentConfig = options?.agentConfig ?? getDefaultAgent();
       this.spawnFn = options?.spawn ?? (nodeSpawn as SpawnFunction);
       this.resolutionOptions = options?.resolutionOptions ?? (() => ({}));
+      this.diagnostics = options?.diagnostics ?? null;
     }
   }
 
@@ -824,11 +829,13 @@ export class ACPClient {
         this.setState("disconnected");
       });
 
+      const transport = acp.ndJsonStream(
+        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
+      );
+      const diagnosticsStream = this.diagnostics?.wrap(transport) ?? transport;
       const stream = preserveConfigResponseOrder(
-        acp.ndJsonStream(
-          Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-          Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
-        ),
+        diagnosticsStream,
         () => this.waitForConfigResponseContinuation()
       );
 

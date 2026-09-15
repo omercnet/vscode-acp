@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { ACPClient, formatACPError } from "./acp/client";
+import { ACPDiagnostics } from "./acp/diagnostics";
 import { ChatViewProvider } from "./views/chat";
 import type { AgentCommandResolutionOptions } from "./acp/agentCommand";
 import { selectAgentPaths } from "./acp/agentPaths";
@@ -45,7 +46,18 @@ export async function activate(
       ),
     };
   };
-  acpClient = new ACPClient({ resolutionOptions: getAgentResolutionOptions });
+  const diagnosticsOutput =
+    vscode.window.createOutputChannel("ACP Diagnostics");
+  context.subscriptions.push(diagnosticsOutput);
+  const diagnostics = new ACPDiagnostics(diagnosticsOutput, () =>
+    vscode.workspace
+      .getConfiguration("vscode-acp")
+      .get<boolean>("diagnostics.enabled", false)
+  );
+  acpClient = new ACPClient({
+    resolutionOptions: getAgentResolutionOptions,
+    diagnostics,
+  });
   chatProvider = new ChatViewProvider(
     context.extensionUri,
     acpClient,
@@ -221,6 +233,39 @@ export async function activate(
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.clearChat", () => {
       chatProvider?.clearChat();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.showDiagnostics", () => {
+      diagnostics.show();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.restartAgent", async () => {
+      await vscode.commands.executeCommand("vscode-acp.chatView.focus");
+      try {
+        await chatProvider?.restartAgent();
+        vscode.window.showInformationMessage("ACP agent restarted");
+      } catch (error) {
+        vscode.window.showErrorMessage(
+          `Failed to restart agent: ${formatACPError(error)}`
+        );
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.disconnectAgent", async () => {
+      try {
+        await chatProvider?.disconnectAgent();
+        vscode.window.showInformationMessage("ACP agent disconnected");
+      } catch (error) {
+        vscode.window.showErrorMessage(
+          `Failed to disconnect agent: ${formatACPError(error)}`
+        );
+      }
     })
   );
 
