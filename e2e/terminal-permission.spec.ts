@@ -8,6 +8,7 @@ import { mkdir, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -231,7 +232,7 @@ test.describe("Terminal permission enforcement", () => {
         path: join(SCREENSHOTS_DIR, "terminal-permission-allowed.png"),
       });
     } finally {
-      await host.close();
+      await closeVSCode(host);
     }
   });
 
@@ -265,7 +266,7 @@ test.describe("Terminal permission enforcement", () => {
         path: join(SCREENSHOTS_DIR, "terminal-permission-denied.png"),
       });
     } finally {
-      await host.close();
+      await closeVSCode(host);
     }
   });
 });

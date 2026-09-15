@@ -5,9 +5,14 @@ import {
   type Frame,
   type Page,
 } from "@playwright/test";
-import { mkdir, rm, writeFile } from "fs/promises";
+import type { ElectronApplication } from "@playwright/test";
+import { spawn } from "child_process";
+import { once } from "events";
+import { tmpdir } from "os";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -193,8 +198,61 @@ test("ignores a workspace executable override in Restricted Mode", async ({}, te
       path: testInfo.outputPath("restricted-mode-agent-resolution.png"),
     });
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
     await rm(USER_DATA_DIR, { recursive: true, force: true });
+  }
+});
+
+test("waits for Windows child handles before deleting host files", async () => {
+  test.skip(process.platform !== "win32", "Windows exclusive file handles");
+  const directory = await mkdtemp(join(tmpdir(), "vscode-acp-host-exit-"));
+  const lockedPath = join(directory, "agenthost.log");
+  const powershell = join(
+    process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const child = spawn(
+    powershell,
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      [
+        "$ErrorActionPreference='Stop'",
+        "$file=[System.IO.File]::Open($env:VSCODE_E2E_LOCK_FILE,'OpenOrCreate','ReadWrite','None')",
+        "try{[Console]::WriteLine('locked');[Console]::ReadLine() | Out-Null}finally{$file.Dispose()}",
+      ].join(";"),
+    ],
+    {
+      env: { ...process.env, VSCODE_E2E_LOCK_FILE: lockedPath },
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "inherit"],
+    }
+  );
+  try {
+    const [ready] = await once(child.stdout, "data");
+    expect(ready.toString()).toContain("locked");
+    // The wrapper can report close while the actual child still owns a file.
+    const host = {
+      evaluate: async () => [child.pid],
+      close: async () => {
+        child.stdin.end("\n");
+      },
+    } as unknown as ElectronApplication;
+    await closeVSCode(host);
+    expect(child.exitCode).toBe(0);
+    await rm(lockedPath);
+  } finally {
+    if (child.exitCode === null) {
+      const exited = once(child, "exit");
+      child.kill();
+      await exited;
+    }
+    await rm(directory, { recursive: true, force: true });
   }
 });

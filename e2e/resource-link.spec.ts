@@ -7,6 +7,7 @@ import {
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -199,7 +200,7 @@ test("sends a selected file as a resource_link block on the ACP wire", async ({}
     // extra field; this assertion also guards against embedding the raw file.
     expect(wireText).not.toContain(manifest);
   } finally {
-    await host.close();
+    await closeVSCode(host);
   }
 });
 
@@ -253,7 +254,7 @@ test("reattaching a file after the composer reloads still attaches it", async ({
     ).toHaveText("package.json", { timeout: 10000 });
     await expect(reloadedFrame.locator(".message.system")).toHaveCount(0);
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
   }
 });

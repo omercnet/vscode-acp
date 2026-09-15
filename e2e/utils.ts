@@ -1,6 +1,49 @@
 import { join } from "path";
 import { readdir } from "fs/promises";
 import { platform } from "os";
+import { execFile } from "child_process";
+import { promisify } from "util";
+import type { ElectronApplication } from "@playwright/test";
+
+const execFileAsync = promisify(execFile);
+
+/** Wait for the Electron children, not just Playwright's Windows cmd wrapper. */
+export async function closeVSCode(host: ElectronApplication): Promise<void> {
+  const processIds =
+    process.platform === "win32"
+      ? await host.evaluate(({ app }) =>
+          app.getAppMetrics().map(({ pid }) => pid)
+        )
+      : [];
+  await host.close();
+  if (processIds.length === 0) {
+    return;
+  }
+
+  const powershell = join(
+    process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "foreach($processId in $env:VSCODE_E2E_PROCESS_IDS.Split(',')){",
+    "try{$owned=[System.Diagnostics.Process]::GetProcessById([int]$processId)}catch [System.ArgumentException]{continue}",
+    "try{if(-not $owned.WaitForExit(10000)){throw 'VS Code child did not exit before cleanup'}}finally{$owned.Dispose()}",
+    "}",
+  ].join("\n");
+  await execFileAsync(
+    powershell,
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    {
+      env: { ...process.env, VSCODE_E2E_PROCESS_IDS: processIds.join(",") },
+      windowsHide: true,
+      timeout: 20000,
+    }
+  );
+}
 
 export const PROJECT_ROOT = join(__dirname, "..");
 export const VSCODE_TEST_DIR = join(PROJECT_ROOT, ".vscode-test");

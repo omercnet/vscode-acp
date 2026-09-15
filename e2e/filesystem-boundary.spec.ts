@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -292,7 +293,7 @@ test("allows contained access, blocks escapes, and preserves dirty editors", asy
     // A denied write never touched the outside target.
     expect(await readFile(deniedPath, "utf8")).toBe("outside-secret");
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
     await rm(deniedRoot, { recursive: true, force: true });
   }

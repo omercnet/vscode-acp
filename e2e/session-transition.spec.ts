@@ -8,6 +8,7 @@ import {
 import { mkdir, rm, writeFile } from "fs/promises";
 import { join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -173,7 +174,7 @@ test("locks drafted input until connection and session creation finish", async (
       frame.getByText("Session creation already in progress")
     ).toHaveCount(0);
   } finally {
-    await host.close();
+    await closeVSCode(host);
   }
 });
 
@@ -208,7 +209,7 @@ test("recovers usable controls with a classified session creation error", async 
       frame.getByText("Session creation already in progress")
     ).toHaveCount(0);
   } finally {
-    await host.close();
+    await closeVSCode(host);
   }
 });
 
@@ -239,7 +240,7 @@ test("serializes replacement during initial session creation", async () => {
       frame.getByText("Session creation already in progress")
     ).toHaveCount(0);
   } finally {
-    await host.close();
+    await closeVSCode(host);
   }
 });
 
@@ -286,6 +287,6 @@ test("locks and targets the restored session during load", async () => {
       frame.getByText("Ready transition-demo-1: Continue loaded")
     ).toBeVisible();
   } finally {
-    await host.close();
+    await closeVSCode(host);
   }
 });
