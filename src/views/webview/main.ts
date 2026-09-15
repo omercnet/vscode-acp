@@ -859,6 +859,9 @@ export class WebviewController {
   private promptPending = false;
   private attachments: FileAttachment[] = [];
   private attachmentReadGeneration = 0;
+  private attachmentPickerPending = false;
+  private pendingAttachmentRequestIds = new Set<string>();
+  private attachmentRequestCounter = 0;
   private promptCapabilities = { image: false, embeddedContext: false };
 
   constructor(
@@ -911,6 +914,11 @@ export class WebviewController {
     sendBtn.addEventListener("click", () => this.send());
 
     attachBtn.addEventListener("click", () => {
+      if (this.isAttachmentPreparationPending()) {
+        return;
+      }
+      this.attachmentPickerPending = true;
+      this.updateInputControls();
       this.vscode.postMessage({
         type: "requestAttachFiles",
         attachmentCount: this.attachments.length,
@@ -1240,14 +1248,41 @@ export class WebviewController {
     this.saveState();
   }
 
-  private clearAttachments(): void {
+  private isAttachmentPreparationPending(): boolean {
+    return (
+      this.attachmentPickerPending || this.pendingAttachmentRequestIds.size > 0
+    );
+  }
+
+  private completeAttachmentRequest(requestId: string | undefined): boolean {
+    if (requestId === undefined) {
+      return true;
+    }
+    if (!this.pendingAttachmentRequestIds.delete(requestId)) {
+      return false;
+    }
+    this.updateInputControls();
+    return true;
+  }
+
+  private cancelAttachmentPreparation(): void {
     this.attachmentReadGeneration += 1;
+    this.attachmentPickerPending = false;
+    this.pendingAttachmentRequestIds.clear();
+  }
+
+  private clearAttachments(): void {
+    this.cancelAttachmentPreparation();
     this.attachments = [];
     this.renderAttachments();
   }
 
   private async attachBrowserFiles(files: File[]): Promise<void> {
-    if (this.inputLocks.size > 0 || this.promptPending) {
+    if (
+      this.inputLocks.size > 0 ||
+      this.promptPending ||
+      this.isAttachmentPreparationPending()
+    ) {
       return;
     }
     const generation = this.attachmentReadGeneration;
@@ -1284,6 +1319,9 @@ export class WebviewController {
         continue;
       }
 
+      const requestId = `attachment-${++this.attachmentRequestCounter}`;
+      this.pendingAttachmentRequestIds.add(requestId);
+      this.updateInputControls();
       try {
         const dataUrl = await new Promise<string>((resolve, reject) => {
           const view = this.doc.defaultView;
@@ -1311,6 +1349,7 @@ export class WebviewController {
         }
         this.vscode.postMessage({
           type: "attachContent",
+          requestId,
           name: file.name || (image ? "Pasted image" : "Dropped file"),
           mimeType: file.type || undefined,
           data: dataUrl.slice(comma + 1),
@@ -1319,6 +1358,8 @@ export class WebviewController {
         if (generation !== this.attachmentReadGeneration) {
           return;
         }
+        this.pendingAttachmentRequestIds.delete(requestId);
+        this.updateInputControls();
         this.showSystemMessageOnce(
           `${file.name || "Attachment"} could not be read.`
         );
@@ -1487,21 +1528,24 @@ export class WebviewController {
 
   private updateInputControls(restoreFocus = true): void {
     const inputLocked = this.inputLocks.size > 0;
+    const attachmentPreparing = this.isAttachmentPreparationPending();
+    const composerBusy = inputLocked || attachmentPreparing;
+    const sendDisabled = composerBusy || this.promptPending;
     const atAttachmentLimit = this.attachments.length >= MAX_ATTACHMENTS;
     let hint = this.commandHint ?? DEFAULT_INPUT_HINT;
     for (const lockMessage of this.inputLocks.values()) {
       hint = lockMessage;
     }
+    if (!inputLocked && attachmentPreparing) {
+      hint = "Attaching files…";
+    }
 
     this.elements.inputEl.disabled = inputLocked;
     this.elements.inputEl.setAttribute("aria-disabled", String(inputLocked));
-    this.elements.sendBtn.disabled = inputLocked || this.promptPending;
-    this.elements.sendBtn.setAttribute(
-      "aria-disabled",
-      String(inputLocked || this.promptPending)
-    );
+    this.elements.sendBtn.disabled = sendDisabled;
+    this.elements.sendBtn.setAttribute("aria-disabled", String(sendDisabled));
     this.elements.attachBtn.disabled =
-      inputLocked || this.promptPending || atAttachmentLimit;
+      composerBusy || this.promptPending || atAttachmentLimit;
     for (const button of this.elements.attachmentsBar.querySelectorAll(
       ".attachment-chip-remove"
     )) {
@@ -1509,17 +1553,20 @@ export class WebviewController {
         inputLocked || this.promptPending;
     }
     this.elements.connectBtn.disabled = inputLocked;
-    this.elements.sendBtn.textContent = inputLocked ? "Wait…" : "Send";
+    this.elements.sendBtn.textContent = composerBusy ? "Wait…" : "Send";
     this.elements.sendBtn.setAttribute(
       "aria-label",
-      inputLocked ? hint : "Send message"
+      composerBusy ? hint : "Send message"
     );
-    this.elements.sendBtn.title = inputLocked ? hint : "Send (Enter)";
+    this.elements.sendBtn.title = composerBusy ? hint : "Send (Enter)";
     this.elements.welcomeConnectBtn.disabled = inputLocked;
     this.elements.agentSelector.disabled = inputLocked;
     this.elements.modeSelector.disabled = inputLocked;
     this.elements.modelSelector.disabled = inputLocked;
-    this.elements.inputContainer.setAttribute("aria-busy", String(inputLocked));
+    this.elements.inputContainer.setAttribute(
+      "aria-busy",
+      String(composerBusy)
+    );
     this.elements.inputHint.textContent = hint;
 
     if (
@@ -1543,7 +1590,11 @@ export class WebviewController {
   }
 
   private send(): void {
-    if (this.inputLocks.size > 0 || this.promptPending) {
+    if (
+      this.inputLocks.size > 0 ||
+      this.promptPending ||
+      this.isAttachmentPreparationPending()
+    ) {
       return;
     }
     const text = this.elements.inputEl.value.trim();
@@ -1935,6 +1986,17 @@ export class WebviewController {
         break;
       case "filesAttached": {
         const incoming = Array.isArray(msg.attachments) ? msg.attachments : [];
+        if (!this.completeAttachmentRequest(msg.requestId)) {
+          for (const attachment of incoming) {
+            if (!this.attachments.some(({ id }) => id === attachment.id)) {
+              this.vscode.postMessage({
+                type: "removeAttachment",
+                attachmentId: attachment.id,
+              });
+            }
+          }
+          break;
+        }
         const beforeCount = this.attachments.length;
         const existingUris = new Set(
           this.attachments.map((attachment) => attachment.uri)
@@ -1966,12 +2028,22 @@ export class WebviewController {
         }
         break;
       }
+      case "attachmentPreparation":
+        this.attachmentPickerPending = msg.active === true;
+        this.updateInputControls();
+        break;
       case "attachmentLimitReached":
+        if (!this.completeAttachmentRequest(msg.requestId)) {
+          break;
+        }
         this.showSystemMessageOnce(
           `You can attach up to ${msg.max ?? MAX_ATTACHMENTS} files per prompt.`
         );
         break;
       case "attachmentError":
+        if (!this.completeAttachmentRequest(msg.requestId)) {
+          break;
+        }
         if (msg.text) this.addMessage(msg.text, "error");
         break;
       case "attachmentWarning":
@@ -2103,7 +2175,7 @@ export class WebviewController {
         break;
       case "sessionTransition":
         if (msg.active === true) {
-          this.attachmentReadGeneration += 1;
+          this.cancelAttachmentPreparation();
         }
         this.setInputLock(
           "session",
@@ -2179,6 +2251,7 @@ export class WebviewController {
         this.hideSessionHistory();
         break;
       case "replayStart":
+        this.cancelAttachmentPreparation();
         this.promptPending = false;
         this.setInputLock("replay", true, "Restoring conversation…");
         this.hideSessionHistory();

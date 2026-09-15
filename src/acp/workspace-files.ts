@@ -381,6 +381,20 @@ async function canonicalTrustedRoot(configuredPath: string): Promise<{
   return { canonicalRootPath, rootIdentity };
 }
 
+/** Authorizes link metadata against the same pinned root used for file reads. */
+export async function trustedWorkspaceRootPath(
+  configuredPath: string
+): Promise<string> {
+  if (
+    !pinnedRootIdentities.has(configuredPath) &&
+    !(await pinTrustedRoot(configuredPath))
+  ) {
+    throw new WorkspaceFileAccessDeniedError();
+  }
+  const { canonicalRootPath } = await canonicalTrustedRoot(configuredPath);
+  return canonicalRootPath;
+}
+
 function containedSegments(
   canonicalRootPath: string,
   canonicalPath: string

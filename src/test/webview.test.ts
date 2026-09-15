@@ -1366,6 +1366,61 @@ suite("Webview", () => {
         });
       });
 
+      test("blocks sending until file picker preparation finishes", () => {
+        mockVsCode._clearMessages();
+        elements.inputEl.value = "Send after attaching";
+
+        elements.attachBtn.click();
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+
+        assert.strictEqual(elements.inputEl.disabled, false);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(elements.attachBtn.disabled, true);
+        assert.ok(
+          !mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "sendMessage"
+            )
+        );
+
+        controller.handleMessage({
+          type: "attachmentPreparation",
+          active: false,
+        });
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(elements.attachBtn.disabled, false);
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        assert.ok(
+          mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "sendMessage"
+            )
+        );
+      });
+
       test("disables and explains the attach control at the file limit", () => {
         controller.handleMessage({
           type: "filesAttached",
@@ -1504,9 +1559,11 @@ suite("Webview", () => {
           value: { files: [file] },
         });
         elements.inputEl.dispatchEvent(supportedPaste);
-        const attached = await attachedMessage;
+        const attached = (await attachedMessage) as Record<string, unknown>;
+        assert.strictEqual(typeof attached.requestId, "string");
         assert.deepStrictEqual(attached, {
           type: "attachContent",
+          requestId: attached.requestId,
           name: "pasted.png",
           mimeType: undefined,
           data: "iVBORw0KGgo=",
@@ -1547,12 +1604,124 @@ suite("Webview", () => {
 
         elements.inputContainer.dispatchEvent(drop);
 
-        assert.deepStrictEqual(await attachedMessage, {
+        const attached = (await attachedMessage) as Record<string, unknown>;
+        assert.strictEqual(typeof attached.requestId, "string");
+        assert.deepStrictEqual(attached, {
           type: "attachContent",
+          requestId: attached.requestId,
           name: "context.txt",
           mimeType: "text/plain",
           data: Buffer.from("unsaved context").toString("base64"),
         });
+      });
+
+      test("blocks sending until inline attachment preparation is acknowledged", async () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: { image: false, embeddedContext: true },
+        });
+        mockVsCode._clearMessages();
+        const internals = controller as unknown as {
+          attachBrowserFiles(files: File[]): Promise<void>;
+        };
+        const file = new window.File(["context"], "context.txt", {
+          type: "text/plain",
+        });
+        elements.inputEl.value = "Use this context";
+
+        const attaching = internals.attachBrowserFiles([file]);
+        assert.strictEqual(elements.inputEl.disabled, false);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+        assert.strictEqual(elements.attachBtn.disabled, true);
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        assert.ok(
+          !mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "sendMessage"
+            )
+        );
+
+        await attaching;
+        const request = mockVsCode
+          ._getMessages()
+          .find(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "attachContent"
+          ) as { requestId: string };
+        assert.strictEqual(typeof request.requestId, "string");
+        assert.strictEqual(elements.sendBtn.disabled, true);
+
+        controller.handleMessage({
+          type: "filesAttached",
+          requestId: "stale-request",
+          attachments: [
+            {
+              id: "att-stale",
+              uri: "vscode-acp-attachment:///memory/att-stale/context.txt",
+              name: "context.txt",
+              mimeType: "text/plain",
+              size: 7,
+              source: "memory",
+              kind: "file",
+              transport: "resource",
+            },
+          ],
+        });
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+        assert.strictEqual(elements.sendBtn.disabled, true);
+
+        controller.handleMessage({
+          type: "filesAttached",
+          requestId: request.requestId,
+          attachments: [
+            {
+              id: "att-inline",
+              uri: "vscode-acp-attachment:///memory/att-inline/context.txt",
+              name: "context.txt",
+              mimeType: "text/plain",
+              size: 7,
+              source: "memory",
+              kind: "file",
+              transport: "resource",
+            },
+          ],
+        });
+        assert.strictEqual(elements.attachmentsBar.children.length, 1);
+        assert.strictEqual(elements.sendBtn.disabled, false);
+        assert.strictEqual(elements.attachBtn.disabled, false);
+
+        elements.inputEl.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Enter",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        assert.ok(
+          mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "sendMessage"
+            )
+        );
       });
 
       test("rejects oversized dropped text before reading it", async () => {
@@ -1620,6 +1789,37 @@ suite("Webview", () => {
                 "type" in message &&
                 message.type === "attachContent"
             )
+        );
+        controller.handleMessage({
+          type: "filesAttached",
+          requestId: "attachment-1",
+          attachments: [
+            {
+              id: "att-stale",
+              uri: "vscode-acp-attachment:///memory/att-stale/context.txt",
+              name: "context.txt",
+              mimeType: "text/plain",
+              size: 7,
+              source: "memory",
+              kind: "file",
+              transport: "resource",
+            },
+          ],
+        });
+        assert.strictEqual(elements.attachmentsBar.children.length, 0);
+        assert.ok(
+          mockVsCode
+            ._getMessages()
+            .some(
+              (message) =>
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "removeAttachment" &&
+                "attachmentId" in message &&
+                message.attachmentId === "att-stale"
+            ),
+          "Discarded acknowledgements must release their host-owned payload"
         );
       });
     });

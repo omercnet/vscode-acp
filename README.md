@@ -60,7 +60,9 @@ Use the paperclip button beside the prompt to select an open workspace file, inc
 
 The extension follows the connected agent's ACP `promptCapabilities`: text files use embedded `resource` blocks, including current unsaved editor contents, only when `embeddedContext` is advertised; otherwise selected workspace files remain `resource_link` blocks. Supported PNG, JPEG, GIF, and WebP files use `image` blocks only when `image` is advertised. Pasted or dropped in-memory content is rejected with a visible error when the required capability is absent because it has no safe link fallback.
 
-Only explicitly selected files inside a trusted local workspace are read. Symlink escapes are rejected. Embedded text is limited to 1 MiB per file, images to 5 MiB each, all inline content to 10 MiB per prompt, and every prompt to 10 attachments. Oversized picked files fall back to links; oversized pasted or dropped content is rejected.
+Only explicitly selected files inside a trusted local workspace are read. Symlink escapes and replacement of an already-authorized workspace root are rejected. Embedded text is limited to 1 MiB per file, images to 5 MiB each, all inline content to 10 MiB per prompt, and every prompt to 10 attachments. Oversized picked files fall back to links; oversized pasted or dropped content is rejected. Image payloads must match their declared raster format; embedded resources remain UTF-8 text rather than an alternate image transport.
+
+You can keep typing while attachments are prepared, but Send waits until their chips are ready. If prompt preparation fails, the text and every selected attachment are restored for retry. Switching conversations discards stale preparation results. Replayed attachments use display-only chips and do not become new draft attachments.
 
 ### Session History
 

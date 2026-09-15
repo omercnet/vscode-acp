@@ -11,8 +11,11 @@ import {
   MAX_IMAGE_BYTES,
   MAX_INLINE_ATTACHMENT_BYTES,
   decodedBase64Size,
+  detectedImageMimeType,
   isAttachmentMetadataValid,
+  isEmbeddableTextMimeType,
   isFileAttachmentValid,
+  isPromptAttachmentValid,
   isSupportedImageMimeType,
   sanitizeAttachmentLabel,
   type FileAttachment,
@@ -22,7 +25,9 @@ import {
 import {
   openTrustedWorkspaceFile,
   readOpenedWorkspaceFileBytes,
+  trustedWorkspaceRootPath,
   WorkspaceFileTooLargeError,
+  type OpenedWorkspaceFile,
 } from "./acp/workspace-files";
 
 /**
@@ -141,7 +146,7 @@ async function resolveTrustedWorkspaceFile(
       if (folder.uri.scheme !== "file") {
         continue;
       }
-      const root = await realpath(folder.uri.fsPath);
+      const root = await trustedWorkspaceRootPath(folder.uri.fsPath);
       const relativePath = relative(root, candidate);
       if (
         relativePath === "" ||
@@ -227,16 +232,6 @@ export async function createFileAttachment(
   };
 }
 
-const EMBEDDABLE_APPLICATION_MIME_TYPES: Record<string, true> = {
-  "application/json": true,
-  "application/javascript": true,
-  "application/xml": true,
-  "application/yaml": true,
-  "application/sql": true,
-  "application/x-httpd-php": true,
-  "application/x-sh": true,
-};
-
 export class AttachmentInputError extends Error {}
 
 export interface InlineAttachmentInput {
@@ -249,56 +244,6 @@ export interface PreparedAttachment {
   attachment: PromptAttachment;
   inlineBytes: number;
   warning?: string;
-}
-
-export function isEmbeddableTextMimeType(
-  mimeType: string | undefined
-): boolean {
-  return (
-    mimeType?.startsWith("text/") === true ||
-    (mimeType !== undefined &&
-      EMBEDDABLE_APPLICATION_MIME_TYPES[mimeType] === true)
-  );
-}
-
-function detectedImageMimeType(
-  bytes: Uint8Array
-): SupportedImageMimeType | null {
-  if (
-    bytes.length >= 8 &&
-    bytes[0] === 0x89 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x4e &&
-    bytes[3] === 0x47 &&
-    bytes[4] === 0x0d &&
-    bytes[5] === 0x0a &&
-    bytes[6] === 0x1a &&
-    bytes[7] === 0x0a
-  ) {
-    return "image/png";
-  }
-  if (
-    bytes.length >= 3 &&
-    bytes[0] === 0xff &&
-    bytes[1] === 0xd8 &&
-    bytes[2] === 0xff
-  ) {
-    return "image/jpeg";
-  }
-  if (bytes.length >= 6) {
-    const signature = Buffer.from(bytes.subarray(0, 6)).toString("ascii");
-    if (signature === "GIF87a" || signature === "GIF89a") {
-      return "image/gif";
-    }
-  }
-  if (
-    bytes.length >= 12 &&
-    Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" &&
-    Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP"
-  ) {
-    return "image/webp";
-  }
-  return null;
 }
 
 function memoryAttachmentUri(id: string, name: string): string {
@@ -317,6 +262,12 @@ export function createInlineAttachment(
   capabilities: Readonly<PromptCapabilities>,
   currentInlineBytes: number
 ): PromptAttachment {
+  if (
+    typeof input.name !== "string" ||
+    (input.mimeType !== undefined && typeof input.mimeType !== "string")
+  ) {
+    throw new AttachmentInputError("The attachment metadata is invalid.");
+  }
   const name = sanitizeAttachmentLabel(input.name);
   if (
     name !== input.name ||
@@ -327,6 +278,13 @@ export function createInlineAttachment(
   }
   if (typeof input.data !== "string") {
     throw new AttachmentInputError("The attachment data is invalid.");
+  }
+  if (
+    !Number.isSafeInteger(currentInlineBytes) ||
+    currentInlineBytes < 0 ||
+    currentInlineBytes > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentInputError("The attachment byte total is invalid.");
   }
 
   const declaredMime = input.mimeType?.toLowerCase();
@@ -343,7 +301,19 @@ export function createInlineAttachment(
   }
   const size = decodedBase64Size(input.data);
   if (size === null) {
-    throw new AttachmentInputError("The attachment data is not valid base64.");
+    throw new AttachmentInputError(
+      "The attachment data is not valid canonical base64."
+    );
+  }
+  const bytes = Buffer.from(input.data, "base64");
+  if (bytes.byteLength !== size) {
+    throw new AttachmentInputError("The attachment data is invalid.");
+  }
+  const detectedImageMime = detectedImageMimeType(bytes);
+  if (detectedImageMime !== null && detectedImageMime !== mimeType) {
+    throw new AttachmentInputError(
+      "The image bytes do not match the declared MIME type."
+    );
   }
 
   const uri = memoryAttachmentUri(id, name);
@@ -363,13 +333,7 @@ export function createInlineAttachment(
         `Attachments may embed at most ${MAX_INLINE_ATTACHMENT_BYTES / 1024 / 1024} MB per prompt.`
       );
     }
-    const bytes = Buffer.from(input.data, "base64");
-    if (bytes.toString("base64") !== input.data || bytes.byteLength !== size) {
-      throw new AttachmentInputError(
-        "The attachment data is not canonical base64."
-      );
-    }
-    if (detectedImageMimeType(bytes) !== mimeType) {
+    if (detectedImageMime !== mimeType) {
       throw new AttachmentInputError(
         "The image bytes do not match the declared MIME type."
       );
@@ -386,7 +350,7 @@ export function createInlineAttachment(
       previewDataUrl: `data:${mimeType};base64,${input.data}`,
       payload: { type: "image", data: input.data },
     };
-    if (!isFileAttachmentValid(attachment)) {
+    if (!isPromptAttachmentValid(attachment)) {
       throw new AttachmentInputError("The image metadata is invalid.");
     }
     return attachment;
@@ -411,12 +375,6 @@ export function createInlineAttachment(
     );
   }
 
-  const bytes = Buffer.from(input.data, "base64");
-  if (bytes.toString("base64") !== input.data || bytes.byteLength !== size) {
-    throw new AttachmentInputError(
-      "The attachment data is not canonical base64."
-    );
-  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -436,7 +394,7 @@ export function createInlineAttachment(
     transport: "resource",
     payload: { type: "text", text },
   };
-  if (!isFileAttachmentValid(attachment)) {
+  if (!isPromptAttachmentValid(attachment)) {
     throw new AttachmentInputError("The embedded file metadata is invalid.");
   }
   return attachment;
@@ -453,9 +411,19 @@ export async function prepareFileAttachment(
   currentInlineBytes: number,
   includePreview = false
 ): Promise<PreparedAttachment | null> {
+  if (
+    !Number.isSafeInteger(currentInlineBytes) ||
+    currentInlineBytes < 0 ||
+    currentInlineBytes > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentInputError("The attachment byte total is invalid.");
+  }
   if ((attachment.source ?? "file") === "memory") {
     const promptAttachment = attachment;
-    if (!isFileAttachmentValid(promptAttachment) || !promptAttachment.payload) {
+    if (
+      !promptAttachment.payload ||
+      !isPromptAttachmentValid(promptAttachment)
+    ) {
       throw new AttachmentInputError(
         "The in-memory attachment is no longer available."
       );
@@ -535,7 +503,13 @@ export async function prepareFileAttachment(
     }
     if (detectedImageMimeType(bytes) !== refreshed.mimeType) {
       return {
-        attachment: { ...refreshed, size: bytes.byteLength },
+        attachment: {
+          ...refreshed,
+          mimeType: undefined,
+          size: bytes.byteLength,
+          kind: "file",
+          transport: "resource_link",
+        },
         inlineBytes: 0,
         warning: `${refreshed.name} was linked because its bytes do not match ${refreshed.mimeType}.`,
       };
@@ -559,12 +533,15 @@ export async function prepareFileAttachment(
     capabilities.embeddedContext === true &&
     isEmbeddableTextMimeType(refreshed.mimeType)
   ) {
-    const opened = await openTrustedWorkspaceFile(
-      vscode.Uri.parse(refreshed.uri).fsPath,
-      "read"
-    );
+    const contextLimitWarning = `${refreshed.name} was linked instead of embedded because it exceeds the context limit.`;
+
+    let opened: OpenedWorkspaceFile | undefined;
     let text: string;
     try {
+      opened = await openTrustedWorkspaceFile(
+        vscode.Uri.parse(refreshed.uri).fsPath,
+        "read"
+      );
       const canonicalUri = vscode.Uri.file(opened.canonicalPath).toString();
       const openDocument = vscode.workspace.textDocuments.find(
         (document) =>
@@ -593,12 +570,12 @@ export async function prepareFileAttachment(
         return {
           attachment: { ...refreshed, transport: "resource_link" },
           inlineBytes: 0,
-          warning: `${refreshed.name} was linked instead of embedded because it exceeds the context limit.`,
+          warning: contextLimitWarning,
         };
       }
       throw error;
     } finally {
-      await opened.fileHandle.close();
+      await opened?.fileHandle.close();
     }
     const size = Buffer.byteLength(text, "utf8");
     if (
@@ -634,6 +611,18 @@ export function createReplayAttachment(
   id: string
 ): FileAttachment | null {
   if (content.type === "resource_link") {
+    if (
+      typeof content.name !== "string" ||
+      typeof content.uri !== "string" ||
+      (content.mimeType !== undefined &&
+        content.mimeType !== null &&
+        typeof content.mimeType !== "string") ||
+      (content.size !== undefined &&
+        content.size !== null &&
+        typeof content.size !== "number")
+    ) {
+      return null;
+    }
     const mimeType = content.mimeType ?? undefined;
     const size = content.size ?? undefined;
     if (!isAttachmentMetadataValid(content.name, content.uri, mimeType, size)) {
@@ -651,19 +640,48 @@ export function createReplayAttachment(
     };
   }
 
-  if (content.type === "resource" && "text" in content.resource) {
-    const size = Buffer.byteLength(content.resource.text, "utf8");
+  if (content.type === "resource") {
+    const resource: unknown = content.resource;
+    if (
+      typeof resource !== "object" ||
+      resource === null ||
+      !Object.prototype.hasOwnProperty.call(resource, "text") ||
+      Object.prototype.hasOwnProperty.call(resource, "blob")
+    ) {
+      return null;
+    }
+    const resourceRecord = resource as Record<string, unknown>;
+    if (
+      typeof resourceRecord.uri !== "string" ||
+      typeof resourceRecord.text !== "string" ||
+      (resourceRecord.mimeType !== undefined &&
+        resourceRecord.mimeType !== null &&
+        typeof resourceRecord.mimeType !== "string")
+    ) {
+      return null;
+    }
+    const text = resourceRecord.text;
+    if (text.length > MAX_EMBEDDED_RESOURCE_BYTES) {
+      return null;
+    }
+    const size = Buffer.byteLength(text, "utf8");
     if (size > MAX_EMBEDDED_RESOURCE_BYTES) {
       return null;
     }
-    const uri = content.resource.uri;
+    const uri = resourceRecord.uri;
     let name: string;
     try {
       name = basenameFromUriPath(vscode.Uri.parse(uri, true));
     } catch {
       return null;
     }
-    const mimeType = content.resource.mimeType ?? undefined;
+    const mimeType =
+      typeof resourceRecord.mimeType === "string"
+        ? resourceRecord.mimeType
+        : undefined;
+    if (isSupportedImageMimeType(mimeType)) {
+      return null;
+    }
     const source = uri.startsWith("file://") ? "file" : "memory";
     const attachment: FileAttachment = {
       id,
@@ -679,13 +697,19 @@ export function createReplayAttachment(
   }
 
   if (content.type === "image" && isSupportedImageMimeType(content.mimeType)) {
+    if (
+      typeof content.data !== "string" ||
+      content.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
+    ) {
+      return null;
+    }
     const size = decodedBase64Size(content.data);
     if (size === null || size > MAX_IMAGE_BYTES) {
       return null;
     }
     const bytes = Buffer.from(content.data, "base64");
     if (
-      bytes.toString("base64") !== content.data ||
+      bytes.byteLength !== size ||
       detectedImageMimeType(bytes) !== content.mimeType
     ) {
       return null;

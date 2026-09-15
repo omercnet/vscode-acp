@@ -46,7 +46,7 @@ process.stdin.on("data", (chunk) => {
     const message = JSON.parse(line);
     const params = message.params || {};
     if (message.method === "initialize") {
-      send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: { promptCapabilities } } });
+      send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities } } });
     } else if (message.method === "session/new") {
       send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "attachment-demo", modes: null } });
     } else if (message.method === "session/prompt") {
@@ -63,6 +63,15 @@ process.stdin.on("data", (chunk) => {
       const reply = summaries.length ? "Wire received " + summaries.join(" | ") : "Wire received no attachments";
       update(params.sessionId, { sessionUpdate: "agent_message_chunk", messageId: "agent-1", content: { type: "text", text: reply } });
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn" } });
+    } else if (message.method === "session/load") {
+      const log = JSON.parse(fs.readFileSync(wirePath, "utf8"));
+      log.forEach((prompt, index) => {
+        for (const content of prompt) {
+          update(params.sessionId, { sessionUpdate: "user_message_chunk", messageId: "user-" + index, content });
+        }
+        update(params.sessionId, { sessionUpdate: "agent_message_chunk", messageId: "agent-" + index, content: { type: "text", text: "Replayed turn " + (index + 1) } });
+      });
+      send({ jsonrpc: "2.0", id: message.id, result: { modes: null } });
     } else if (message.id !== undefined) {
       send({ jsonrpc: "2.0", id: message.id, result: {} });
     }
@@ -73,6 +82,7 @@ process.stdin.on("data", (chunk) => {
 async function launchHost(
   promptCapabilities: { image?: boolean; embeddedContext?: boolean } = {}
 ) {
+  await rm(USER_DATA_DIR, { recursive: true, force: true });
   const settingsDir = join(USER_DATA_DIR, "User");
   await mkdir(settingsDir, { recursive: true });
   await writeFile(
@@ -110,20 +120,50 @@ async function launchHost(
   });
 }
 
+async function runCommand(window: Page, command: string): Promise<void> {
+  await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
+  const palette = window.locator(".quick-input-widget");
+  const input = palette.locator("input");
+  await expect(input).toBeVisible();
+  await input.fill(`>${command}`);
+  await expect(palette.getByText(command, { exact: true })).toBeVisible();
+  await input.press("Enter");
+  await expect(palette).toBeHidden();
+}
+
 async function focusChat(window: Page) {
   await window.waitForLoadState("domcontentloaded");
   await window.setViewportSize({ width: 1280, height: 800 });
   await window.waitForTimeout(3000);
-  await window.keyboard.press(`${cmdOrCtrl()}+Shift+P`);
-  await window.waitForTimeout(500);
-  await window.keyboard.type("ACP: Start Chat");
-  await window.waitForTimeout(300);
-  await window.keyboard.press("Enter");
+  await runCommand(window, "ACP: Start Chat");
   await window.waitForTimeout(3000);
-  return window
+  const frame = window
     .frameLocator("iframe.webview")
     .first()
     .frameLocator("#active-frame");
+  return frame;
+}
+
+async function captureChat(
+  window: Page,
+  frame: FrameLocator,
+  name: string,
+  fullWindow = false
+): Promise<void> {
+  const builtInChat = window.locator(".pane-header").filter({
+    has: window.getByText("Chat", { exact: true }),
+  });
+  if (
+    (await builtInChat.count()) === 1 &&
+    (await builtInChat.getAttribute("aria-expanded")) === "true"
+  ) {
+    await builtInChat.click();
+  }
+  await expect
+    .poll(async () => (await frame.locator("body").boundingBox())?.height ?? 0)
+    .toBeGreaterThan(400);
+  const surface = fullWindow ? window : frame.locator("body");
+  await surface.screenshot({ path: join(SCREENSHOTS_DIR, name) });
 }
 
 async function openFileInEditor(window: Page, name: string) {
@@ -187,6 +227,23 @@ async function dispatchWebviewFile(
   );
 }
 
+async function replayAttachments(
+  window: Page,
+  frame: FrameLocator,
+  preview: string
+) {
+  await runCommand(window, "ACP: Load Session");
+  const session = frame.locator("#session-picker").getByRole("button", {
+    name: `Load ${preview}`,
+    exact: true,
+  });
+  await expect(session).toBeVisible();
+  await session.click();
+  await expect(frame.locator(".message.assistant").first()).toHaveText(
+    "Replayed turn 1"
+  );
+}
+
 test("sends a selected file as a resource_link block on the ACP wire", async ({}) => {
   await rm(DEMO_DIR, { recursive: true, force: true });
   await mkdir(BIN_DIR, { recursive: true });
@@ -215,9 +272,7 @@ test("sends a selected file as a resource_link block on the ACP wire", async ({}
     ).toHaveText("package.json", { timeout: 10000 });
     await expect(window.locator(".quick-input-widget")).toBeHidden();
     await window.waitForTimeout(500);
-    await window.screenshot({
-      path: join(SCREENSHOTS_DIR, "resource-link-selected.png"),
-    });
+    await captureChat(window, frame, "resource-link-selected.png", true);
 
     await frame.locator("#input").fill("Review this project manifest");
     await frame.locator("#send").click();
@@ -229,9 +284,7 @@ test("sends a selected file as a resource_link block on the ACP wire", async ({}
       frame.locator(".message.assistant").filter({ hasText: "resource_link" })
     ).toBeVisible({ timeout: 15000 });
     await window.waitForTimeout(500);
-    await window.screenshot({
-      path: join(SCREENSHOTS_DIR, "resource-link-sent.png"),
-    });
+    await captureChat(window, frame, "resource-link-sent.png", true);
 
     const manifest = await readFile(join(PROJECT_ROOT, "package.json"), "utf8");
     const wireText = await readFile(WIRE_PATH, "utf8");
@@ -253,6 +306,18 @@ test("sends a selected file as a resource_link block on the ACP wire", async ({}
     // Exact equality above proves there is no content-bearing third block or
     // extra field; this assertion also guards against embedding the raw file.
     expect(wireText).not.toContain(manifest);
+
+    await replayAttachments(window, frame, "Review this project manifest");
+    await expect(
+      frame.locator(".message.user .attachment-chip-name")
+    ).toHaveText("package.json");
+    await expect(
+      frame.locator(".message.user .attachment-chip-type")
+    ).toHaveText("Link");
+    await expect(
+      frame.locator("#attachments-bar .attachment-chip")
+    ).toHaveCount(0);
+    await captureChat(window, frame, "resource-link-replay.png");
   } finally {
     await closeVSCode(host);
   }
@@ -299,6 +364,7 @@ test("acknowledges embedded buffers and image prompts received on the ACP wire",
     await expect(imageChip.locator("img")).toBeVisible();
     await imageChip.locator(".attachment-chip-remove").click();
     await expect(imageChip).toHaveCount(0);
+    await captureChat(window, frame, "rich-attachment-removed.png");
 
     await frame.locator("#attach-btn").click();
     await attachFromQuickPick(window, "rich-attachment-demo.png");
@@ -309,9 +375,7 @@ test("acknowledges embedded buffers and image prompts received on the ACP wire",
         hasText: "Wire received resource text/typescript",
       })
     ).toContainText("image image/png", { timeout: 15000 });
-    await frame.locator("body").screenshot({
-      path: join(SCREENSHOTS_DIR, "embedded-resource-image-upload-ack.png"),
-    });
+    await captureChat(window, frame, "embedded-resource-image-upload-ack.png");
 
     await dispatchWebviewFile(
       frame,
@@ -339,9 +403,7 @@ test("acknowledges embedded buffers and image prompts received on the ACP wire",
     await expect(frame.locator(".message.assistant").last()).toContainText(
       "image image/png"
     );
-    await frame.locator("body").screenshot({
-      path: join(SCREENSHOTS_DIR, "dropped-context-pasted-image-ack.png"),
-    });
+    await captureChat(window, frame, "dropped-context-pasted-image-ack.png");
 
     const wire = JSON.parse(await readFile(WIRE_PATH, "utf8")) as Array<
       Array<Record<string, unknown>>
@@ -376,6 +438,31 @@ test("acknowledges embedded buffers and image prompts received on the ACP wire",
       mimeType: "image/png",
       data: imageData,
     });
+
+    await frame.locator("body").evaluate((body) => {
+      body.setAttribute("data-reload-probe", "before");
+    });
+    await runCommand(window, "Developer: Reload Webviews");
+    await expect(frame.locator("body")).not.toHaveAttribute(
+      "data-reload-probe",
+      "before"
+    );
+    await expect(
+      frame.locator("#attachments-bar .attachment-chip")
+    ).toHaveCount(0);
+    await replayAttachments(
+      window,
+      frame,
+      "Inspect dropped and pasted content"
+    );
+    await expect(
+      frame.locator(".message.user .attachment-chip-type")
+    ).toHaveText(["Embedded", "Image", "Embedded", "Image"]);
+    await expect(
+      frame.locator(".message.user .attachment-chip img")
+    ).toHaveCount(2);
+    await expect(frame.locator("#input")).toHaveValue("");
+    await captureChat(window, frame, "rich-attachments-replay.png");
   } finally {
     await host.close();
     await rm(RICH_TEXT_PATH, { force: true });
@@ -433,6 +520,7 @@ test("reattaching a file after the composer reloads still attaches it", async ({
       reloadedFrame.locator("#attachments-bar .attachment-chip-name")
     ).toHaveText("package.json", { timeout: 10000 });
     await expect(reloadedFrame.locator(".message.system")).toHaveCount(0);
+    await captureChat(window, reloadedFrame, "resource-link-reloaded.png");
   } finally {
     await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });

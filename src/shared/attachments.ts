@@ -41,6 +41,26 @@ export const SUPPORTED_IMAGE_MIME_TYPES = [
   "image/webp",
 ] as const;
 
+const EMBEDDABLE_APPLICATION_MIME_TYPES: Readonly<Record<string, true>> = {
+  "application/json": true,
+  "application/javascript": true,
+  "application/xml": true,
+  "application/yaml": true,
+  "application/sql": true,
+  "application/x-httpd-php": true,
+  "application/x-sh": true,
+};
+
+export function isEmbeddableTextMimeType(
+  mimeType: string | undefined
+): boolean {
+  return (
+    mimeType?.startsWith("text/") === true ||
+    (mimeType !== undefined &&
+      EMBEDDABLE_APPLICATION_MIME_TYPES[mimeType] === true)
+  );
+}
+
 export type SupportedImageMimeType =
   (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
 export type AttachmentSource = "file" | "memory";
@@ -113,14 +133,17 @@ function hasSafeMetadata(
   size?: number
 ): boolean {
   return (
+    typeof name === "string" &&
     name.length > 0 &&
     name.length <= MAX_ATTACHMENT_NAME_LENGTH &&
     name === sanitizeAttachmentLabel(name) &&
+    typeof uri === "string" &&
     uri.length > 0 &&
     uri.length <= MAX_ATTACHMENT_URI_LENGTH &&
     uri === sanitizeAttachmentLabel(uri) &&
     (mimeType === undefined ||
-      (mimeType.length > 0 &&
+      (typeof mimeType === "string" &&
+        mimeType.length > 0 &&
         mimeType.length <= MAX_ATTACHMENT_MIME_LENGTH &&
         MIME_TYPE_PATTERN.test(mimeType))) &&
     (size === undefined || (Number.isSafeInteger(size) && size >= 0))
@@ -205,21 +228,27 @@ export function isSupportedImageAttachment(
   );
 }
 
+function base64Value(code: number): number {
+  if (code >= 65 && code <= 90) return code - 65;
+  if (code >= 97 && code <= 122) return code - 71;
+  if (code >= 48 && code <= 57) return code + 4;
+  if (code === 43) return 62;
+  if (code === 47) return 63;
+  return -1;
+}
+
+/** Returns the decoded byte length only for canonical RFC 4648 base64. */
 export function decodedBase64Size(data: string): number | null {
-  if (data.length === 0 || data.length % 4 !== 0) {
+  if (typeof data !== "string" || data.length % 4 !== 0) {
     return null;
+  }
+  if (data.length === 0) {
+    return 0;
   }
   const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
   const bodyLength = data.length - padding;
   for (let index = 0; index < bodyLength; index += 1) {
-    const code = data.charCodeAt(index);
-    const valid =
-      (code >= 65 && code <= 90) ||
-      (code >= 97 && code <= 122) ||
-      (code >= 48 && code <= 57) ||
-      code === 43 ||
-      code === 47;
-    if (!valid) {
+    if (base64Value(data.charCodeAt(index)) < 0) {
       return null;
     }
   }
@@ -228,11 +257,105 @@ export function decodedBase64Size(data: string): number | null {
       return null;
     }
   }
+  if (
+    (padding === 2 &&
+      (base64Value(data.charCodeAt(bodyLength - 1)) & 0x0f) !== 0) ||
+    (padding === 1 &&
+      (base64Value(data.charCodeAt(bodyLength - 1)) & 0x03) !== 0)
+  ) {
+    return null;
+  }
   return (data.length / 4) * 3 - padding;
 }
+
+export function detectedImageMimeType(
+  bytes: Uint8Array
+): SupportedImageMimeType | null {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return "image/png";
+  }
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  ) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38 &&
+    (bytes[4] === 0x37 || bytes[4] === 0x39) &&
+    bytes[5] === 0x61
+  ) {
+    return "image/gif";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  return null;
+}
+
+function decodedBase64Prefix(
+  data: string,
+  maximumBytes: number
+): Uint8Array | null {
+  const size = decodedBase64Size(data);
+  if (size === null) {
+    return null;
+  }
+  const bytes = new Uint8Array(Math.min(size, maximumBytes));
+  let output = 0;
+  for (let index = 0; output < bytes.length; index += 4) {
+    const first = base64Value(data.charCodeAt(index));
+    const second = base64Value(data.charCodeAt(index + 1));
+    const third = base64Value(data.charCodeAt(index + 2));
+    const fourth = base64Value(data.charCodeAt(index + 3));
+    bytes[output++] = (first << 2) | (second >> 4);
+    if (output < bytes.length) {
+      bytes[output++] = ((second & 0x0f) << 4) | (third >> 2);
+    }
+    if (output < bytes.length) {
+      bytes[output++] = ((third & 0x03) << 6) | fourth;
+    }
+  }
+  return bytes;
+}
+
+function detectedBase64ImageMimeType(
+  data: string
+): SupportedImageMimeType | null {
+  const prefix = decodedBase64Prefix(data, 12);
+  return prefix ? detectedImageMimeType(prefix) : null;
+}
+
 export function isFileAttachmentValid(attachment: FileAttachment): boolean {
   const source = attachment.source ?? "file";
   const kind = attachment.kind ?? "file";
+  const transport = attachment.transport;
   if (
     !hasSafeMetadata(
       attachment.name,
@@ -240,32 +363,100 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
       attachment.mimeType,
       attachment.size
     ) ||
+    (source !== "file" && source !== "memory") ||
+    (kind !== "file" && kind !== "image") ||
     (source === "file"
       ? !hasMatchingCanonicalFileName(attachment.name, attachment.uri)
       : !hasMatchingMemoryName(attachment.name, attachment.uri)) ||
-    (attachment.transport !== undefined &&
-      !["resource_link", "resource", "image"].includes(attachment.transport)) ||
+    (transport !== undefined &&
+      transport !== "resource_link" &&
+      transport !== "resource" &&
+      transport !== "image") ||
+    (source === "memory" &&
+      transport !== "resource" &&
+      transport !== "image") ||
+    (transport === "resource_link" && source !== "file") ||
+    (transport === "resource" && kind !== "file") ||
+    (transport === "image" && kind !== "image") ||
     (kind === "image" && !isSupportedImageMimeType(attachment.mimeType))
   ) {
     return false;
   }
 
   if (attachment.previewDataUrl !== undefined) {
-    if (kind !== "image" || !isSupportedImageMimeType(attachment.mimeType)) {
+    if (
+      typeof attachment.previewDataUrl !== "string" ||
+      kind !== "image" ||
+      !isSupportedImageMimeType(attachment.mimeType)
+    ) {
       return false;
     }
     const prefix = `data:${attachment.mimeType};base64,`;
     if (!attachment.previewDataUrl.startsWith(prefix)) {
       return false;
     }
-    const size = decodedBase64Size(
-      attachment.previewDataUrl.slice(prefix.length)
-    );
-    if (size === null || size > MAX_IMAGE_BYTES) {
+    const data = attachment.previewDataUrl.slice(prefix.length);
+    if (data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) {
+      return false;
+    }
+    const size = decodedBase64Size(data);
+    if (
+      size === null ||
+      size > MAX_IMAGE_BYTES ||
+      (attachment.size !== undefined && attachment.size !== size) ||
+      detectedBase64ImageMimeType(data) !== attachment.mimeType
+    ) {
       return false;
     }
   }
   return true;
+}
+
+/** Validates the payload/metadata pair immediately before ACP transport. */
+export function isPromptAttachmentValid(attachment: PromptAttachment): boolean {
+  if (!isFileAttachmentValid(attachment)) {
+    return false;
+  }
+  const source = attachment.source ?? "file";
+  const kind = attachment.kind ?? "file";
+  const transport = attachment.transport ?? "resource_link";
+  const payload = attachment.payload;
+
+  if (transport === "resource_link") {
+    return source === "file" && payload === undefined;
+  }
+  if (transport === "image") {
+    if (
+      kind !== "image" ||
+      payload?.type !== "image" ||
+      typeof payload.data !== "string" ||
+      !isSupportedImageMimeType(attachment.mimeType) ||
+      payload.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
+    ) {
+      return false;
+    }
+    const size = decodedBase64Size(payload.data);
+    return (
+      size !== null &&
+      size <= MAX_IMAGE_BYTES &&
+      (attachment.size === undefined || attachment.size === size) &&
+      detectedBase64ImageMimeType(payload.data) === attachment.mimeType
+    );
+  }
+  if (
+    kind !== "file" ||
+    payload?.type !== "text" ||
+    typeof payload.text !== "string" ||
+    (attachment.mimeType !== undefined &&
+      !isEmbeddableTextMimeType(attachment.mimeType)) ||
+    payload.text.length > MAX_EMBEDDED_RESOURCE_BYTES
+  ) {
+    return false;
+  }
+  return (
+    new TextEncoder().encode(payload.text).byteLength <=
+    MAX_EMBEDDED_RESOURCE_BYTES
+  );
 }
 
 /** Removes host-only prompt bytes before metadata crosses into the webview. */
@@ -309,13 +500,13 @@ export function buildPromptContent(
     }
     if (
       attachment.payload?.type === "image" &&
-      attachment.kind === "image" &&
-      capabilities.image === true
+      attachment.transport === "image" &&
+      capabilities.image === true &&
+      isPromptAttachmentValid(attachment)
     ) {
       const size = decodedBase64Size(attachment.payload.data);
       if (
         size !== null &&
-        size <= MAX_IMAGE_BYTES &&
         inlineBytes + size <= MAX_INLINE_ATTACHMENT_BYTES &&
         isSupportedImageMimeType(attachment.mimeType)
       ) {
@@ -325,18 +516,17 @@ export function buildPromptContent(
           mimeType: attachment.mimeType,
         });
         inlineBytes += size;
+        continue;
       }
-      continue;
     }
     if (
       attachment.payload?.type === "text" &&
-      capabilities.embeddedContext === true
+      attachment.transport === "resource" &&
+      capabilities.embeddedContext === true &&
+      isPromptAttachmentValid(attachment)
     ) {
       const size = new TextEncoder().encode(attachment.payload.text).byteLength;
-      if (
-        size <= MAX_EMBEDDED_RESOURCE_BYTES &&
-        inlineBytes + size <= MAX_INLINE_ATTACHMENT_BYTES
-      ) {
+      if (inlineBytes + size <= MAX_INLINE_ATTACHMENT_BYTES) {
         blocks.push({
           type: "resource",
           resource: {
@@ -346,8 +536,8 @@ export function buildPromptContent(
           },
         });
         inlineBytes += size;
+        continue;
       }
-      continue;
     }
     if ((attachment.source ?? "file") === "file") {
       blocks.push({
