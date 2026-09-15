@@ -227,10 +227,9 @@ test("allows contained access, blocks escapes, and preserves dirty editors", asy
   const host = await launchHost(deniedPath);
   try {
     const window = await host.firstWindow();
-    let frame = await focusChat(window);
+    const frame = await focusChat(window);
     await expect(frame.locator("#connect-btn")).toBeHidden({ timeout: 30000 });
     await makeEditorDirty(window);
-    frame = await focusChat(window);
     await expect(frame.locator("#input")).toBeVisible({ timeout: 30000 });
     await frame.locator("#input").fill("Exercise filesystem boundary");
     await frame.locator("#input").press("Enter");

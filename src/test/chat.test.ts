@@ -387,6 +387,23 @@ async function waitForPermissionRequest(
   }
 }
 
+async function waitForDocumentContent(
+  document: vscode.TextDocument,
+  expected: string
+): Promise<void> {
+  if (document.getText() === expected) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const subscription = vscode.workspace.onDidChangeTextDocument((event) => {
+      if (event.document === document && document.getText() === expected) {
+        subscription.dispose();
+        resolve();
+      }
+    });
+  });
+}
+
 function makePermissionRequest(
   overrides: Partial<RequestPermissionRequest> = {}
 ): RequestPermissionRequest {
@@ -2457,14 +2474,15 @@ suite("ChatViewProvider", () => {
         assert.strictEqual(document.getText(), userContent);
         assert.strictEqual(document.isDirty, true);
 
-        const restore = new vscode.WorkspaceEdit();
-        restore.replace(
-          uri,
-          new vscode.Range(0, 0, document.lineCount, 0),
-          savedContent
-        );
-        await vscode.workspace.applyEdit(restore);
-        await document.save();
+        await vscode.commands.executeCommand("undo");
+        assert.strictEqual(document.getText(), savedContent);
+        assert.strictEqual(document.isDirty, false);
+        await vscode.commands.executeCommand("redo");
+        assert.strictEqual(document.getText(), userContent);
+        assert.strictEqual(document.isDirty, true);
+        await vscode.commands.executeCommand("undo");
+        assert.strictEqual(document.getText(), savedContent);
+        assert.strictEqual(document.isDirty, false);
 
         await testProvider.handleWriteTextFile({
           sessionId: "session",
@@ -2472,6 +2490,7 @@ suite("ChatViewProvider", () => {
           content: agentContent,
         });
         assert.strictEqual(await readFile(filePath, "utf8"), agentContent);
+        await waitForDocumentContent(document, agentContent);
         assert.strictEqual(document.isDirty, false);
       } finally {
         if (document?.isDirty) {
