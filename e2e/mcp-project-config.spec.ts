@@ -7,12 +7,13 @@ import {
 import { mkdir, readFile, readdir, rm, writeFile } from "fs/promises";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
   VSCODE_TEST_DIR,
 } from "./utils";
-import { getWebviewContentFrame } from "./fixtures";
+import { getWebviewContentFrame, getWebviewFrame } from "./fixtures";
 
 const DEMO_DIR = join(VSCODE_TEST_DIR, "mcp-project-config-demo");
 const USER_DATA_DIR = join(DEMO_DIR, "user-data");
@@ -149,17 +150,9 @@ async function openChat(window: Page) {
     timeout: 30000,
   });
   await runCommand(window, "VSCode ACP: Focus on Chat View");
-  await expect
-    .poll(
-      async () => {
-        for (const frame of window.frames()) {
-          if ((await frame.locator("#welcome-view").count()) > 0) return true;
-        }
-        return false;
-      },
-      { timeout: 30000 }
-    )
-    .toBe(true);
+  await expect(getWebviewFrame(window).locator("#welcome-view")).toBeVisible({
+    timeout: 30000,
+  });
   return getWebviewContentFrame(window);
 }
 
@@ -381,14 +374,14 @@ test("keeps auth retries on one MCP snapshot and reloads config at the next sess
           ?.value
       ).toBe(`Bearer ${RESOLVED_SECRET}`);
     }
-    await host.close();
+    await closeVSCode(host);
     hostClosed = true;
     for (const secretForm of [RESOLVED_SECRET, JSON_ESCAPED_SECRET]) {
       expect(await containsText(USER_DATA_DIR, secretForm)).toBe(false);
       expect(await containsText(WORKSPACE_DIR, secretForm)).toBe(false);
     }
   } finally {
-    if (!hostClosed) await host.close();
+    if (!hostClosed) await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
   }
 });
