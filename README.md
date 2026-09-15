@@ -45,7 +45,7 @@ You need at least one ACP-compatible agent installed:
 
 ## Usage
 
-1. Click the **VSCode ACP** icon in the Activity Bar (left sidebar)
+1. Open the **VSCode ACP** chat in the right-side Secondary Side Bar
 2. Click **Connect** to start a session
 3. Select your preferred agent from the dropdown
 4. Start chatting!
