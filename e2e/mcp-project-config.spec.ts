@@ -223,11 +223,43 @@ test("passes trusted project MCP configuration unchanged through auth retry and 
     await expect(authPicker.locator(".quick-input-title")).toHaveText(
       "Authentication required"
     );
+    const inputContainer = frame.locator("#input-container");
+    const transitionComplete = inputContainer.evaluate(
+      (element) =>
+        new Promise<void>((resolve) => {
+          let sawBusy = element.getAttribute("aria-busy") === "true";
+          const observer = new MutationObserver((records) => {
+            for (const record of records) {
+              if (record.attributeName !== "aria-busy") continue;
+              if (record.oldValue === "false") sawBusy = true;
+              if (sawBusy && element.getAttribute("aria-busy") === "false") {
+                observer.disconnect();
+                element.removeAttribute("data-auth-observer");
+                resolve();
+              }
+            }
+          });
+          observer.observe(element, {
+            attributes: true,
+            attributeFilter: ["aria-busy"],
+            attributeOldValue: true,
+          });
+          element.setAttribute("data-auth-observer", "ready");
+        })
+    );
+    await expect(inputContainer).toHaveAttribute("data-auth-observer", "ready");
     await window.keyboard.press("Enter");
-    await expect(frame.locator("#input")).toBeEnabled({ timeout: 10000 });
+    await transitionComplete;
+    await expect
+      .poll(async () =>
+        (await readRequestJournal()).filter(
+          (request) => request.method === "session/new"
+        ).length
+      )
+      .toBe(2);
 
     await frame.locator("#input").fill("Inspect configured MCP invocation");
-    await frame.locator("#input").press("Enter");
+    await frame.locator("#send").click();
     await expect
       .poll(async () =>
         (await readRequestJournal()).map((request) => request.method)

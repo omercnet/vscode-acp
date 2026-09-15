@@ -77,6 +77,30 @@ suite("MCP server configuration", () => {
     );
   });
 
+  test("never derives a project config path from an unrecognized resource", () => {
+    const workspaceUri = vscode.Uri.file("/workspace");
+    const workspaceFolders = [
+      { index: 0, name: "workspace", uri: workspaceUri },
+    ];
+
+    assert.strictEqual(
+      getMcpProjectConfigurationUri(
+        "/outside",
+        workspaceFolders,
+        vscode.Uri.file("/outside")
+      ),
+      undefined
+    );
+    assert.strictEqual(
+      getMcpProjectConfigurationUri(
+        "/workspace/../../outside",
+        workspaceFolders,
+        workspaceUri
+      )?.path,
+      "/workspace/.vscode/mcp.json"
+    );
+  });
+
   test("excludes repository-controlled sources in Restricted Mode", () => {
     const inspected = {
       globalValue: [{ name: "user", command: process.execPath }],
@@ -196,6 +220,31 @@ suite("MCP server configuration", () => {
         error instanceof McpConfigurationError &&
         error.code === "MCP_CONFIG_DUPLICATE"
     );
+  });
+
+  test("rejects malformed, non-UTF-8, and oversized project files", () => {
+    const invalidInputs = [
+      {
+        contents: new TextEncoder().encode('{ "servers": {'),
+        code: "MCP_CONFIG_MALFORMED",
+      },
+      {
+        contents: Uint8Array.from([0xff]),
+        code: "MCP_CONFIG_MALFORMED",
+      },
+      {
+        contents: new Uint8Array(256 * 1024 + 1),
+        code: "MCP_CONFIG_UNSAFE",
+      },
+    ] as const;
+
+    for (const { contents, code } of invalidInputs) {
+      assert.throws(
+        () => parseMcpProjectConfiguration(contents),
+        (error) =>
+          error instanceof McpConfigurationError && error.code === code
+      );
+    }
   });
 
   test("treats resolved environment values as opaque", () => {
