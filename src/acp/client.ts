@@ -20,16 +20,130 @@ export type SupportedSessionConfigOption = Extract<
   { type: "select" }
 >;
 
-function getSupportedConfigOptions(
-  configOptions: readonly acp.SessionConfigOption[] | null | undefined
+function parseSelectValue(value: unknown): acp.SessionConfigSelectOption {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Invalid session configuration options");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.value !== "string" ||
+    typeof candidate.name !== "string" ||
+    (candidate.description !== undefined &&
+      candidate.description !== null &&
+      typeof candidate.description !== "string")
+  ) {
+    throw new Error("Invalid session configuration options");
+  }
+  return {
+    value: candidate.value,
+    name: candidate.name,
+    ...(candidate.description !== undefined && {
+      description: candidate.description as string | null,
+    }),
+  };
+}
+
+function parseSupportedConfigOptions(
+  configOptions: unknown
 ): SupportedSessionConfigOption[] | null {
   if (configOptions == null) {
     return null;
   }
-  return configOptions.filter(
-    (option): option is SupportedSessionConfigOption =>
-      option.type === "select" && hasConfigValue(option, option.currentValue)
-  );
+  if (!Array.isArray(configOptions)) {
+    throw new Error("Invalid session configuration options");
+  }
+
+  const supported: SupportedSessionConfigOption[] = [];
+  for (const value of configOptions) {
+    if (typeof value !== "object" || value === null) {
+      throw new Error("Invalid session configuration options");
+    }
+    const candidate = value as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string" ||
+      typeof candidate.name !== "string" ||
+      (candidate.description !== undefined &&
+        candidate.description !== null &&
+        typeof candidate.description !== "string") ||
+      (candidate.category !== undefined &&
+        candidate.category !== null &&
+        typeof candidate.category !== "string")
+    ) {
+      throw new Error("Invalid session configuration options");
+    }
+    if (candidate.type === "boolean") {
+      if (typeof candidate.currentValue !== "boolean") {
+        throw new Error("Invalid session configuration options");
+      }
+      continue;
+    }
+    if (
+      candidate.type !== "select" ||
+      typeof candidate.currentValue !== "string" ||
+      !Array.isArray(candidate.options)
+    ) {
+      throw new Error("Invalid session configuration options");
+    }
+
+    const directOptions: acp.SessionConfigSelectOption[] = [];
+    const groupedOptions: acp.SessionConfigSelectGroup[] = [];
+    let optionKind: "direct" | "grouped" | null = null;
+    const availableValues = new Set<string>();
+    for (const entry of candidate.options) {
+      if (typeof entry !== "object" || entry === null) {
+        throw new Error("Invalid session configuration options");
+      }
+      const entryCandidate = entry as Record<string, unknown>;
+      if (Object.prototype.hasOwnProperty.call(entryCandidate, "value")) {
+        if (optionKind === "grouped") {
+          throw new Error("Invalid session configuration options");
+        }
+        optionKind = "direct";
+        const option = parseSelectValue(entryCandidate);
+        directOptions.push(option);
+        availableValues.add(option.value);
+        continue;
+      }
+      if (
+        optionKind === "direct" ||
+        typeof entryCandidate.group !== "string" ||
+        typeof entryCandidate.name !== "string" ||
+        !Array.isArray(entryCandidate.options)
+      ) {
+        throw new Error("Invalid session configuration options");
+      }
+      optionKind = "grouped";
+      const options = entryCandidate.options.map(parseSelectValue);
+      for (const option of options) {
+        availableValues.add(option.value);
+      }
+      groupedOptions.push({
+        group: entryCandidate.group,
+        name: entryCandidate.name,
+        options,
+      });
+    }
+
+    if (!availableValues.has(candidate.currentValue)) {
+      continue;
+    }
+    const options: acp.SessionConfigSelectOptions =
+      optionKind === "grouped" ? groupedOptions : directOptions;
+    supported.push({
+      id: candidate.id,
+      name: candidate.name,
+      type: "select",
+      currentValue: candidate.currentValue,
+      options,
+      ...(candidate.description !== undefined && {
+        description: candidate.description as string | null,
+      }),
+      ...(candidate.category !== undefined && {
+        category: candidate.category as string | null,
+      }),
+    });
+  }
+  return supported;
 }
 
 function hasConfigValue(
@@ -115,6 +229,13 @@ export interface ACPSessionCapabilities {
   list: boolean;
   resume: boolean;
   additionalDirectories: boolean;
+}
+
+interface ActiveConfigMutation {
+  connection: acp.ClientConnection;
+  sessionId: acp.SessionId;
+  sessionRequestGeneration: number;
+  bufferedConfigOptions?: SupportedSessionConfigOption[];
 }
 
 export type ACPConnectionState =
@@ -292,7 +413,7 @@ export class ACPClient {
   >();
   private pendingConfigOptionsBySession = new Map<
     acp.SessionId,
-    acp.SessionConfigOption[]
+    SupportedSessionConfigOption[]
   >();
   private pendingModeBySession = new Map<acp.SessionId, acp.SessionModeId>();
   private fileSystemCapabilitiesHandler: FileSystemCapabilitiesCallback | null =
@@ -308,8 +429,8 @@ export class ACPClient {
   private loadingSessionId: acp.SessionId | null = null;
   private mcpCapabilities: acp.McpCapabilities = {};
   private promptCapabilities: acp.PromptCapabilities = {};
-  private configOptionsRevision = 0;
-  private configOptionRequestGeneration = 0;
+  private configOptionMutationTail: Promise<void> = Promise.resolve();
+  private activeConfigMutations = new Set<ActiveConfigMutation>();
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -496,8 +617,8 @@ export class ACPClient {
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
     this.loadingSessionId = null;
-    this.configOptionsRevision++;
-    this.configOptionRequestGeneration++;
+    this.configOptionMutationTail = Promise.resolve();
+    this.activeConfigMutations.clear();
     this.setState("connecting");
 
     try {
@@ -780,16 +901,36 @@ export class ACPClient {
       }
       console.log("[ACP] Commands updated:", update.availableCommands.length);
     } else if (update.sessionUpdate === "config_option_update") {
+      let configOptions: SupportedSessionConfigOption[];
+      try {
+        const parsed = parseSupportedConfigOptions(update.configOptions);
+        if (parsed === null) {
+          throw new Error("Invalid session configuration options");
+        }
+        configOptions = parsed;
+      } catch {
+        console.error("[ACP] Invalid session configuration options update");
+        return;
+      }
       if (isCurrentSession && this.sessionMetadata) {
-        this.sessionMetadata.configOptions = getSupportedConfigOptions(
-          update.configOptions
-        );
-        this.configOptionsRevision++;
+        let activeMutation: ActiveConfigMutation | undefined;
+        for (const mutation of this.activeConfigMutations) {
+          if (
+            mutation.connection === this.connection &&
+            mutation.sessionId === params.sessionId &&
+            mutation.sessionRequestGeneration === this.sessionRequestGeneration
+          ) {
+            activeMutation = mutation;
+            break;
+          }
+        }
+        if (activeMutation) {
+          activeMutation.bufferedConfigOptions = configOptions;
+          return;
+        }
+        this.sessionMetadata.configOptions = configOptions;
       } else if (this.pendingSessionRequestGeneration !== null) {
-        this.pendingConfigOptionsBySession.set(
-          params.sessionId,
-          update.configOptions
-        );
+        this.pendingConfigOptionsBySession.set(params.sessionId, configOptions);
       }
     } else if (update.sessionUpdate === "current_mode_update") {
       if (isCurrentSession && this.sessionMetadata?.modes) {
@@ -829,8 +970,8 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
-    this.configOptionsRevision++;
-    this.configOptionRequestGeneration++;
+    this.configOptionMutationTail = Promise.resolve();
+    this.activeConfigMutations.clear();
 
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
@@ -859,6 +1000,12 @@ export class ACPClient {
       const bufferedConfigOptions = this.pendingConfigOptionsBySession.get(
         response.sessionId
       );
+      const responseConfigOptions = parseSupportedConfigOptions(
+        response.configOptions
+      );
+      const configOptions = hasBufferedConfigOptions
+        ? bufferedConfigOptions ?? []
+        : responseConfigOptions;
       const modes = response.modes ?? null;
       const bufferedMode = this.pendingModeBySession.get(response.sessionId);
       if (
@@ -868,17 +1015,13 @@ export class ACPClient {
       ) {
         modes.currentModeId = bufferedMode;
       }
-      this.currentSessionId = response.sessionId;
-      this.sessionMetadata = {
+      const metadata: SessionMetadata = {
         modes,
-        configOptions: getSupportedConfigOptions(
-          hasBufferedConfigOptions
-            ? bufferedConfigOptions
-            : response.configOptions
-        ),
+        configOptions,
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
-      this.configOptionsRevision++;
+      this.currentSessionId = response.sessionId;
+      this.sessionMetadata = metadata;
       if (replacedSessionId && this.canCloseSessions) {
         void connection.agent
           .request(acp.methods.agent.session.close, {
@@ -911,8 +1054,7 @@ export class ACPClient {
             replacedSessionMetadata.commands = commands;
           }
           if (configOptions) {
-            replacedSessionMetadata.configOptions =
-              getSupportedConfigOptions(configOptions);
+            replacedSessionMetadata.configOptions = configOptions;
           }
           if (
             modeId &&
@@ -987,8 +1129,8 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
-    this.configOptionsRevision++;
-    this.configOptionRequestGeneration++;
+    this.configOptionMutationTail = Promise.resolve();
+    this.activeConfigMutations.clear();
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
     try {
@@ -1020,6 +1162,12 @@ export class ACPClient {
         this.pendingConfigOptionsBySession.has(sessionId);
       const bufferedConfigOptions =
         this.pendingConfigOptionsBySession.get(sessionId);
+      const responseConfigOptions = parseSupportedConfigOptions(
+        response.configOptions
+      );
+      const configOptions = hasBufferedConfigOptions
+        ? bufferedConfigOptions ?? []
+        : responseConfigOptions;
       const modes = response.modes ?? null;
       const bufferedMode = this.pendingModeBySession.get(sessionId);
       if (
@@ -1029,17 +1177,13 @@ export class ACPClient {
       ) {
         modes.currentModeId = bufferedMode;
       }
-      this.currentSessionId = sessionId;
-      this.sessionMetadata = {
+      const metadata: SessionMetadata = {
         modes,
-        configOptions: getSupportedConfigOptions(
-          hasBufferedConfigOptions
-            ? bufferedConfigOptions
-            : response.configOptions
-        ),
+        configOptions,
         commands: this.pendingCommandsBySession.get(sessionId) ?? null,
       };
-      this.configOptionsRevision++;
+      this.currentSessionId = sessionId;
+      this.sessionMetadata = metadata;
       if (
         replacedSessionId &&
         replacedSessionId !== sessionId &&
@@ -1152,38 +1296,75 @@ export class ACPClient {
   async setSessionConfigOption(configId: string, value: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
-    const configOptions = this.sessionMetadata?.configOptions;
+    const sessionRequestGeneration = this.sessionRequestGeneration;
     if (!connection || !sessionId) {
       throw new Error("No active session");
     }
-    const option = configOptions?.find(
-      (candidate) => candidate.id === configId
-    );
-    if (!option) {
-      throw new Error(`Configuration option is not available: ${configId}`);
-    }
-    if (!hasConfigValue(option, value)) {
-      throw new Error(`Configuration value is not available: ${value}`);
-    }
 
-    const requestGeneration = ++this.configOptionRequestGeneration;
-    const configRevision = this.configOptionsRevision;
-    const response = await connection.agent.request(
-      acp.methods.agent.session.setConfigOption,
-      { sessionId, configId, value }
-    );
-    if (
-      connection === this.connection &&
-      sessionId === this.currentSessionId &&
-      this.sessionMetadata &&
-      requestGeneration === this.configOptionRequestGeneration &&
-      configRevision === this.configOptionsRevision
-    ) {
-      this.sessionMetadata.configOptions = getSupportedConfigOptions(
-        response.configOptions
+    const operation = this.configOptionMutationTail.then(async () => {
+      if (
+        connection !== this.connection ||
+        sessionId !== this.currentSessionId ||
+        sessionRequestGeneration !== this.sessionRequestGeneration
+      ) {
+        throw new Error("Configuration selection is stale");
+      }
+      const option = this.sessionMetadata?.configOptions?.find(
+        (candidate) => candidate.id === configId
       );
-      this.configOptionsRevision++;
-    }
+      if (!option) {
+        throw new Error(`Configuration option is not available: ${configId}`);
+      }
+      if (!hasConfigValue(option, value)) {
+        throw new Error(`Configuration value is not available: ${value}`);
+      }
+
+      const mutation: ActiveConfigMutation = {
+        connection,
+        sessionId,
+        sessionRequestGeneration,
+      };
+      this.activeConfigMutations.add(mutation);
+      try {
+        const response = await connection.agent.request(
+          acp.methods.agent.session.setConfigOption,
+          { sessionId, configId, value }
+        );
+        const configOptions = parseSupportedConfigOptions(
+          response.configOptions
+        );
+        if (configOptions === null) {
+          throw new Error("Invalid session configuration options");
+        }
+        if (
+          connection !== this.connection ||
+          sessionId !== this.currentSessionId ||
+          sessionRequestGeneration !== this.sessionRequestGeneration ||
+          !this.sessionMetadata
+        ) {
+          throw new Error("Configuration selection is stale");
+        }
+        this.sessionMetadata.configOptions = configOptions;
+      } catch (error) {
+        if (
+          mutation.bufferedConfigOptions &&
+          connection === this.connection &&
+          sessionId === this.currentSessionId &&
+          sessionRequestGeneration === this.sessionRequestGeneration &&
+          this.sessionMetadata
+        ) {
+          this.sessionMetadata.configOptions = mutation.bufferedConfigOptions;
+        }
+        throw error;
+      } finally {
+        this.activeConfigMutations.delete(mutation);
+      }
+    });
+    this.configOptionMutationTail = operation.then(
+      () => undefined,
+      () => undefined
+    );
+    await operation;
   }
 
   async sendMessage(
@@ -1256,8 +1437,8 @@ export class ACPClient {
     this.pendingConfigOptionsBySession.clear();
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
-    this.configOptionsRevision++;
-    this.configOptionRequestGeneration++;
+    this.configOptionMutationTail = Promise.resolve();
+    this.activeConfigMutations.clear();
     this.canCloseSessions = false;
     this.supportsSessionLoading = false;
     this.supportsSessionListing = false;

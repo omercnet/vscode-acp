@@ -71,6 +71,10 @@ export type DemoMode =
   | "rich-attachments"
   | "deferred-config"
   | "cascading-config"
+  | "overlapping-config"
+  | "pre-response-config"
+  | "post-response-config"
+  | "malformed-config"
   | "invalid-config"
   | "invalid-version"
   | "late-permission"
@@ -420,6 +424,11 @@ export class MockACPServer {
     const sessionId = `mock-session-${++this.sessionCounter}`;
     const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
     const isolatedModel = `session-${this.sessionCounter}-model`;
+    const usesCascadingConfig =
+      this.demoMode === "cascading-config" ||
+      this.demoMode === "overlapping-config" ||
+      this.demoMode === "pre-response-config" ||
+      this.demoMode === "post-response-config";
     const configOptions: acp.SessionConfigOption[] =
       this.demoMode === "deferred-config"
         ? [
@@ -441,7 +450,7 @@ export class MockACPServer {
               ],
             },
           ]
-        : this.demoMode === "cascading-config"
+        : usesCascadingConfig
           ? [
               {
                 id: "interaction",
@@ -549,6 +558,26 @@ export class MockACPServer {
         sessionUpdate: "config_option_update",
         configOptions,
       });
+    }
+
+    if (this.demoMode === "malformed-config") {
+      this.sendResponse(id, {
+        sessionId,
+        modes: {
+          availableModes: [{ id: "code", name: "Code" }],
+          currentModeId: "code",
+        },
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "broken",
+            options: null,
+          },
+        ],
+      });
+      return;
     }
 
     const response: acp.NewSessionResponse = {
@@ -729,11 +758,15 @@ export class MockACPServer {
     }
 
     this.configOptionRequests.push({ sessionId, configId, value });
-    if (
-      this.demoMode === "cascading-config" &&
+    const cascades =
+      (this.demoMode === "cascading-config" ||
+        this.demoMode === "overlapping-config" ||
+        this.demoMode === "pre-response-config" ||
+        this.demoMode === "post-response-config") &&
       configId === "interaction" &&
-      value === "review"
-    ) {
+      value === "review";
+    if (cascades) {
+      const previousConfigOptions = session.configOptions;
       session.configOptions = [
         { ...configOption, currentValue: value },
         {
@@ -751,11 +784,47 @@ export class MockACPServer {
           ],
         },
       ];
+      if (this.demoMode === "pre-response-config") {
+        this.sendSessionUpdate(session.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: previousConfigOptions.map((option) =>
+            option.id === configId
+              ? { ...configOption, currentValue: value }
+              : option
+          ),
+        });
+      }
+      if (this.demoMode === "overlapping-config") {
+        setImmediate(() =>
+          this.sendResponse(id, { configOptions: session.configOptions })
+        );
+        return;
+      }
     } else {
       configOption.currentValue = value;
     }
     this.sendResponse(id, { configOptions: session.configOptions });
-    if (this.demoMode !== "cascading-config") {
+    if (this.demoMode === "post-response-config") {
+      setImmediate(() => {
+        session.configOptions = [
+          { ...configOption, currentValue: value },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "latest",
+            options: [{ value: "latest", name: "Latest" }],
+          },
+        ];
+        this.sendSessionUpdate(session.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: session.configOptions,
+        });
+      });
+      return;
+    }
+    if (!cascades) {
       this.sendSessionUpdate(session.id, {
         sessionUpdate: "config_option_update",
         configOptions: session.configOptions,

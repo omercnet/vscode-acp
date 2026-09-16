@@ -224,9 +224,9 @@ test("renders grouped options, applies cascades, and clears replacements", async
       { id: "quality", label: "Quality models", values: ["accurate"] },
     ]);
 
-    await frame
-      .locator('[data-config-id="interaction"]')
-      .selectOption("review");
+    const interaction = frame.locator('[data-config-id="interaction"]');
+    await interaction.focus();
+    await interaction.selectOption("review");
     await expect(configSelectors).toHaveCount(2);
     await expect(frame.locator('[data-config-id="thought"]')).toHaveCount(0);
     await expect(frame.locator('[data-config-id="interaction"]')).toHaveValue(
@@ -235,6 +235,11 @@ test("renders grouped options, applies cascades, and clears replacements", async
     await expect(frame.locator('[data-config-id="model"]')).toHaveValue(
       "accurate"
     );
+    expect(
+      await frame.locator('[data-config-id="interaction"]').evaluate(
+        (element) => element === document.activeElement
+      )
+    ).toBe(true);
 
     await runCommand(window, "ACP: New Chat");
     await expect(configSelectors).toHaveCount(0);

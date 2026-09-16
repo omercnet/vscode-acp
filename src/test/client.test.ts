@@ -745,6 +745,18 @@ suite("ACPClient with Mock Server", () => {
       assert.deepStrictEqual(client.getSessionMetadata()?.configOptions, []);
     });
 
+    test("does not commit a session with malformed nested config options", async () => {
+      demoMode = "malformed-config";
+      await client.connect();
+
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Invalid session configuration options/
+      );
+      assert.strictEqual(client.getCurrentSessionId(), null);
+      assert.strictEqual(client.getSessionMetadata(), null);
+    });
+
     test("tracks current mode updates in session metadata", async () => {
       demoMode = "mode-update";
       await client.connect();
@@ -1413,6 +1425,81 @@ suite("ACPClient with Mock Server", () => {
         [
           { id: "interaction", currentValue: "review" },
           { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("keeps an earlier cascade when a queued later selection fails", async () => {
+      demoMode = "overlapping-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      const cascade = client.setSessionConfigOption("interaction", "review");
+      const rejectedSelection = assert.rejects(
+        client.setSessionConfigOption("model", "fast")
+      );
+      await cascade;
+      await rejectedSelection;
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests().map(
+          ({ configId, value }) => ({ configId, value })
+        ),
+        [{ configId: "interaction", value: "review" }]
+      );
+    });
+
+    test("applies the authoritative response after a preceding notification", async () => {
+      demoMode = "pre-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.setSessionConfigOption("interaction", "review");
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("applies a superseding notification sent after the response", async () => {
+      demoMode = "post-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.setSessionConfigOption("interaction", "review");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "latest" },
         ]
       );
     });

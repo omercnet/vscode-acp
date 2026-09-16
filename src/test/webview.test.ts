@@ -994,6 +994,49 @@ suite("Webview", () => {
         }
       });
 
+      test("restores keyboard focus to a surviving config selector", () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "interaction",
+              type: "select",
+              name: "Interaction",
+              currentValue: "build",
+              options: [
+                { value: "build", name: "Build" },
+                { value: "review", name: "Review" },
+              ],
+            },
+          ],
+        });
+        const previous = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+          '[data-config-id="interaction"]'
+        );
+        assert.ok(previous);
+        previous.focus();
+
+        controller.handleMessage({
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "interaction",
+              type: "select",
+              name: "Interaction",
+              currentValue: "review",
+              options: [{ value: "review", name: "Review" }],
+            },
+          ],
+        });
+
+        const replacement = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+          '[data-config-id="interaction"]'
+        );
+        assert.ok(replacement);
+        assert.notStrictEqual(replacement, previous);
+        assert.strictEqual(document.activeElement, replacement);
+      });
+
       test("handles chatCleared", () => {
         controller.addMessage("Test", "user");
         controller.handleMessage({ type: "chatCleared" });

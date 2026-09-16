@@ -2003,6 +2003,13 @@ export class WebviewController {
   private renderSessionConfigOptions(
     configOptions: readonly SessionConfigOption[]
   ): void {
+    const activeElement = this.doc.activeElement;
+    const focusedConfigId =
+      activeElement?.tagName === "SELECT" &&
+      activeElement.classList.contains("session-config-select") &&
+      this.elements.configOptionsContainer.contains(activeElement)
+        ? (activeElement as HTMLSelectElement).dataset.configId
+        : undefined;
     this.clearSessionOptions();
     this.hasSessionConfigOptions = true;
 
@@ -2056,6 +2063,16 @@ export class WebviewController {
       select.style.display = "inline-block";
       updateSelectLabel(select, label);
       this.elements.configOptionsContainer.appendChild(select);
+    }
+    if (focusedConfigId !== undefined) {
+      for (const select of this.elements.configOptionsContainer.querySelectorAll<HTMLSelectElement>(
+        ".session-config-select"
+      )) {
+        if (select.dataset.configId === focusedConfigId) {
+          select.focus();
+          break;
+        }
+      }
     }
     this.updateInputControls(false);
   }
