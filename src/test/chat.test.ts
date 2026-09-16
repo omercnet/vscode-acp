@@ -3007,8 +3007,9 @@ suite("ChatViewProvider", () => {
     });
 
     test("rechecks editors dirtied during asynchronous identity resolution", async () => {
+      // Avoid per-editor external-directory watches during immediate teardown.
       const sandbox = await realpath(
-        await mkdtemp(join(tmpdir(), "vscode-acp-editor-race-"))
+        await mkdtemp(join(workspaceRoot(), ".vscode-acp-editor-race-"))
       );
       const targetPath = join(sandbox, "target.txt");
       const otherPath = join(sandbox, "other.txt");
