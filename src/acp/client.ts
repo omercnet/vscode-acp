@@ -234,7 +234,7 @@ export interface ACPSessionCapabilities {
 interface ActiveConfigMutation {
   connection: acp.ClientConnection;
   sessionId: acp.SessionId;
-  sessionRequestGeneration: number;
+  sessionIdentityGeneration: number;
   bufferedConfigOptions?: SupportedSessionConfigOption[];
 }
 
@@ -421,6 +421,8 @@ export class ACPClient {
   private connectionGeneration = 0;
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
+  private sessionIdentityGeneration = 0;
+  private sessionTransitionSettled: Promise<void> = Promise.resolve();
   private canCloseSessions = false;
   private supportsSessionLoading = false;
   private supportsSessionListing = false;
@@ -469,6 +471,19 @@ export class ACPClient {
   private requireActiveSession(sessionId: acp.SessionId): void {
     if (!this.isActiveSession(sessionId)) {
       throw new Error(`Request for inactive session: ${sessionId}`);
+    }
+  }
+
+  private async waitForSessionTransition(
+    connection: acp.ClientConnection,
+    sessionIdentityGeneration: number
+  ): Promise<void> {
+    while (
+      connection === this.connection &&
+      sessionIdentityGeneration === this.sessionIdentityGeneration &&
+      this.pendingSessionRequestGeneration !== null
+    ) {
+      await this.sessionTransitionSettled;
     }
   }
 
@@ -616,6 +631,8 @@ export class ACPClient {
     this.pendingConfigOptionsBySession.clear();
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
+    this.sessionIdentityGeneration++;
+    this.sessionTransitionSettled = Promise.resolve();
     this.loadingSessionId = null;
     this.configOptionMutationTail = Promise.resolve();
     this.activeConfigMutations.clear();
@@ -918,7 +935,7 @@ export class ACPClient {
           if (
             mutation.connection === this.connection &&
             mutation.sessionId === params.sessionId &&
-            mutation.sessionRequestGeneration === this.sessionRequestGeneration
+            mutation.sessionIdentityGeneration === this.sessionIdentityGeneration
           ) {
             activeMutation = mutation;
             break;
@@ -961,6 +978,11 @@ export class ACPClient {
       throw new Error("Session creation already in progress");
     }
 
+    let settleSessionTransition!: () => void;
+    const sessionTransitionSettled = new Promise<void>((resolve) => {
+      settleSessionTransition = resolve;
+    });
+    this.sessionTransitionSettled = sessionTransitionSettled;
     const requestGeneration = ++this.sessionRequestGeneration;
     this.pendingSessionRequestGeneration = requestGeneration;
     this.pendingCommandsBySession.clear();
@@ -970,8 +992,6 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
-    this.configOptionMutationTail = Promise.resolve();
-    this.activeConfigMutations.clear();
 
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
@@ -1020,6 +1040,9 @@ export class ACPClient {
         configOptions,
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
+      this.sessionIdentityGeneration++;
+      this.configOptionMutationTail = Promise.resolve();
+      this.activeConfigMutations.clear();
       this.currentSessionId = response.sessionId;
       this.sessionMetadata = metadata;
       if (replacedSessionId && this.canCloseSessions) {
@@ -1073,6 +1096,8 @@ export class ACPClient {
         this.pendingModeBySession.clear();
       }
       throw error;
+    } finally {
+      settleSessionTransition();
     }
   }
   async listSessions(
@@ -1119,6 +1144,11 @@ export class ACPClient {
       throw new Error("Session restoration already in progress");
     }
 
+    let settleSessionTransition!: () => void;
+    const sessionTransitionSettled = new Promise<void>((resolve) => {
+      settleSessionTransition = resolve;
+    });
+    this.sessionTransitionSettled = sessionTransitionSettled;
     const requestGeneration = ++this.sessionRequestGeneration;
     this.pendingSessionRequestGeneration = requestGeneration;
     this.loadingSessionId = sessionId;
@@ -1129,8 +1159,6 @@ export class ACPClient {
     const replacedSessionMetadata = this.sessionMetadata;
     this.currentSessionId = null;
     this.sessionMetadata = null;
-    this.configOptionMutationTail = Promise.resolve();
-    this.activeConfigMutations.clear();
     const replacedPromptSessionId = this.activePrompt?.sessionId;
 
     try {
@@ -1182,6 +1210,9 @@ export class ACPClient {
         configOptions,
         commands: this.pendingCommandsBySession.get(sessionId) ?? null,
       };
+      this.sessionIdentityGeneration++;
+      this.configOptionMutationTail = Promise.resolve();
+      this.activeConfigMutations.clear();
       this.currentSessionId = sessionId;
       this.sessionMetadata = metadata;
       if (
@@ -1213,6 +1244,24 @@ export class ACPClient {
           replacedSessionId &&
           replacedSessionMetadata
         ) {
+          const commands = this.pendingCommandsBySession.get(replacedSessionId);
+          const configOptions =
+            this.pendingConfigOptionsBySession.get(replacedSessionId);
+          const modeId = this.pendingModeBySession.get(replacedSessionId);
+          if (commands) {
+            replacedSessionMetadata.commands = commands;
+          }
+          if (configOptions) {
+            replacedSessionMetadata.configOptions = configOptions;
+          }
+          if (
+            modeId &&
+            replacedSessionMetadata.modes?.availableModes.some(
+              (mode) => mode.id === modeId
+            )
+          ) {
+            replacedSessionMetadata.modes.currentModeId = modeId;
+          }
           this.currentSessionId = replacedSessionId;
           this.sessionMetadata = replacedSessionMetadata;
         }
@@ -1223,6 +1272,8 @@ export class ACPClient {
         this.pendingModeBySession.clear();
       }
       throw error;
+    } finally {
+      settleSessionTransition();
     }
   }
 
@@ -1296,16 +1347,20 @@ export class ACPClient {
   async setSessionConfigOption(configId: string, value: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
-    const sessionRequestGeneration = this.sessionRequestGeneration;
+    const sessionIdentityGeneration = this.sessionIdentityGeneration;
     if (!connection || !sessionId) {
       throw new Error("No active session");
     }
 
     const operation = this.configOptionMutationTail.then(async () => {
+      await this.waitForSessionTransition(
+        connection,
+        sessionIdentityGeneration
+      );
       if (
         connection !== this.connection ||
         sessionId !== this.currentSessionId ||
-        sessionRequestGeneration !== this.sessionRequestGeneration
+        sessionIdentityGeneration !== this.sessionIdentityGeneration
       ) {
         throw new Error("Configuration selection is stale");
       }
@@ -1322,13 +1377,17 @@ export class ACPClient {
       const mutation: ActiveConfigMutation = {
         connection,
         sessionId,
-        sessionRequestGeneration,
+        sessionIdentityGeneration,
       };
       this.activeConfigMutations.add(mutation);
       try {
         const response = await connection.agent.request(
           acp.methods.agent.session.setConfigOption,
           { sessionId, configId, value }
+        );
+        await this.waitForSessionTransition(
+          connection,
+          sessionIdentityGeneration
         );
         const configOptions = parseSupportedConfigOptions(
           response.configOptions
@@ -1339,18 +1398,22 @@ export class ACPClient {
         if (
           connection !== this.connection ||
           sessionId !== this.currentSessionId ||
-          sessionRequestGeneration !== this.sessionRequestGeneration ||
+          sessionIdentityGeneration !== this.sessionIdentityGeneration ||
           !this.sessionMetadata
         ) {
           throw new Error("Configuration selection is stale");
         }
         this.sessionMetadata.configOptions = configOptions;
       } catch (error) {
+        await this.waitForSessionTransition(
+          connection,
+          sessionIdentityGeneration
+        );
         if (
           mutation.bufferedConfigOptions &&
           connection === this.connection &&
           sessionId === this.currentSessionId &&
-          sessionRequestGeneration === this.sessionRequestGeneration &&
+          sessionIdentityGeneration === this.sessionIdentityGeneration &&
           this.sessionMetadata
         ) {
           this.sessionMetadata.configOptions = mutation.bufferedConfigOptions;
@@ -1437,6 +1500,8 @@ export class ACPClient {
     this.pendingConfigOptionsBySession.clear();
     this.pendingModeBySession.clear();
     this.pendingSessionRequestGeneration = null;
+    this.sessionIdentityGeneration++;
+    this.sessionTransitionSettled = Promise.resolve();
     this.configOptionMutationTail = Promise.resolve();
     this.activeConfigMutations.clear();
     this.canCloseSessions = false;

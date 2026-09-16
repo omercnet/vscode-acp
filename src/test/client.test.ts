@@ -890,6 +890,81 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("reconciles a pending mutation after its replacement fails", async () => {
+      demoMode = "replacement-failure-pending-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (
+        mockProcesses[0].server.getConfigOptionRequests().length === 0
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Replacement session failed/
+      );
+      await mutation;
+
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("rejects a pending mutation after a successful replacement", async () => {
+      demoMode = "replacement-success-pending-config";
+      await client.connect();
+      const original = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const staleMutation = assert.rejects(
+        client.setSessionConfigOption("interaction", "review"),
+        /Configuration selection is stale/
+      );
+      while (
+        mockProcesses[0].server.getConfigOptionRequests().length === 0
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const replacement = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+      await staleMutation;
+
+      assert.notStrictEqual(replacement.sessionId, original.sessionId);
+      assert.strictEqual(client.getCurrentSessionId(), replacement.sessionId);
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "build" },
+          { id: "model", currentValue: "fast" },
+          { id: "thought", currentValue: "medium" },
+        ]
+      );
+    });
+
     test("rejects overlapping session creation", async () => {
       await client.connect();
 

@@ -87,6 +87,8 @@ export type DemoMode =
   | "mode-update"
   | "permission"
   | "replacement-failure"
+  | "replacement-failure-pending-config"
+  | "replacement-success-pending-config"
   | "session-close"
   | "session-close-hangs"
   | "plan"
@@ -396,7 +398,11 @@ export class MockACPServer {
       return;
     }
     let previousSession: MockSession | undefined;
-    if (this.demoMode === "replacement-failure" && this.sessionCounter === 1) {
+    if (
+      (this.demoMode === "replacement-failure" ||
+        this.demoMode === "replacement-failure-pending-config") &&
+      this.sessionCounter === 1
+    ) {
       this.sendError(id, -32000, "Replacement session failed");
       return;
     }
@@ -428,7 +434,9 @@ export class MockACPServer {
       this.demoMode === "cascading-config" ||
       this.demoMode === "overlapping-config" ||
       this.demoMode === "pre-response-config" ||
-      this.demoMode === "post-response-config";
+      this.demoMode === "post-response-config" ||
+      this.demoMode === "replacement-failure-pending-config" ||
+      this.demoMode === "replacement-success-pending-config";
     const configOptions: acp.SessionConfigOption[] =
       this.demoMode === "deferred-config"
         ? [
@@ -762,7 +770,9 @@ export class MockACPServer {
       (this.demoMode === "cascading-config" ||
         this.demoMode === "overlapping-config" ||
         this.demoMode === "pre-response-config" ||
-        this.demoMode === "post-response-config") &&
+        this.demoMode === "post-response-config" ||
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-success-pending-config") &&
       configId === "interaction" &&
       value === "review";
     if (cascades) {
@@ -797,6 +807,16 @@ export class MockACPServer {
       if (this.demoMode === "overlapping-config") {
         setImmediate(() =>
           this.sendResponse(id, { configOptions: session.configOptions })
+        );
+        return;
+      }
+      if (
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-success-pending-config"
+      ) {
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: session.configOptions }),
+          25
         );
         return;
       }
