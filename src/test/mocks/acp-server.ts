@@ -88,6 +88,7 @@ export type DemoMode =
   | "permission"
   | "replacement-failure"
   | "replacement-failure-pending-config"
+  | "replacement-failure-ordered-config"
   | "replacement-success-pending-config"
   | "session-close"
   | "session-close-hangs"
@@ -143,6 +144,11 @@ export class MockACPServer {
   }
   getNewSessionRequests(): readonly acp.NewSessionRequest[] {
     return this.newSessionRequests;
+  }
+  getSessionConfigOptions(
+    sessionId: acp.SessionId
+  ): readonly acp.SessionConfigOption[] | undefined {
+    return this.sessions.get(sessionId)?.configOptions;
   }
   getConfigOptionRequests(): readonly acp.SetSessionConfigOptionRequest[] {
     return this.configOptionRequests;
@@ -400,10 +406,18 @@ export class MockACPServer {
     let previousSession: MockSession | undefined;
     if (
       (this.demoMode === "replacement-failure" ||
-        this.demoMode === "replacement-failure-pending-config") &&
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-failure-ordered-config") &&
       this.sessionCounter === 1
     ) {
-      this.sendError(id, -32000, "Replacement session failed");
+      if (this.demoMode === "replacement-failure-ordered-config") {
+        setTimeout(
+          () => this.sendError(id, -32000, "Replacement session failed"),
+          40
+        );
+      } else {
+        this.sendError(id, -32000, "Replacement session failed");
+      }
       return;
     }
     for (const session of this.sessions.values()) {
@@ -436,6 +450,7 @@ export class MockACPServer {
       this.demoMode === "pre-response-config" ||
       this.demoMode === "post-response-config" ||
       this.demoMode === "replacement-failure-pending-config" ||
+      this.demoMode === "replacement-failure-ordered-config" ||
       this.demoMode === "replacement-success-pending-config";
     const configOptions: acp.SessionConfigOption[] =
       this.demoMode === "deferred-config"
@@ -772,6 +787,7 @@ export class MockACPServer {
         this.demoMode === "pre-response-config" ||
         this.demoMode === "post-response-config" ||
         this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-failure-ordered-config" ||
         this.demoMode === "replacement-success-pending-config") &&
       configId === "interaction" &&
       value === "review";
@@ -818,6 +834,31 @@ export class MockACPServer {
           () => this.sendResponse(id, { configOptions: session.configOptions }),
           25
         );
+        return;
+      }
+      if (this.demoMode === "replacement-failure-ordered-config") {
+        const responseConfigOptions = session.configOptions;
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: responseConfigOptions }),
+          10
+        );
+        setTimeout(() => {
+          session.configOptions = [
+            { ...configOption, currentValue: value },
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue: "latest",
+              options: [{ value: "latest", name: "Latest" }],
+            },
+          ];
+          this.sendSessionUpdate(session.id, {
+            sessionUpdate: "config_option_update",
+            configOptions: session.configOptions,
+          });
+        }, 20);
         return;
       }
     } else {

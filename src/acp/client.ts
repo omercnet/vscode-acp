@@ -235,7 +235,9 @@ interface ActiveConfigMutation {
   connection: acp.ClientConnection;
   sessionId: acp.SessionId;
   sessionIdentityGeneration: number;
-  bufferedConfigOptions?: SupportedSessionConfigOption[];
+  responseReceived: boolean;
+  precedingConfigOptions?: SupportedSessionConfigOption[];
+  supersedingConfigOptions?: SupportedSessionConfigOption[];
 }
 
 export type ACPConnectionState =
@@ -929,22 +931,26 @@ export class ACPClient {
         console.error("[ACP] Invalid session configuration options update");
         return;
       }
+      let activeMutation: ActiveConfigMutation | undefined;
+      for (const mutation of this.activeConfigMutations) {
+        if (
+          mutation.connection === this.connection &&
+          mutation.sessionId === params.sessionId &&
+          mutation.sessionIdentityGeneration === this.sessionIdentityGeneration
+        ) {
+          activeMutation = mutation;
+          break;
+        }
+      }
+      if (activeMutation) {
+        if (activeMutation.responseReceived) {
+          activeMutation.supersedingConfigOptions = configOptions;
+        } else {
+          activeMutation.precedingConfigOptions = configOptions;
+        }
+        return;
+      }
       if (isCurrentSession && this.sessionMetadata) {
-        let activeMutation: ActiveConfigMutation | undefined;
-        for (const mutation of this.activeConfigMutations) {
-          if (
-            mutation.connection === this.connection &&
-            mutation.sessionId === params.sessionId &&
-            mutation.sessionIdentityGeneration === this.sessionIdentityGeneration
-          ) {
-            activeMutation = mutation;
-            break;
-          }
-        }
-        if (activeMutation) {
-          activeMutation.bufferedConfigOptions = configOptions;
-          return;
-        }
         this.sessionMetadata.configOptions = configOptions;
       } else if (this.pendingSessionRequestGeneration !== null) {
         this.pendingConfigOptionsBySession.set(params.sessionId, configOptions);
@@ -1378,6 +1384,7 @@ export class ACPClient {
         connection,
         sessionId,
         sessionIdentityGeneration,
+        responseReceived: false,
       };
       this.activeConfigMutations.add(mutation);
       try {
@@ -1385,6 +1392,7 @@ export class ACPClient {
           acp.methods.agent.session.setConfigOption,
           { sessionId, configId, value }
         );
+        mutation.responseReceived = true;
         await this.waitForSessionTransition(
           connection,
           sessionIdentityGeneration
@@ -1403,20 +1411,23 @@ export class ACPClient {
         ) {
           throw new Error("Configuration selection is stale");
         }
-        this.sessionMetadata.configOptions = configOptions;
+        this.sessionMetadata.configOptions =
+          mutation.supersedingConfigOptions ?? configOptions;
       } catch (error) {
         await this.waitForSessionTransition(
           connection,
           sessionIdentityGeneration
         );
+        const bufferedConfigOptions =
+          mutation.supersedingConfigOptions ?? mutation.precedingConfigOptions;
         if (
-          mutation.bufferedConfigOptions &&
+          bufferedConfigOptions &&
           connection === this.connection &&
           sessionId === this.currentSessionId &&
           sessionIdentityGeneration === this.sessionIdentityGeneration &&
           this.sessionMetadata
         ) {
-          this.sessionMetadata.configOptions = mutation.bufferedConfigOptions;
+          this.sessionMetadata.configOptions = bufferedConfigOptions;
         }
         throw error;
       } finally {

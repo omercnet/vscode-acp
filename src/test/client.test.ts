@@ -925,6 +925,39 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("preserves notification order while a failed replacement is pending", async () => {
+      demoMode = "replacement-failure-ordered-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (
+        mockProcesses[0].server.getConfigOptionRequests().length === 0
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Replacement session failed/
+      );
+      await mutation;
+
+      const clientState = client
+        .getSessionMetadata()
+        ?.configOptions?.map(({ id, currentValue }) => ({ id, currentValue }));
+      const agentState = mockProcesses[0].server
+        .getSessionConfigOptions(active.sessionId)
+        ?.map(({ id, currentValue }) => ({ id, currentValue }));
+      assert.deepStrictEqual(clientState, [
+        { id: "interaction", currentValue: "review" },
+        { id: "model", currentValue: "latest" },
+      ]);
+      assert.deepStrictEqual(clientState, agentState);
+    });
+
     test("rejects a pending mutation after a successful replacement", async () => {
       demoMode = "replacement-success-pending-config";
       await client.connect();
