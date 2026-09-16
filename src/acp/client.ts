@@ -76,6 +76,45 @@ export function isAgentAuthMethod(
     (candidate.type === undefined || candidate.type === "agent")
   );
 }
+const AGENT_INFO_CONTROL_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/gu;
+const MAX_AGENT_INFO_FIELD_LENGTH = 256;
+
+function normalizeAgentInfo(value: unknown): acp.Implementation | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.version !== "string"
+  ) {
+    return null;
+  }
+  const normalizeField = (field: string): string => {
+    const sanitized = field.replace(AGENT_INFO_CONTROL_CHARACTERS, " ").trim();
+    let normalized = "";
+    let length = 0;
+    for (const character of sanitized) {
+      if (length === MAX_AGENT_INFO_FIELD_LENGTH) {
+        break;
+      }
+      normalized += character;
+      length++;
+    }
+    return normalized;
+  };
+  const name = normalizeField(candidate.name);
+  const version = normalizeField(candidate.version);
+  if (!name || !version) {
+    return null;
+  }
+  const title =
+    typeof candidate.title === "string"
+      ? normalizeField(candidate.title) || undefined
+      : undefined;
+  return { name, version, ...(title !== undefined && { title }) };
+}
 
 export interface SessionMetadata {
   modes: acp.SessionModeState | null;
@@ -250,6 +289,7 @@ export class ACPClient {
   private currentSessionId: string | null = null;
   private sessionMetadata: SessionMetadata | null = null;
   private authenticationMethods: acp.AuthMethod[] = [];
+  private agentInfo: acp.Implementation | null = null;
   private pendingCommandsBySession = new Map<
     acp.SessionId,
     acp.AvailableCommand[]
@@ -313,11 +353,15 @@ export class ACPClient {
     if (this.state !== "disconnected") {
       this.dispose();
     }
+    this.agentInfo = null;
     this.agentConfig = config;
   }
 
   getAgentId(): string {
     return this.agentConfig.id;
+  }
+  getAgentInfo(): acp.Implementation | null {
+    return this.agentInfo ? { ...this.agentInfo } : null;
   }
 
   getCurrentSessionId(): string | null {
@@ -424,6 +468,7 @@ export class ACPClient {
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
     this.authenticationMethods = [];
+    this.agentInfo = null;
     this.canCloseSessions = false;
     this.mcpCapabilities = {};
     this.setState("connecting");
@@ -462,6 +507,7 @@ export class ACPClient {
           return;
         }
         connection?.close(error);
+        this.agentInfo = null;
         this.setState("error");
       });
 
@@ -475,6 +521,7 @@ export class ACPClient {
           this.connection = null;
         }
         this.process = null;
+        this.agentInfo = null;
         this.currentSessionId = null;
         this.sessionMetadata = null;
         this.pendingCommandsBySession.clear();
@@ -574,6 +621,11 @@ export class ACPClient {
         })
         .connect(stream);
       this.connection = connection;
+      void connection.closed.then(() => {
+        if (this.connection === connection && this.state === "connected") {
+          this.dispose();
+        }
+      });
 
       const clientCapabilities: acp.ClientCapabilities = {};
       const readTextFile =
@@ -610,7 +662,8 @@ export class ACPClient {
       if (
         attemptGeneration !== this.connectionGeneration ||
         this.connection !== connection ||
-        this.process !== child
+        this.process !== child ||
+        connection.signal.aborted
       ) {
         throw new Error("Connection attempt was disposed");
       }
@@ -619,6 +672,7 @@ export class ACPClient {
           `Unsupported ACP protocol version: ${initResponse.protocolVersion}`
         );
       }
+      this.agentInfo = normalizeAgentInfo(initResponse.agentInfo);
       this.canCloseSessions =
         initResponse.agentCapabilities?.sessionCapabilities?.close != null;
       this.supportsSessionLoading =
@@ -647,6 +701,7 @@ export class ACPClient {
       }
       if (isCurrentAttempt) {
         this.currentSessionId = null;
+        this.agentInfo = null;
         this.sessionMetadata = null;
         this.canCloseSessions = false;
         this.supportsSessionLoading = false;
@@ -1085,6 +1140,7 @@ export class ACPClient {
       this.process = null;
     }
     this.currentSessionId = null;
+    this.agentInfo = null;
     this.sessionMetadata = null;
     this.pendingCommandsBySession.clear();
     this.pendingConfigOptionsBySession.clear();

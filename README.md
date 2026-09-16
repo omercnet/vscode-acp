@@ -52,6 +52,8 @@ You need at least one ACP-compatible agent installed:
 
 If an agent requires ACP authentication, choose one of its advertised sign-in methods. The agent owns that flow; VSCode ACP does not ask for, store, or log API keys or other credentials.
 
+The connection header shows the agent's initialized title (or name) and version when provided. This identity belongs to the active connection and clears on disconnect, connection failure, reconnect, or agent change.
+
 ### File Attachments
 
 Use the paperclip button beside the prompt to select an open workspace file or browse for files inside a trusted local workspace. Selected files appear as removable chips and are sent as ACP `resource_link` blocks with their canonical file URI and name, plus MIME type and size when available. The extension stats the selected path but does not read or embed file contents when attaching it; the selected agent must be able to access the referenced URI.
@@ -72,8 +74,15 @@ When the AI uses tools (like running commands or reading files), you'll see them
 - **⋯** — Tool is running
 - **✓** — Tool completed successfully
 - **✗** — Tool failed
+- **×**: Tool was cancelled before completion
 
 Click on any tool to see the command input and output.
+
+Agent-provided file locations appear as links inside tool details. Clicking a link opens the canonical file only if it is inside a trusted local workspace, selecting the advertised line when supplied. Missing files and locations outside that boundary show an error without navigating. Locations are never opened automatically.
+
+### Turn Completion
+
+Normal completion adds no extra notice. Token and turn-request limits show warnings, and cancellation shows a muted notice. A refusal explains that the user prompt and everything after it will be excluded from the agent's next prompt. These outcomes also apply when the agent returns no text or only tool output.
 
 ## Security model
 

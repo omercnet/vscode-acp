@@ -47,12 +47,25 @@ export type ToolKind =
   | "switch_mode"
   | "other";
 
+export interface ToolLocation {
+  path: string;
+  label: string;
+  line?: number;
+}
+
+export interface AgentInfo {
+  name: string;
+  title?: string | null;
+  version: string;
+}
+
 export interface Tool {
   name: string;
   input: string | null;
   output: string | null;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "cancelled";
   kind?: ToolKind;
+  locations?: ToolLocation[];
 }
 
 export interface WebviewState {
@@ -140,14 +153,21 @@ export interface ExtensionMessage {
   name?: string;
   title?: string;
   kind?: ToolKind;
-  content?: ToolCallContentItem[];
-  // Arbitrary agent-supplied tool input; `command`/`description` are the only
-  // fields this UI reads directly.
-  rawInput?: { command?: string; description?: string } & Record<
-    string,
-    unknown
-  >;
-  rawOutput?: { output?: string };
+  content?: ToolCallContentItem[] | null;
+  locations?: ToolLocation[] | null;
+  stopReason?:
+    | "end_turn"
+    | "max_tokens"
+    | "max_turn_requests"
+    | "refusal"
+    | "cancelled"
+    | "error";
+  suppressStopReason?: boolean;
+  agentInfo?: AgentInfo | null;
+  // ACP treats raw tool payloads as opaque. The UI only reads validated string
+  // values from the conventional command, description, and output fields.
+  rawInput?: unknown;
+  rawOutput?: unknown;
   status?: string;
   terminalOutput?: string;
   requestId?: string;
@@ -156,6 +176,124 @@ export interface ExtensionMessage {
   restoreFocus?: boolean;
   /** Set when approving this payload can start a process on the machine. */
   executable?: boolean;
+}
+
+const METADATA_CONTROL_CHARACTERS =
+  /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/gu;
+const MAX_METADATA_DISPLAY_LENGTH = 256;
+const MAX_TOOL_LOCATIONS = 20;
+
+function truncateMetadata(value: string, maxLength: number): string {
+  let end = 0;
+  let length = 0;
+  for (const character of value) {
+    if (length === maxLength) {
+      break;
+    }
+    end += character.length;
+    length++;
+  }
+  return value.slice(0, end);
+}
+
+export function formatAgentIdentity(agentInfo: unknown): string | null {
+  if (typeof agentInfo !== "object" || agentInfo === null) {
+    return null;
+  }
+  const candidate = agentInfo as Record<string, unknown>;
+  const displayName =
+    typeof candidate.title === "string" && candidate.title.trim().length > 0
+      ? candidate.title
+      : typeof candidate.name === "string"
+        ? candidate.name
+        : "";
+  if (typeof candidate.version !== "string") {
+    return null;
+  }
+  const name = truncateMetadata(
+    displayName.replace(METADATA_CONTROL_CHARACTERS, " ").trim(),
+    MAX_METADATA_DISPLAY_LENGTH
+  );
+  const version = truncateMetadata(
+    candidate.version.replace(METADATA_CONTROL_CHARACTERS, " ").trim(),
+    MAX_METADATA_DISPLAY_LENGTH
+  );
+  return name && version ? `${name} ${version}` : null;
+}
+
+function normalizeToolLocations(value: unknown): ToolLocation[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.slice(0, MAX_TOOL_LOCATIONS).flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const candidate = entry as Record<string, unknown>;
+    if (
+      typeof candidate.path !== "string" ||
+      candidate.path.length === 0 ||
+      candidate.path.length > 4096 ||
+      typeof candidate.label !== "string"
+    ) {
+      return [];
+    }
+    const line =
+      Number.isSafeInteger(candidate.line) && (candidate.line as number) > 0
+        ? (candidate.line as number)
+        : undefined;
+    const label = truncateMetadata(
+      candidate.label.replace(METADATA_CONTROL_CHARACTERS, " "),
+      160
+    );
+    return [
+      {
+        path: candidate.path,
+        label,
+        ...(line && { line }),
+      },
+    ];
+  });
+}
+
+function getToolInput(rawInput: unknown): string {
+  if (typeof rawInput !== "object" || rawInput === null) {
+    return "";
+  }
+  const candidate = rawInput as Record<string, unknown>;
+  if (typeof candidate.command === "string" && candidate.command.length > 0) {
+    return candidate.command;
+  }
+  return typeof candidate.description === "string" ? candidate.description : "";
+}
+
+function getToolOutput(msg: ExtensionMessage): string {
+  let output = "";
+  if (Array.isArray(msg.content) && msg.content.length > 0) {
+    const firstContent = msg.content[0];
+    if (
+      firstContent?.type === "content" &&
+      typeof firstContent.content?.text === "string"
+    ) {
+      output = firstContent.content.text;
+    } else if (firstContent?.type === "terminal") {
+      output = typeof msg.terminalOutput === "string" ? msg.terminalOutput : "";
+    } else if (firstContent?.type === "diff") {
+      output = renderDiff(
+        firstContent.path,
+        firstContent.oldText,
+        firstContent.newText
+      );
+    }
+  }
+  if (output) {
+    return output;
+  }
+  if (typeof msg.rawOutput !== "object" || msg.rawOutput === null) {
+    return "";
+  }
+  const rawOutput = msg.rawOutput as Record<string, unknown>;
+  return typeof rawOutput.output === "string" ? rawOutput.output : "";
 }
 
 /**
@@ -503,7 +641,9 @@ export function getToolsHtml(
           ? "✓"
           : tool.status === "failed"
             ? "✗"
-            : "⋯";
+            : tool.status === "cancelled"
+              ? "×"
+              : "⋯";
       const statusClass = tool.status === "running" ? "running" : "";
       const isExpanded = id === expandedToolId;
       const kindIcon = getToolKindIcon(tool.kind);
@@ -515,6 +655,28 @@ export function getToolsHtml(
           "</span> "
         : "";
       let detailsContent = "";
+      if ((tool.locations?.length ?? 0) > 0) {
+        const links = tool
+          .locations!.map((location) => {
+            const line = location.line ? `:${location.line}` : "";
+            return (
+              '<button type="button" class="tool-location-link" data-tool-location-path="' +
+              escapeHtml(location.path) +
+              '"' +
+              (location.line
+                ? ' data-tool-location-line="' + location.line + '"'
+                : "") +
+              ">" +
+              escapeHtml(location.label + line) +
+              "</button>"
+            );
+          })
+          .join("");
+        detailsContent +=
+          '<div class="tool-locations" aria-label="Tool locations">' +
+          links +
+          "</div>";
+      }
       if (tool.input) {
         detailsContent +=
           '<div class="tool-input"><strong>$</strong> ' +
@@ -753,6 +915,24 @@ export class WebviewController {
       const attachmentId = button?.getAttribute("data-attachment-id");
       if (attachmentId) {
         this.removeAttachment(attachmentId);
+      }
+    });
+
+    messagesEl.addEventListener("click", (event) => {
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+        ".tool-location-link"
+      );
+      if (!button || !messagesEl.contains(button)) {
+        return;
+      }
+      const locationPath = button.getAttribute("data-tool-location-path");
+      const rawLine = button.getAttribute("data-tool-location-line");
+      if (locationPath) {
+        this.vscode.postMessage({
+          type: "openToolLocation",
+          locationPath,
+          ...(rawLine && { locationLine: Number(rawLine) }),
+        });
       }
     });
 
@@ -1012,7 +1192,7 @@ export class WebviewController {
 
   addMessage(
     text: string,
-    type: "user" | "assistant" | "error" | "system",
+    type: "user" | "assistant" | "error" | "warning" | "system",
     attachments: readonly FileAttachment[] = []
   ): HTMLElement {
     const div = this.doc.createElement("div");
@@ -1027,7 +1207,9 @@ export class WebviewController {
           ? "Agent response"
           : type === "error"
             ? "Error message"
-            : "System message";
+            : type === "warning"
+              ? "Warning message"
+              : "System message";
     div.setAttribute("aria-label", label);
 
     const attachmentNames = attachments.map((attachment) => attachment.name);
@@ -1105,7 +1287,7 @@ export class WebviewController {
     }
   }
 
-  updateStatus(state: string): void {
+  updateStatus(state: string, agentInfo?: AgentInfo | null): void {
     this.elements.statusDot.className = "status-dot " + state;
     const labels: Record<string, string> = {
       disconnected: "Disconnected",
@@ -1113,7 +1295,11 @@ export class WebviewController {
       connected: "Connected",
       error: "Error",
     };
-    this.elements.statusText.textContent = labels[state] || state;
+    const identity =
+      state === "connected" ? formatAgentIdentity(agentInfo) : null;
+    this.elements.statusText.textContent = identity
+      ? `Connected · ${identity}`
+      : labels[state] || state;
     this.isConnected = state === "connected";
     this.setInputLock(
       "connection",
@@ -1421,9 +1607,13 @@ export class WebviewController {
   }
 
   private clearChatState(): void {
+    this.hideThinking();
     this.elements.messagesEl.innerHTML = "";
     this.currentAssistantMessage = null;
     this.currentAssistantText = "";
+    this.tools = {};
+    this.hasActiveTool = false;
+    this.expandedToolId = null;
     this.messageTexts.clear();
     this.availableCommands = [];
     this.hasCommandCatalog = false;
@@ -1432,6 +1622,7 @@ export class WebviewController {
     this.hideThought();
     this.hideReplayStatus();
     this.updateViewState();
+    this.updateInputControls();
   }
 
   private showReplayStatus(message = "Restoring conversation…"): void {
@@ -1665,9 +1856,22 @@ export class WebviewController {
             this.elements.messagesEl.scrollHeight;
         }
         break;
-      case "streamEnd":
+      case "streamEnd": {
         this.hideThinking();
+        if (msg.stopReason === "cancelled") {
+          for (const tool of Object.values(this.tools)) {
+            if (tool.status === "running") {
+              tool.status = "cancelled";
+            }
+          }
+        }
 
+        if (
+          !this.currentAssistantMessage &&
+          Object.keys(this.tools).length > 0
+        ) {
+          this.currentAssistantMessage = this.addMessage("", "assistant");
+        }
         this.finalizeCurrentMessage();
 
         this.currentAssistantMessage = null;
@@ -1676,6 +1880,10 @@ export class WebviewController {
         this.hasActiveTool = false;
         this.expandedToolId = null;
         this.hideThought();
+        if (!msg.suppressStopReason) {
+          this.renderStopReason(msg.stopReason);
+        }
+        this.updateViewState();
         this.promptPending = false;
         this.updateInputControls();
         if (
@@ -1686,8 +1894,15 @@ export class WebviewController {
           this.elements.inputEl.focus();
         }
         break;
-      case "toolCallStart":
-        if (msg.toolCallId && msg.name) {
+      }
+      case "toolCallStart": {
+        const toolName =
+          typeof msg.title === "string" && msg.title.length > 0
+            ? msg.title
+            : typeof msg.name === "string" && msg.name.length > 0
+              ? msg.name
+              : null;
+        if (msg.toolCallId && toolName) {
           // Keep a whitespace-only bubble alive until stream end so its tool
           // card renders through the same finalized Markdown path.
           if (this.currentAssistantText.trim()) {
@@ -1697,48 +1912,20 @@ export class WebviewController {
           }
 
           this.tools[msg.toolCallId] = {
-            name: msg.name,
+            name: toolName,
             input: null,
             output: null,
             status: "running",
-            kind: msg.kind,
           };
+          this.applyToolMetadata(msg.toolCallId, msg);
           this.hasActiveTool = true;
           this.showThinking();
         }
         break;
-      case "toolCallComplete":
+      }
+      case "toolCallUpdate":
         if (msg.toolCallId && this.tools[msg.toolCallId]) {
-          const tool = this.tools[msg.toolCallId];
-
-          let output = "";
-          if (msg.content && msg.content.length > 0) {
-            const firstContent = msg.content[0];
-            if (firstContent.type === "content" && firstContent.content?.text) {
-              output = firstContent.content.text;
-            } else if (firstContent.type === "terminal") {
-              output = msg.terminalOutput || "";
-            } else if (firstContent.type === "diff") {
-              output = renderDiff(
-                firstContent.path,
-                firstContent.oldText,
-                firstContent.newText
-              );
-            }
-          }
-
-          if (!output) {
-            output = msg.rawOutput?.output || "";
-          }
-
-          const input =
-            msg.rawInput?.command || msg.rawInput?.description || "";
-          if (msg.title) tool.name = msg.title;
-          if (msg.kind) tool.kind = msg.kind;
-          tool.input = input;
-          tool.output = output;
-          tool.status = (msg.status as Tool["status"]) || "completed";
-          this.expandedToolId = msg.toolCallId;
+          this.applyToolMetadata(msg.toolCallId, msg);
           this.showThinking();
         }
         break;
@@ -1756,6 +1943,10 @@ export class WebviewController {
         }
         this.updateViewState();
         break;
+      case "toolLocationError":
+        if (msg.text) this.addMessage(msg.text, "error");
+        this.updateViewState();
+        break;
       case "sessionTransition":
         this.setInputLock(
           "session",
@@ -1766,7 +1957,7 @@ export class WebviewController {
         break;
       case "connectionState":
         if (msg.state) {
-          this.updateStatus(msg.state);
+          this.updateStatus(msg.state, msg.agentInfo);
           connectBtn.style.display =
             msg.state === "connected" ? "none" : "inline-block";
         }
@@ -1786,6 +1977,14 @@ export class WebviewController {
         });
         break;
       case "agentChanged":
+        this.updateStatus("disconnected");
+        this.clearChatState();
+        this.clearAttachments();
+        modeSelector.style.display = "none";
+        modelSelector.style.display = "none";
+        this.clearPermissionModal();
+        this.saveState();
+        break;
       case "chatCleared":
         this.clearChatState();
         this.clearAttachments();
@@ -1936,6 +2135,37 @@ export class WebviewController {
     }
   }
 
+  private applyToolMetadata(toolCallId: string, msg: ExtensionMessage): void {
+    const tool = this.tools[toolCallId];
+    if (msg.content !== undefined || msg.rawOutput !== undefined) {
+      tool.output = getToolOutput(msg);
+    }
+    if (msg.rawInput !== undefined) {
+      tool.input = getToolInput(msg.rawInput);
+    }
+    const updatedName =
+      typeof msg.title === "string" && msg.title.length > 0
+        ? msg.title
+        : typeof msg.name === "string" && msg.name.length > 0
+          ? msg.name
+          : null;
+    if (updatedName) {
+      tool.name = updatedName;
+    }
+    if (msg.kind) {
+      tool.kind = msg.kind;
+    }
+    if (msg.locations !== undefined) {
+      tool.locations = normalizeToolLocations(msg.locations);
+    }
+    if (msg.status === "completed" || msg.status === "failed") {
+      tool.status = msg.status;
+      this.expandedToolId = toolCallId;
+    } else if (msg.status === "pending" || msg.status === "in_progress") {
+      tool.status = "running";
+    }
+  }
+
   appendThought(text: string): void {
     this.thoughtText += text;
 
@@ -1971,6 +2201,32 @@ export class WebviewController {
     }
   }
 
+  private renderStopReason(stopReason: ExtensionMessage["stopReason"]): void {
+    switch (stopReason) {
+      case "max_tokens":
+        this.addMessage(
+          "Response stopped because the agent reached its token limit.",
+          "warning"
+        );
+        break;
+      case "max_turn_requests":
+        this.addMessage(
+          "Response stopped because the agent reached its turn request limit.",
+          "warning"
+        );
+        break;
+      case "refusal":
+        this.addMessage(
+          "The agent refused this turn. This prompt and everything after it will not be included in the next prompt.",
+          "error"
+        );
+        break;
+      case "cancelled":
+        this.addMessage("Response cancelled.", "system");
+        break;
+    }
+  }
+
   private finalizeCurrentMessage(): void {
     if (!this.currentAssistantMessage) {
       return;
@@ -1981,6 +2237,8 @@ export class WebviewController {
     // whitespace must still keep its completed tool card.
     const toolsHtml = getToolsHtml(this.tools, this.expandedToolId);
     if (!hasText && !toolsHtml) {
+      this.messageTexts.delete(this.currentAssistantMessage);
+      this.currentAssistantMessage.remove();
       return;
     }
 
