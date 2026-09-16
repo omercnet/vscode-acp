@@ -391,7 +391,7 @@
     "ovsx": "1.1.1",
     "prettier": "^3.7.4",
     "tsx": "^4.21.0",
-    "typescript": "^5.0.0"
+    "typescript": "^6.0.0"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",
