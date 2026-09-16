@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import { EventEmitter } from "events";
 import * as vscode from "vscode";
+import { JSDOM } from "jsdom";
 import fsPromises, {
   chmod,
   copyFile,
@@ -35,12 +36,18 @@ import type {
   LoadSessionRequest,
   McpCapabilities,
   NewSessionRequest,
+  PromptCapabilities,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
 import * as attachmentHelpers from "../attachments";
 import type { FileAttachment } from "../shared/attachments";
+import {
+  getElements,
+  WebviewController,
+  type ExtensionMessage,
+} from "../views/webview/main";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -87,6 +94,7 @@ interface MockACPClient {
   loadSession: (params: LoadSessionRequest) => Promise<void>;
   supportsSessionLoad: () => boolean;
   getMcpCapabilities: () => McpCapabilities;
+  getPromptCapabilities: () => PromptCapabilities;
   setMode: (modeId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<void>;
   getSessionMetadata: () => any;
@@ -243,6 +251,9 @@ class TestACPClient implements MockACPClient {
   isConnected(): boolean {
     return false;
   }
+  getState(): "connected" | "disconnected" {
+    return this.isConnected() ? "connected" : "disconnected";
+  }
   async connect(): Promise<void> {}
   async newSession(_params: NewSessionRequest): Promise<void> {}
   async sendMessage(): Promise<{ stopReason: string }> {
@@ -257,6 +268,9 @@ class TestACPClient implements MockACPClient {
     return false;
   }
   getMcpCapabilities(): McpCapabilities {
+    return {};
+  }
+  getPromptCapabilities(): PromptCapabilities {
     return {};
   }
 
@@ -541,6 +555,103 @@ suite("ChatViewProvider", () => {
   });
 
   suite("Mode/Model Persistence with Validation", () => {
+    test("keeps rich attachments available after restoring saved mode and model", async () => {
+      await memento.update("vscode-acp.selectedMode", "saved-mode");
+      await memento.update("vscode-acp.selectedModel", "saved-model");
+      class RichClient extends TestACPClient {
+        getPromptCapabilities(): PromptCapabilities {
+          return { image: true, embeddedContext: true };
+        }
+        getSessionMetadata() {
+          return {
+            modes: {
+              availableModes: [{ id: "saved-mode", name: "Saved mode" }],
+              currentModeId: this.lastSetModeId ?? "initial-mode",
+            },
+            models: {
+              availableModels: [
+                { modelId: "saved-model", name: "Saved model" },
+              ],
+              currentModelId: this.lastSetModelId ?? "initial-model",
+            },
+            commands: [],
+          };
+        }
+      }
+      const client = new RichClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento
+      );
+      // Exercise the real host/renderer contract using the provider's own HTML.
+      const lifecycle = provider as unknown as {
+        getHtmlContent(
+          webview: Pick<vscode.Webview, "asWebviewUri" | "cspSource">
+        ): string;
+        restoreSavedModeAndModel(): Promise<void>;
+      };
+      const dom = new JSDOM(
+        lifecycle.getHtmlContent({
+          asWebviewUri: (uri) => uri,
+          cspSource: "vscode-webview:",
+        }),
+        { url: "https://localhost" }
+      );
+      try {
+        const uploads: unknown[] = [];
+        const elements = getElements(dom.window.document);
+        const ui = new WebviewController(
+          {
+            postMessage(message: unknown) {
+              if (
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "attachContent" &&
+                "name" in message
+              ) {
+                uploads.push(message.name);
+              }
+            },
+            getState: () => undefined,
+            setState: (state) => state,
+          },
+          elements,
+          dom.window.document,
+          dom.window as unknown as Window
+        );
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: ExtensionMessage) => ui.handleMessage(message),
+        });
+        ui.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: client.getPromptCapabilities(),
+        });
+        await lifecycle.restoreSavedModeAndModel();
+        // FileReader and capability gating run normally; only the VS Code bridge is captured.
+        const composer = ui as unknown as {
+          attachBrowserFiles(files: File[]): Promise<void>;
+        };
+        await composer.attachBrowserFiles([
+          new dom.window.File(
+            [Buffer.from("iVBORw0KGgo=", "base64")],
+            "snapshot.png",
+            { type: "image/png" }
+          ),
+          new dom.window.File(["unsaved context"], "context.txt", {
+            type: "text/plain",
+          }),
+        ]);
+        assert.deepStrictEqual(uploads, ["snapshot.png", "context.txt"]);
+        assert.strictEqual(elements.modeSelector.value, "saved-mode");
+        assert.strictEqual(elements.modelSelector.value, "saved-model");
+      } finally {
+        dom.window.close();
+        provider.dispose();
+      }
+    });
+
     test("should validate and restore saved mode against available modes", async () => {
       await memento.update("vscode-acp.selectedMode", "test-mode");
 
@@ -814,6 +925,7 @@ suite("ChatViewProvider", () => {
         modes: null,
         models: null,
         commands: null,
+        promptCapabilities: {},
       });
     });
 
@@ -846,6 +958,7 @@ suite("ChatViewProvider", () => {
         modes: null,
         models: null,
         commands: null,
+        promptCapabilities: {},
       });
     });
 
@@ -920,7 +1033,7 @@ suite("ChatViewProvider", () => {
     assert.ok(!messages.some((message) => message.type === "chatCleared"));
     assert.deepStrictEqual(
       messages.find((message) => message.type === "sessionMetadata"),
-      { type: "sessionMetadata", ...metadata }
+      { type: "sessionMetadata", ...metadata, promptCapabilities: {} }
     );
     assert.deepStrictEqual(messages.at(-1), {
       type: "sessionTransition",
@@ -2894,8 +3007,9 @@ suite("ChatViewProvider", () => {
     });
 
     test("rechecks editors dirtied during asynchronous identity resolution", async () => {
+      // Avoid per-editor external-directory watches during immediate teardown.
       const sandbox = await realpath(
-        await mkdtemp(join(tmpdir(), "vscode-acp-editor-race-"))
+        await mkdtemp(join(workspaceRoot(), ".vscode-acp-editor-race-"))
       );
       const targetPath = join(sandbox, "target.txt");
       const otherPath = join(sandbox, "other.txt");
@@ -5014,6 +5128,7 @@ suite("ChatViewProvider", () => {
 
   suite("Attachment lifecycle", () => {
     let originalCreate: PropertyDescriptor;
+    let originalPrepare: PropertyDescriptor;
 
     setup(() => {
       const descriptor = Object.getOwnPropertyDescriptor(
@@ -5022,6 +5137,19 @@ suite("ChatViewProvider", () => {
       );
       assert.ok(descriptor);
       originalCreate = descriptor;
+      const prepareDescriptor = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(prepareDescriptor);
+      originalPrepare = prepareDescriptor;
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: async (attachment: FileAttachment) => ({
+          attachment,
+          inlineBytes: 0,
+        }),
+      });
       Object.defineProperty(attachmentHelpers, "createFileAttachment", {
         configurable: true,
         value: async (uri: vscode.Uri, id: string) => ({
@@ -5033,6 +5161,11 @@ suite("ChatViewProvider", () => {
     });
 
     teardown(() => {
+      Object.defineProperty(
+        attachmentHelpers,
+        "prepareFileAttachment",
+        originalPrepare
+      );
       Object.defineProperty(
         attachmentHelpers,
         "createFileAttachment",
@@ -5126,6 +5259,88 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(client.sentAttachments.length, 1);
     });
 
+    test("accepts bounded pasted images into the existing draft without echoing payload bytes", () => {
+      class ImageClient extends TestACPClient {
+        getPromptCapabilities(): PromptCapabilities {
+          return { image: true };
+        }
+
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ImageClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, FileAttachment & { payload?: unknown }>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "pasted.png",
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 1);
+      assert.strictEqual(
+        internals.pendingAttachments.values().next().value?.payload !==
+          undefined,
+        true
+      );
+      const delivered = messages.find(
+        (message) => message.type === "filesAttached"
+      ) as { attachments: Array<Record<string, unknown>> } | undefined;
+      assert.ok(delivered);
+      assert.strictEqual("payload" in delivered.attachments[0], false);
+      assert.strictEqual(delivered.attachments[0].transport, "image");
+    });
+
+    test("rejects pasted image bytes when the agent lacks image support", () => {
+      class LinkOnlyClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LinkOnlyClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "pasted.png",
+        mimeType: "image/png",
+        data: "iVBORw0KGgo=",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 0);
+      assert.ok(
+        messages.some(
+          (message) =>
+            message.type === "attachmentError" &&
+            String(message.text).includes("does not advertise image")
+        )
+      );
+    });
+
     test("drops spoofed or non-local replay resource links", () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
@@ -5187,13 +5402,151 @@ suite("ChatViewProvider", () => {
       );
     });
 
+    test("replays bounded embedded resources and images without retaining prompt payloads", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayMessages: Array<{ attachments: Array<Record<string, unknown>> }>;
+        handleSessionUpdate(notification: SessionNotification): void;
+      };
+      internals.isReplaying = true;
+
+      internals.handleSessionUpdate({
+        sessionId: "test-session",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          messageId: "user-rich",
+          content: {
+            type: "resource",
+            resource: {
+              uri: "file:///workspace/current.ts",
+              mimeType: "text/typescript",
+              text: "const current = true;",
+            },
+          },
+        },
+      } satisfies SessionNotification);
+      internals.handleSessionUpdate({
+        sessionId: "test-session",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          messageId: "user-rich",
+          content: {
+            type: "image",
+            mimeType: "image/png",
+            data: "iVBORw0KGgo=",
+          },
+        },
+      } satisfies SessionNotification);
+
+      assert.deepStrictEqual(
+        internals.replayMessages[0].attachments.map((attachment) => ({
+          name: attachment.name,
+          transport: attachment.transport,
+          hasPayload: "payload" in attachment,
+        })),
+        [
+          { name: "current.ts", transport: "resource", hasPayload: false },
+          {
+            name: internals.replayMessages[0].attachments[1].name,
+            transport: "image",
+            hasPayload: false,
+          },
+        ]
+      );
+    });
+
+    test("does not send a file prepared after the conversation generation changes", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(original);
+      let finishPreparation!: (value: {
+        attachment: FileAttachment;
+        inlineBytes: number;
+      }) => void;
+      const prepared = new Promise<{
+        attachment: FileAttachment;
+        inlineBytes: number;
+      }>((resolve) => {
+        finishPreparation = resolve;
+      });
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: () => prepared,
+      });
+
+      class CapturingClient extends TestACPClient {
+        public sends = 0;
+        isConnected(): boolean {
+          return true;
+        }
+        async sendMessage(): Promise<{ stopReason: string }> {
+          this.sends += 1;
+          return { stopReason: "end_turn" };
+        }
+      }
+
+      try {
+        const client = new CapturingClient();
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          client as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          hasSession: boolean;
+          conversationGeneration: number;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(text: string, ids: string[]): Promise<void>;
+        };
+        internals.hasSession = true;
+        const attachment = {
+          id: "race",
+          uri: "file:///workspace/race.ts",
+          name: "race.ts",
+        };
+        internals.pendingAttachments.set(attachment.id, attachment);
+
+        const sending = internals.handleUserMessage("Review", [attachment.id]);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        internals.conversationGeneration += 1;
+        finishPreparation({ attachment, inlineBytes: 0 });
+        await sending;
+
+        assert.strictEqual(client.sends, 0);
+        assert.strictEqual(
+          messages.some((message) => message.type === "restoreInput"),
+          false,
+          "A stale prompt must not overwrite the replacement conversation draft"
+        );
+        assert.strictEqual(internals.pendingAttachments.size, 0);
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "prepareFileAttachment",
+          original
+        );
+      }
+    });
+
     test("drops the attachment draft when the composer webview reloads", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
         memento as unknown as vscode.Memento
       );
-      let receive: ((message: Record<string, unknown>) => void) | undefined;
+      let receive:
+        ((message: Record<string, unknown>) => Promise<void>) | undefined;
       const view = {
         webview: {
           options: {},
@@ -5202,7 +5555,7 @@ suite("ChatViewProvider", () => {
           asWebviewUri: (uri: vscode.Uri) => uri,
           postMessage: async () => true,
           onDidReceiveMessage: (
-            handler: (message: Record<string, unknown>) => void
+            handler: (message: Record<string, unknown>) => Promise<void>
           ) => {
             receive = handler;
             return { dispose: () => undefined };
@@ -5227,8 +5580,7 @@ suite("ChatViewProvider", () => {
         name: "orphan.ts",
       });
 
-      receive({ type: "ready" });
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      await receive({ type: "ready" });
 
       assert.strictEqual(internals.pendingAttachments.size, 0);
     });
@@ -5304,6 +5656,10 @@ suite("ChatViewProvider", () => {
           acpClient as unknown as ACPClient,
           memento as unknown as vscode.Memento
         );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
         const internals = provider as unknown as {
           handleRequestAttachFiles(currentCount: number): Promise<void>;
           pendingAttachments: Map<string, unknown>;
@@ -5313,6 +5669,10 @@ suite("ChatViewProvider", () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
         await internals.handleRequestAttachFiles(0);
         assert.strictEqual(pickerCalls, 1);
+        assert.strictEqual(
+          messages.some((message) => message.type === "attachmentPreparation"),
+          false
+        );
 
         finishMetadata({
           id: "att-race",
@@ -5321,6 +5681,11 @@ suite("ChatViewProvider", () => {
         });
         await firstRequest;
         assert.strictEqual(internals.pendingAttachments.size, 1);
+        assert.deepStrictEqual(
+          messages.map(({ type }) => type),
+          ["filesAttached", "attachmentPreparation"]
+        );
+        assert.strictEqual(messages.at(-1)?.active, false);
       } finally {
         Object.defineProperty(
           attachmentHelpers,
@@ -5331,6 +5696,43 @@ suite("ChatViewProvider", () => {
           attachmentHelpers,
           "createFileAttachment",
           originalCreate
+        );
+      }
+    });
+
+    test("completes attachment preparation when the picker is cancelled", async () => {
+      const originalPicker = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "pickAttachmentUris"
+      );
+      assert.ok(originalPicker);
+      Object.defineProperty(attachmentHelpers, "pickAttachmentUris", {
+        configurable: true,
+        value: async () => [],
+      });
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        // Exercise the private picker lifecycle without opening native UI.
+        const lifecycle = provider as unknown as {
+          handleRequestAttachFiles(count: number): Promise<void>;
+        };
+        await lifecycle.handleRequestAttachFiles(0);
+        assert.deepStrictEqual(messages, [
+          { type: "attachmentPreparation", active: false },
+        ]);
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "pickAttachmentUris",
+          originalPicker
         );
       }
     });
@@ -5402,6 +5804,96 @@ suite("ChatViewProvider", () => {
       }
     });
 
+    for (const failure of ["unreadable", "replaced"] as const) {
+      test(`rolls back unpublished picker attachments when ${failure}`, async () => {
+        const originalPicker = Object.getOwnPropertyDescriptor(
+          attachmentHelpers,
+          "pickAttachmentUris"
+        );
+        assert.ok(originalPicker);
+        Object.defineProperty(attachmentHelpers, "pickAttachmentUris", {
+          configurable: true,
+          value: async () => [
+            vscode.Uri.file("/workspace/first.ts"),
+            vscode.Uri.file("/workspace/failure.png"),
+          ],
+        });
+        let failed = false;
+        let replaceConversation!: () => void;
+        Object.defineProperty(attachmentHelpers, "createFileAttachment", {
+          configurable: true,
+          value: async (uri: vscode.Uri, id: string) => {
+            if (uri.path.endsWith("failure.png") && !failed) {
+              failed = true;
+              if (failure === "unreadable") {
+                throw new Error("File became unreadable");
+              }
+              replaceConversation();
+            }
+            return {
+              id,
+              uri: uri.toString(),
+              name: uri.path.split("/").pop()!,
+            };
+          },
+        });
+        try {
+          const provider = new ChatViewProvider(
+            mockExtensionUri,
+            acpClient as unknown as ACPClient,
+            memento as unknown as vscode.Memento
+          );
+          const messages: Array<Record<string, unknown>> = [];
+          Object.defineProperty(provider, "postMessage", {
+            value: (message: Record<string, unknown>) => messages.push(message),
+          });
+          const internals = provider as unknown as {
+            conversationGeneration: number;
+            pendingAttachments: Map<string, FileAttachment>;
+            handleRequestAttachFiles(count: number): Promise<void>;
+          };
+          replaceConversation = () => {
+            internals.conversationGeneration += 1;
+          };
+          const existing = {
+            id: "existing",
+            uri: "file:///workspace/existing.ts",
+            name: "existing.ts",
+          };
+          internals.pendingAttachments.set(existing.id, existing);
+          await internals.handleRequestAttachFiles(1);
+          assert.deepStrictEqual(
+            [...internals.pendingAttachments.values()],
+            [existing]
+          );
+          assert.strictEqual(
+            messages.some((message) => message.type === "filesAttached"),
+            false
+          );
+
+          await internals.handleRequestAttachFiles(1);
+          const attached = messages.find(
+            (message) => message.type === "filesAttached"
+          );
+          assert.ok(attached);
+          assert.ok(Array.isArray(attached.attachments));
+          assert.deepStrictEqual(
+            attached.attachments.map(
+              (attachment: FileAttachment) => attachment.name
+            ),
+            ["first.ts", "failure.png"],
+            "Both files must be attachable again after the failed selection"
+          );
+        } finally {
+          Object.defineProperty(
+            attachmentHelpers,
+            "pickAttachmentUris",
+            originalPicker
+          );
+        }
+      });
+    }
+
     test("restores attachment chips after a prompt fails", async () => {
       class FailingClient extends TestACPClient {
         isConnected(): boolean {
@@ -5446,6 +5938,97 @@ suite("ChatViewProvider", () => {
         messages.find((message) => message.type === "filesAttached"),
         { type: "filesAttached", attachments: [attachment] }
       );
+    });
+
+    test("restores every selected attachment when preparation fails partway", async () => {
+      const originalPrepare = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "prepareFileAttachment"
+      );
+      assert.ok(originalPrepare);
+      let preparationCount = 0;
+      Object.defineProperty(attachmentHelpers, "prepareFileAttachment", {
+        configurable: true,
+        value: async (attachment: FileAttachment) => {
+          preparationCount += 1;
+          if (preparationCount === 2) {
+            throw new Error("preparation failed");
+          }
+          return { attachment, inlineBytes: 0 };
+        },
+      });
+
+      class ConnectedClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          new ConnectedClient() as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          hasSession: boolean;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(text: string, ids: string[]): Promise<void>;
+        };
+        internals.hasSession = true;
+        const attachments: FileAttachment[] = [
+          {
+            id: "att-first",
+            uri: "file:///workspace/first.ts",
+            name: "first.ts",
+          },
+          {
+            id: "att-second",
+            uri: "file:///workspace/second.ts",
+            name: "second.ts",
+          },
+          {
+            id: "att-unvisited",
+            uri: "file:///workspace/unvisited.ts",
+            name: "unvisited.ts",
+          },
+        ];
+        for (const attachment of attachments) {
+          internals.pendingAttachments.set(attachment.id, attachment);
+        }
+
+        await internals.handleUserMessage(
+          "Review",
+          attachments.map(({ id }) => id)
+        );
+
+        assert.deepStrictEqual(
+          Array.from(internals.pendingAttachments.keys()),
+          attachments.map(({ id }) => id)
+        );
+        assert.deepStrictEqual(
+          messages.find((message) => message.type === "filesAttached"),
+          { type: "filesAttached", attachments }
+        );
+        assert.deepStrictEqual(
+          messages.find((message) => message.type === "restoreInput"),
+          { type: "restoreInput", text: "Review" }
+        );
+        assert.strictEqual(
+          messages.some((message) => message.type === "userMessage"),
+          false
+        );
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "prepareFileAttachment",
+          originalPrepare
+        );
+      }
     });
   });
 });

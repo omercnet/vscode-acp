@@ -1,11 +1,34 @@
 import * as vscode from "vscode";
 import { realpath } from "fs/promises";
 import { isAbsolute, relative, sep } from "path";
+import type {
+  ContentBlock,
+  PromptCapabilities,
+} from "@agentclientprotocol/sdk";
 import {
+  MAX_ATTACHMENT_NAME_LENGTH,
+  MAX_EMBEDDED_RESOURCE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_INLINE_ATTACHMENT_BYTES,
+  decodedBase64Size,
+  detectedImageMimeType,
   isAttachmentMetadataValid,
+  isEmbeddableTextMimeType,
+  isFileAttachmentValid,
+  isPromptAttachmentValid,
+  isSupportedImageMimeType,
   sanitizeAttachmentLabel,
   type FileAttachment,
+  type PromptAttachment,
+  type SupportedImageMimeType,
 } from "./shared/attachments";
+import {
+  openTrustedWorkspaceFile,
+  readOpenedWorkspaceFileBytes,
+  trustedWorkspaceRootPath,
+  WorkspaceFileTooLargeError,
+  type OpenedWorkspaceFile,
+} from "./acp/workspace-files";
 
 /**
  * Extension-of-file to MIME type lookup for the common source and document
@@ -54,6 +77,7 @@ const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
+  ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".pdf": "application/pdf",
 };
@@ -122,7 +146,7 @@ async function resolveTrustedWorkspaceFile(
       if (folder.uri.scheme !== "file") {
         continue;
       }
-      const root = await realpath(folder.uri.fsPath);
+      const root = await trustedWorkspaceRootPath(folder.uri.fsPath);
       const relativePath = relative(root, candidate);
       if (
         relativePath === "" ||
@@ -195,13 +219,525 @@ export async function createFileAttachment(
     return null;
   }
 
+  const mimeType = guessMimeType(name);
   return {
     id,
     uri: canonicalUri,
     name,
-    mimeType: guessMimeType(name),
+    mimeType,
     size,
+    source: "file",
+    kind: isSupportedImageMimeType(mimeType) ? "image" : "file",
+    transport: "resource_link",
   };
+}
+
+export class AttachmentInputError extends Error {}
+
+export interface InlineAttachmentInput {
+  name: string;
+  mimeType?: string;
+  data: string;
+}
+
+export interface PreparedAttachment {
+  attachment: PromptAttachment;
+  inlineBytes: number;
+  warning?: string;
+}
+
+function memoryAttachmentUri(id: string, name: string): string {
+  return `vscode-acp-attachment:///memory/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * Validates bytes supplied by a browser File object and moves them into the
+ * same host-owned draft used by picker attachments. The webview never chooses
+ * a URI and unsupported optional ACP content is rejected before it enters the
+ * draft.
+ */
+export function createInlineAttachment(
+  input: InlineAttachmentInput,
+  id: string,
+  capabilities: Readonly<PromptCapabilities>,
+  currentInlineBytes: number
+): PromptAttachment {
+  if (
+    typeof input.name !== "string" ||
+    (input.mimeType !== undefined && typeof input.mimeType !== "string")
+  ) {
+    throw new AttachmentInputError("The attachment metadata is invalid.");
+  }
+  const name = sanitizeAttachmentLabel(input.name);
+  if (
+    name !== input.name ||
+    name.length === 0 ||
+    name.length > MAX_ATTACHMENT_NAME_LENGTH
+  ) {
+    throw new AttachmentInputError("The attachment has an invalid file name.");
+  }
+  if (typeof input.data !== "string") {
+    throw new AttachmentInputError("The attachment data is invalid.");
+  }
+  if (
+    !Number.isSafeInteger(currentInlineBytes) ||
+    currentInlineBytes < 0 ||
+    currentInlineBytes > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentInputError("The attachment byte total is invalid.");
+  }
+
+  const declaredMime = input.mimeType?.toLowerCase();
+  const inferredMime = guessMimeType(name);
+  const mimeType = declaredMime || inferredMime;
+  const maximumBytes = isSupportedImageMimeType(mimeType)
+    ? MAX_IMAGE_BYTES
+    : MAX_EMBEDDED_RESOURCE_BYTES;
+  const maximumEncodedLength = Math.ceil(maximumBytes / 3) * 4;
+  if (input.data.length > maximumEncodedLength) {
+    throw new AttachmentInputError(
+      `Attachments of this type must be ${maximumBytes / 1024 / 1024} MB or smaller.`
+    );
+  }
+  const size = decodedBase64Size(input.data);
+  if (size === null) {
+    throw new AttachmentInputError(
+      "The attachment data is not valid canonical base64."
+    );
+  }
+  const bytes = Buffer.from(input.data, "base64");
+  if (bytes.byteLength !== size) {
+    throw new AttachmentInputError("The attachment data is invalid.");
+  }
+  const detectedImageMime = detectedImageMimeType(bytes);
+  if (detectedImageMime !== null && detectedImageMime !== mimeType) {
+    throw new AttachmentInputError(
+      "The image bytes do not match the declared MIME type."
+    );
+  }
+
+  const uri = memoryAttachmentUri(id, name);
+  if (isSupportedImageMimeType(mimeType)) {
+    if (capabilities.image !== true) {
+      throw new AttachmentInputError(
+        "The current agent does not advertise image prompt support."
+      );
+    }
+    if (size > MAX_IMAGE_BYTES) {
+      throw new AttachmentInputError(
+        `Images must be ${MAX_IMAGE_BYTES / 1024 / 1024} MB or smaller.`
+      );
+    }
+    if (currentInlineBytes + size > MAX_INLINE_ATTACHMENT_BYTES) {
+      throw new AttachmentInputError(
+        `Attachments may embed at most ${MAX_INLINE_ATTACHMENT_BYTES / 1024 / 1024} MB per prompt.`
+      );
+    }
+    if (detectedImageMime !== mimeType) {
+      throw new AttachmentInputError(
+        "The image bytes do not match the declared MIME type."
+      );
+    }
+    const attachment: PromptAttachment = {
+      id,
+      uri,
+      name,
+      mimeType,
+      size,
+      source: "memory",
+      kind: "image",
+      transport: "image",
+      previewDataUrl: `data:${mimeType};base64,${input.data}`,
+      payload: { type: "image", data: input.data },
+    };
+    if (!isPromptAttachmentValid(attachment)) {
+      throw new AttachmentInputError("The image metadata is invalid.");
+    }
+    return attachment;
+  }
+
+  if (capabilities.embeddedContext !== true) {
+    throw new AttachmentInputError(
+      "The current agent does not advertise embedded context support."
+    );
+  }
+  if (mimeType !== undefined && !isEmbeddableTextMimeType(mimeType)) {
+    throw new AttachmentInputError("Only text files can be embedded.");
+  }
+  if (size > MAX_EMBEDDED_RESOURCE_BYTES) {
+    throw new AttachmentInputError(
+      `Embedded files must be ${MAX_EMBEDDED_RESOURCE_BYTES / 1024 / 1024} MB or smaller.`
+    );
+  }
+  if (currentInlineBytes + size > MAX_INLINE_ATTACHMENT_BYTES) {
+    throw new AttachmentInputError(
+      `Attachments may embed at most ${MAX_INLINE_ATTACHMENT_BYTES / 1024 / 1024} MB per prompt.`
+    );
+  }
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new AttachmentInputError(
+      "Only valid UTF-8 text files can be embedded."
+    );
+  }
+  const attachment: PromptAttachment = {
+    id,
+    uri,
+    name,
+    mimeType: isEmbeddableTextMimeType(mimeType) ? mimeType : "text/plain",
+    size,
+    source: "memory",
+    kind: "file",
+    transport: "resource",
+    payload: { type: "text", text },
+  };
+  if (!isPromptAttachmentValid(attachment)) {
+    throw new AttachmentInputError("The embedded file metadata is invalid.");
+  }
+  return attachment;
+}
+
+/**
+ * Revalidates a selected file immediately before sending, then materializes
+ * only the content type the connected agent explicitly advertised. Text uses
+ * VS Code's document buffer, so unsaved edits are embedded.
+ */
+export async function prepareFileAttachment(
+  attachment: PromptAttachment,
+  capabilities: Readonly<PromptCapabilities>,
+  currentInlineBytes: number,
+  includePreview = false
+): Promise<PreparedAttachment | null> {
+  if (
+    !Number.isSafeInteger(currentInlineBytes) ||
+    currentInlineBytes < 0 ||
+    currentInlineBytes > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentInputError("The attachment byte total is invalid.");
+  }
+  if ((attachment.source ?? "file") === "memory") {
+    const promptAttachment = attachment;
+    if (
+      !promptAttachment.payload ||
+      !isPromptAttachmentValid(promptAttachment)
+    ) {
+      throw new AttachmentInputError(
+        "The in-memory attachment is no longer available."
+      );
+    }
+    const inlineBytes =
+      promptAttachment.payload.type === "image"
+        ? (decodedBase64Size(promptAttachment.payload.data) ??
+          MAX_INLINE_ATTACHMENT_BYTES + 1)
+        : Buffer.byteLength(promptAttachment.payload.text, "utf8");
+    if (
+      currentInlineBytes + inlineBytes > MAX_INLINE_ATTACHMENT_BYTES ||
+      (promptAttachment.payload.type === "image" &&
+        capabilities.image !== true) ||
+      (promptAttachment.payload.type === "text" &&
+        capabilities.embeddedContext !== true)
+    ) {
+      throw new AttachmentInputError(
+        "The current agent cannot safely receive this in-memory attachment."
+      );
+    }
+    return { attachment: promptAttachment, inlineBytes };
+  }
+
+  const refreshed = await createFileAttachment(
+    vscode.Uri.parse(attachment.uri, true),
+    attachment.id
+  );
+  if (!refreshed) {
+    return null;
+  }
+
+  if (
+    capabilities.image === true &&
+    isSupportedImageMimeType(refreshed.mimeType)
+  ) {
+    if (
+      refreshed.size !== undefined &&
+      (refreshed.size > MAX_IMAGE_BYTES ||
+        currentInlineBytes + refreshed.size > MAX_INLINE_ATTACHMENT_BYTES)
+    ) {
+      return {
+        attachment: { ...refreshed, transport: "resource_link" },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked instead of embedded because it exceeds the image limit.`,
+      };
+    }
+    let bytes: Uint8Array;
+    try {
+      const opened = await openTrustedWorkspaceFile(
+        vscode.Uri.parse(refreshed.uri).fsPath,
+        "read"
+      );
+      try {
+        bytes = await readOpenedWorkspaceFileBytes(opened, MAX_IMAGE_BYTES);
+      } finally {
+        await opened.fileHandle.close();
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceFileTooLargeError) {
+        return {
+          attachment: { ...refreshed, transport: "resource_link" },
+          inlineBytes: 0,
+          warning: `${refreshed.name} was linked instead of embedded because it exceeds the image limit.`,
+        };
+      }
+      throw error;
+    }
+    if (
+      bytes.byteLength > MAX_IMAGE_BYTES ||
+      currentInlineBytes + bytes.byteLength > MAX_INLINE_ATTACHMENT_BYTES
+    ) {
+      return {
+        attachment: { ...refreshed, size: bytes.byteLength },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked instead of embedded because it exceeds the image limit.`,
+      };
+    }
+    if (detectedImageMimeType(bytes) !== refreshed.mimeType) {
+      return {
+        attachment: {
+          ...refreshed,
+          mimeType: undefined,
+          size: bytes.byteLength,
+          kind: "file",
+          transport: "resource_link",
+        },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked because its bytes do not match ${refreshed.mimeType}.`,
+      };
+    }
+    const data = Buffer.from(bytes).toString("base64");
+    return {
+      attachment: {
+        ...refreshed,
+        size: bytes.byteLength,
+        transport: "image",
+        ...(includePreview || attachment.previewDataUrl !== undefined
+          ? { previewDataUrl: `data:${refreshed.mimeType};base64,${data}` }
+          : {}),
+        payload: { type: "image", data },
+      },
+      inlineBytes: bytes.byteLength,
+    };
+  }
+
+  if (
+    capabilities.embeddedContext === true &&
+    isEmbeddableTextMimeType(refreshed.mimeType)
+  ) {
+    const contextLimitWarning = `${refreshed.name} was linked instead of embedded because it exceeds the context limit.`;
+
+    let opened: OpenedWorkspaceFile | undefined;
+    let text: string;
+    try {
+      opened = await openTrustedWorkspaceFile(
+        vscode.Uri.parse(refreshed.uri).fsPath,
+        "read"
+      );
+      const canonicalUri = vscode.Uri.file(opened.canonicalPath).toString();
+      const openDocument = vscode.workspace.textDocuments.find(
+        (document) =>
+          document.uri.scheme === "file" &&
+          document.uri.toString() === canonicalUri
+      );
+      if (openDocument) {
+        text = openDocument.getText();
+      } else {
+        const bytes = await readOpenedWorkspaceFileBytes(
+          opened,
+          MAX_EMBEDDED_RESOURCE_BYTES
+        );
+        try {
+          text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+        } catch {
+          return {
+            attachment: { ...refreshed, transport: "resource_link" },
+            inlineBytes: 0,
+            warning: `${refreshed.name} was linked because it is not valid UTF-8 text.`,
+          };
+        }
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceFileTooLargeError) {
+        return {
+          attachment: { ...refreshed, transport: "resource_link" },
+          inlineBytes: 0,
+          warning: contextLimitWarning,
+        };
+      }
+      throw error;
+    } finally {
+      await opened?.fileHandle.close();
+    }
+    const size = Buffer.byteLength(text, "utf8");
+    if (
+      size > MAX_EMBEDDED_RESOURCE_BYTES ||
+      currentInlineBytes + size > MAX_INLINE_ATTACHMENT_BYTES
+    ) {
+      return {
+        attachment: { ...refreshed, transport: "resource_link" },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked instead of embedded because it exceeds the context limit.`,
+      };
+    }
+    return {
+      attachment: {
+        ...refreshed,
+        size,
+        transport: "resource",
+        payload: { type: "text", text },
+      },
+      inlineBytes: size,
+    };
+  }
+
+  return {
+    attachment: { ...refreshed, transport: "resource_link" },
+    inlineBytes: 0,
+  };
+}
+
+/** Builds bounded display-only metadata from attachment blocks replayed by an agent. */
+export function createReplayAttachment(
+  content: ContentBlock,
+  id: string
+): FileAttachment | null {
+  if (content.type === "resource_link") {
+    if (
+      typeof content.name !== "string" ||
+      typeof content.uri !== "string" ||
+      (content.mimeType !== undefined &&
+        content.mimeType !== null &&
+        typeof content.mimeType !== "string") ||
+      (content.size !== undefined &&
+        content.size !== null &&
+        typeof content.size !== "number")
+    ) {
+      return null;
+    }
+    const mimeType = content.mimeType ?? undefined;
+    const size = content.size ?? undefined;
+    if (!isAttachmentMetadataValid(content.name, content.uri, mimeType, size)) {
+      return null;
+    }
+    return {
+      id,
+      uri: content.uri,
+      name: content.name,
+      mimeType,
+      size,
+      source: "file",
+      kind: isSupportedImageMimeType(mimeType) ? "image" : "file",
+      transport: "resource_link",
+    };
+  }
+
+  if (content.type === "resource") {
+    const resource: unknown = content.resource;
+    if (
+      typeof resource !== "object" ||
+      resource === null ||
+      !Object.prototype.hasOwnProperty.call(resource, "text") ||
+      Object.prototype.hasOwnProperty.call(resource, "blob")
+    ) {
+      return null;
+    }
+    const resourceRecord = resource as Record<string, unknown>;
+    if (
+      typeof resourceRecord.uri !== "string" ||
+      typeof resourceRecord.text !== "string" ||
+      (resourceRecord.mimeType !== undefined &&
+        resourceRecord.mimeType !== null &&
+        typeof resourceRecord.mimeType !== "string")
+    ) {
+      return null;
+    }
+    const text = resourceRecord.text;
+    if (text.length > MAX_EMBEDDED_RESOURCE_BYTES) {
+      return null;
+    }
+    const size = Buffer.byteLength(text, "utf8");
+    if (size > MAX_EMBEDDED_RESOURCE_BYTES) {
+      return null;
+    }
+    const uri = resourceRecord.uri;
+    let name: string;
+    try {
+      name = basenameFromUriPath(vscode.Uri.parse(uri, true));
+    } catch {
+      return null;
+    }
+    const mimeType =
+      typeof resourceRecord.mimeType === "string"
+        ? resourceRecord.mimeType
+        : undefined;
+    if (isSupportedImageMimeType(mimeType)) {
+      return null;
+    }
+    const source = uri.startsWith("file://") ? "file" : "memory";
+    const attachment: FileAttachment = {
+      id,
+      uri,
+      name,
+      mimeType,
+      size,
+      source,
+      kind: "file",
+      transport: "resource",
+    };
+    return isFileAttachmentValid(attachment) ? attachment : null;
+  }
+
+  if (content.type === "image" && isSupportedImageMimeType(content.mimeType)) {
+    if (
+      typeof content.data !== "string" ||
+      content.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
+    ) {
+      return null;
+    }
+    const size = decodedBase64Size(content.data);
+    if (size === null || size > MAX_IMAGE_BYTES) {
+      return null;
+    }
+    const bytes = Buffer.from(content.data, "base64");
+    if (
+      bytes.byteLength !== size ||
+      detectedImageMimeType(bytes) !== content.mimeType
+    ) {
+      return null;
+    }
+    const extensionByMime: Record<SupportedImageMimeType, string> = {
+      "image/png": "png",
+      "image/jpeg": "jpg",
+      "image/gif": "gif",
+      "image/webp": "webp",
+    };
+    const suffix = id.split("-").at(-1) ?? "attachment";
+    const name = `Image ${suffix}.${extensionByMime[content.mimeType]}`;
+    const uri = memoryAttachmentUri(id, name);
+    const attachment: FileAttachment = {
+      id,
+      uri,
+      name,
+      mimeType: content.mimeType,
+      size,
+      source: "memory",
+      kind: "image",
+      transport: "image",
+      previewDataUrl: `data:${content.mimeType};base64,${content.data}`,
+    };
+    return isFileAttachmentValid(attachment) ? attachment : null;
+  }
+
+  return null;
 }
 
 /**
@@ -219,7 +755,10 @@ export async function pickAttachmentUris(
   for (const group of vscode.window.tabGroups.all) {
     for (const tab of group.tabs) {
       const input = tab.input;
-      if (!(input instanceof vscode.TabInputText)) {
+      if (
+        !(input instanceof vscode.TabInputText) &&
+        !(input instanceof vscode.TabInputCustom)
+      ) {
         continue;
       }
       const uri = input.uri;

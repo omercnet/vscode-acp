@@ -528,6 +528,12 @@ body {
   position: relative;
 }
 
+#input-container.attachment-drag-active {
+  background: var(--vscode-list-dropBackground);
+  outline: 1px dashed var(--vscode-focusBorder);
+  outline-offset: -3px;
+}
+
 #input-row {
   display: flex;
   gap: 8px;
@@ -675,14 +681,29 @@ body {
   overflow: hidden;
 }
 
-.attachment-chip-icon {
+.attachment-chip-icon,
+.attachment-chip-preview {
   flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+
+.attachment-chip-preview {
+  border-radius: 2px;
+  object-fit: cover;
 }
 
 .attachment-chip-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.attachment-chip-type {
+  flex-shrink: 0;
+  opacity: 0.75;
+  font-size: 9px;
+  text-transform: uppercase;
 }
 
 .attachment-chip-remove {

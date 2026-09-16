@@ -68,6 +68,7 @@ export type DemoMode =
   | "agent-info-normalization"
   | "ansi"
   | "capabilities"
+  | "rich-attachments"
   | "deferred-config"
   | "invalid-config"
   | "invalid-version"
@@ -238,6 +239,14 @@ export class MockACPServer {
               ...(this.demoMode === "session-close" ||
               this.demoMode === "session-close-hangs"
                 ? { sessionCapabilities: { close: {} } }
+                : {}),
+              ...(this.demoMode === "rich-attachments"
+                ? {
+                    promptCapabilities: {
+                      image: true,
+                      embeddedContext: true,
+                    },
+                  }
                 : {}),
             },
             authMethods,
