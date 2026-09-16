@@ -3007,12 +3007,14 @@ suite("ChatViewProvider", () => {
     });
 
     test("rechecks editors dirtied during asynchronous identity resolution", async () => {
-      // Avoid per-editor external-directory watches during immediate teardown.
-      const sandbox = await realpath(
-        await mkdtemp(join(workspaceRoot(), ".vscode-acp-editor-race-"))
-      );
-      const targetPath = join(sandbox, "target.txt");
-      const otherPath = join(sandbox, "other.txt");
+      // Keep fixtures directly under the existing workspace watch. Windows can
+      // retain the watched subdirectory handle after both editors close, making
+      // an immediate recursive rmdir fail with EBUSY even though file handles
+      // are closed.
+      const fixturePrefix = `.vscode-acp-editor-race-${process.pid}`;
+      const sandbox = workspaceRoot();
+      const targetPath = join(sandbox, `${fixturePrefix}-target.txt`);
+      const otherPath = join(sandbox, `${fixturePrefix}-other.txt`);
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
@@ -3083,7 +3085,8 @@ suite("ChatViewProvider", () => {
             "workbench.action.revertAndCloseActiveEditor"
           );
         }
-        await rm(sandbox, { recursive: true, force: true });
+        await rm(targetPath, { force: true });
+        await rm(otherPath, { force: true });
       }
     });
 
@@ -5460,6 +5463,57 @@ suite("ChatViewProvider", () => {
       );
     });
 
+    test("replays plain-text selection fallbacks as attachment chips", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayMessages: Array<{
+          text: string;
+          attachments: FileAttachment[];
+        }>;
+        handleSessionUpdate(notification: SessionNotification): void;
+      };
+      internals.isReplaying = true;
+
+      for (const text of [
+        "Explain this",
+        "Selected code from src/example.ts:L2-L3:\n\nconst answer = 42;",
+      ]) {
+        internals.handleSessionUpdate({
+          sessionId: "test-session",
+          update: {
+            sessionUpdate: "user_message_chunk",
+            messageId: "user-selection",
+            content: { type: "text", text },
+          },
+        } satisfies SessionNotification);
+      }
+
+      assert.strictEqual(internals.replayMessages[0].text, "Explain this");
+      assert.deepStrictEqual(
+        internals.replayMessages[0].attachments.map(
+          ({ name, mimeType, kind, transport }) => ({
+            name,
+            mimeType,
+            kind,
+            transport,
+          })
+        ),
+        [
+          {
+            name: "src/example.ts:L2-L3",
+            mimeType: "text/plain",
+            kind: "selection",
+            transport: "resource",
+          },
+        ]
+      );
+    });
+
     test("does not send a file prepared after the conversation generation changes", async () => {
       const original = Object.getOwnPropertyDescriptor(
         attachmentHelpers,
@@ -5585,6 +5639,389 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(internals.pendingAttachments.size, 0);
     });
 
+    test("drops an editor selection when its draft changes during trust validation", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "isTrustedWorkspaceFile"
+      );
+      assert.ok(original);
+      let finishTrust!: (trusted: boolean) => void;
+      Object.defineProperty(attachmentHelpers, "isTrustedWorkspaceFile", {
+        configurable: true,
+        value: () =>
+          new Promise<boolean>((resolve) => {
+            finishTrust = resolve;
+          }),
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          webviewReady: boolean;
+          attachmentDraftVersion: number;
+          pendingAttachments: Map<string, unknown>;
+        };
+        internals.webviewReady = true;
+
+        const adding = provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/example.ts"),
+          text: "const stale = true;",
+          startLine: 2,
+          endLine: 2,
+        });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        internals.attachmentDraftVersion += 1;
+        finishTrust(true);
+        await adding;
+
+        assert.strictEqual(internals.pendingAttachments.size, 0);
+        assert.strictEqual(
+          messages.some((message) => message.type === "filesAttached"),
+          false
+        );
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "isTrustedWorkspaceFile",
+          original
+        );
+      }
+    });
+
+    test("drops stale queued selections before enforcing the draft limit", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const staleSelection = {
+        uri: vscode.Uri.file("/workspace/stale.ts"),
+        text: "stale();",
+        startLine: 1,
+        endLine: 1,
+      };
+      const internals = provider as unknown as {
+        webviewReady: boolean;
+        conversationGeneration: number;
+        queuedEditorSelections: Array<{
+          selection: typeof staleSelection;
+          conversationGeneration: number;
+        }>;
+      };
+      internals.webviewReady = false;
+      internals.conversationGeneration = 2;
+      internals.queuedEditorSelections = Array.from({ length: 10 }, () => ({
+        selection: staleSelection,
+        conversationGeneration: 1,
+      }));
+
+      await provider.addEditorSelection({
+        uri: vscode.Uri.file("/workspace/current.ts"),
+        text: "current();",
+        startLine: 1,
+        endLine: 1,
+      });
+
+      assert.strictEqual(internals.queuedEditorSelections.length, 1);
+      assert.strictEqual(
+        internals.queuedEditorSelections[0].conversationGeneration,
+        2
+      );
+      assert.strictEqual(
+        internals.queuedEditorSelections[0].selection.text,
+        "current();"
+      );
+    });
+
+    test("caps overlapping editor selections at the attachment limit", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "isTrustedWorkspaceFile"
+      );
+      assert.ok(original);
+      let releaseTrust!: () => void;
+      const trustGate = new Promise<void>((resolve) => {
+        releaseTrust = resolve;
+      });
+      Object.defineProperty(attachmentHelpers, "isTrustedWorkspaceFile", {
+        configurable: true,
+        value: async () => {
+          await trustGate;
+          return true;
+        },
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: Record<string, unknown>) => messages.push(message),
+        });
+        const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
+          webviewReady: boolean;
+          pendingAttachments: Map<string, FileAttachment>;
+        };
+        internals.view = {
+          webview: {
+            postMessage: async (message) => {
+              messages.push(message);
+              return true;
+            },
+          },
+        };
+        internals.webviewReady = true;
+        for (let index = 0; index < 9; index += 1) {
+          internals.pendingAttachments.set(`existing-${index}`, {
+            id: `existing-${index}`,
+            uri: `file:///workspace/${index}.ts`,
+            name: `${index}.ts`,
+          });
+        }
+
+        const first = provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/first.ts"),
+          text: "first();",
+          startLine: 1,
+          endLine: 1,
+        });
+        const second = provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/second.ts"),
+          text: "second();",
+          startLine: 1,
+          endLine: 1,
+        });
+        releaseTrust();
+        await Promise.all([first, second]);
+
+        assert.strictEqual(internals.pendingAttachments.size, 10);
+        assert.strictEqual(
+          messages.filter((message) => message.type === "filesAttached").length,
+          1
+        );
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "isTrustedWorkspaceFile",
+          original
+        );
+      }
+    });
+
+    test("restores a send attempted while a selection chip is publishing", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "isTrustedWorkspaceFile"
+      );
+      assert.ok(original);
+      Object.defineProperty(attachmentHelpers, "isTrustedWorkspaceFile", {
+        configurable: true,
+        value: async () => true,
+      });
+
+      let publicationStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        publicationStarted = resolve;
+      });
+      let finishPublication!: () => void;
+      const publication = new Promise<void>((resolve) => {
+        finishPublication = resolve;
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
+          webviewReady: boolean;
+          editorSelectionPreparations: number;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(
+            text: string,
+            attachmentIds?: string[]
+          ): Promise<void>;
+        };
+        internals.view = {
+          webview: {
+            postMessage: async (message) => {
+              messages.push(message);
+              if (message.type === "filesAttached") {
+                publicationStarted();
+                await publication;
+              }
+              return true;
+            },
+          },
+        };
+        internals.webviewReady = true;
+
+        const adding = provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/example.ts"),
+          text: "selected();",
+          startLine: 1,
+          endLine: 1,
+        });
+        await started;
+        assert.strictEqual(internals.editorSelectionPreparations, 1);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+
+        await internals.handleUserMessage("Keep this draft", []);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+        assert.ok(
+          messages.some(
+            (message) =>
+              message.type === "restoreInput" &&
+              message.text === "Keep this draft"
+          )
+        );
+        assert.ok(
+          messages.some(
+            (message) =>
+              message.type === "streamEnd" &&
+              message.suppressStopReason === true
+          )
+        );
+
+        finishPublication();
+        await adding;
+        assert.strictEqual(internals.editorSelectionPreparations, 0);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+      } finally {
+        finishPublication?.();
+        Object.defineProperty(
+          attachmentHelpers,
+          "isTrustedWorkspaceFile",
+          original
+        );
+      }
+    });
+    test("keeps a concurrent picker result out of a full selection draft", async () => {
+      const originalTrust = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "isTrustedWorkspaceFile"
+      );
+      const originalPicker = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "pickAttachmentUris"
+      );
+      const originalCreate = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "createFileAttachment"
+      );
+      assert.ok(originalTrust);
+      assert.ok(originalPicker);
+      assert.ok(originalCreate);
+
+      let finishMetadata!: (attachment: FileAttachment | null) => void;
+      const metadata = new Promise<FileAttachment | null>((resolve) => {
+        finishMetadata = resolve;
+      });
+      Object.defineProperty(attachmentHelpers, "isTrustedWorkspaceFile", {
+        configurable: true,
+        value: async () => true,
+      });
+      Object.defineProperty(attachmentHelpers, "pickAttachmentUris", {
+        configurable: true,
+        value: async () => [vscode.Uri.file("/workspace/picked.ts")],
+      });
+      Object.defineProperty(attachmentHelpers, "createFileAttachment", {
+        configurable: true,
+        value: () => metadata,
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
+          webviewReady: boolean;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleRequestAttachFiles(currentCount: number): Promise<void>;
+        };
+        internals.view = {
+          webview: { postMessage: async () => true },
+        };
+        internals.webviewReady = true;
+        for (let index = 0; index < 9; index += 1) {
+          internals.pendingAttachments.set(`existing-${index}`, {
+            id: `existing-${index}`,
+            uri: `file:///workspace/${index}.ts`,
+            name: `${index}.ts`,
+          });
+        }
+
+        const picking = internals.handleRequestAttachFiles(9);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        await provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/selected.ts"),
+          text: "selected();",
+          startLine: 1,
+          endLine: 1,
+        });
+        finishMetadata({
+          id: "picked",
+          uri: "file:///workspace/picked.ts",
+          name: "picked.ts",
+        });
+        await picking;
+
+        assert.strictEqual(internals.pendingAttachments.size, 10);
+        assert.strictEqual(internals.pendingAttachments.has("picked"), false);
+        assert.strictEqual(
+          Array.from(internals.pendingAttachments.values()).filter(
+            ({ kind }) => kind === "selection"
+          ).length,
+          1
+        );
+      } finally {
+        Object.defineProperty(
+          attachmentHelpers,
+          "isTrustedWorkspaceFile",
+          originalTrust
+        );
+        Object.defineProperty(
+          attachmentHelpers,
+          "pickAttachmentUris",
+          originalPicker
+        );
+        Object.defineProperty(
+          attachmentHelpers,
+          "createFileAttachment",
+          originalCreate
+        );
+      }
+    });
     test("does not consume attachment drafts while a session is replaying", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,

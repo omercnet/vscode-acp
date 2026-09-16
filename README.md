@@ -21,6 +21,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
 - **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user settings, workspace settings, or a trusted `.vscode/mcp.json`
 - **📎 Rich Attachments**: Send file links, embedded text context, and image prompts through one capability-aware attachment flow
+- **Editor Selection Context** — Press `Cmd+Shift+I` on macOS or `Ctrl+Alt+Shift+I` on Windows/Linux to attach the selected code and focus the ACP composer
 
 ## Requirements
 
@@ -53,6 +54,12 @@ You need at least one ACP-compatible agent installed:
 If an agent requires ACP authentication, choose one of its advertised sign-in methods. The agent owns that flow; VSCode ACP does not ask for, store, or log API keys or other credentials.
 
 The connection header shows the agent's initialized title (or name) and version when provided. This identity belongs to the active connection and clears on disconnect, connection failure, reconnect, or agent change.
+
+### Editor Selections
+
+Select code in a trusted workspace file, then press `Cmd+Shift+I` on macOS or `Ctrl+Alt+Shift+I` on Windows/Linux. **ACP: Add Selection to Chat** opens the ACP chat, adds a removable `path:Lx-Ly` selection chip, and focuses the composer without sending the prompt. The same command is available from the editor context menu and Command Palette.
+
+The exact selected text is captured from the editor, including unsaved changes. Agents that advertise ACP embedded-context support receive it as a resource; other agents receive the same bounded selection as plain text.
 
 ### File and Image Attachments
 

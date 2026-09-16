@@ -64,7 +64,7 @@ export function isEmbeddableTextMimeType(
 export type SupportedImageMimeType =
   (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
 export type AttachmentSource = "file" | "memory";
-export type AttachmentKind = "file" | "image";
+export type AttachmentKind = "file" | "image" | "selection";
 export type AttachmentTransport = "resource_link" | "resource" | "image";
 /**
  * Safe metadata rendered by the webview. Prompt payloads remain host-only;
@@ -185,6 +185,20 @@ function hasMatchingCanonicalFileName(name: string, uri: string): boolean {
 
 function hasMatchingMemoryName(name: string, uri: string): boolean {
   if (!uri.startsWith("vscode-acp-attachment:///memory/")) {
+    return false;
+  }
+  try {
+    return (
+      new URL(uri).protocol === "vscode-acp-attachment:" &&
+      uriBasenameMatches(name, uri)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasMatchingSelectionName(name: string, uri: string): boolean {
+  if (!uri.startsWith("vscode-acp-attachment:///selection/")) {
     return false;
   }
   try {
@@ -364,10 +378,12 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
       attachment.size
     ) ||
     (source !== "file" && source !== "memory") ||
-    (kind !== "file" && kind !== "image") ||
+    (kind !== "file" && kind !== "image" && kind !== "selection") ||
     (source === "file"
       ? !hasMatchingCanonicalFileName(attachment.name, attachment.uri)
-      : !hasMatchingMemoryName(attachment.name, attachment.uri)) ||
+      : kind === "selection"
+        ? !hasMatchingSelectionName(attachment.name, attachment.uri)
+        : !hasMatchingMemoryName(attachment.name, attachment.uri)) ||
     (transport !== undefined &&
       transport !== "resource_link" &&
       transport !== "resource" &&
@@ -376,8 +392,12 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
       transport !== "resource" &&
       transport !== "image") ||
     (transport === "resource_link" && source !== "file") ||
-    (transport === "resource" && kind !== "file") ||
+    (transport === "resource" && kind !== "file" && kind !== "selection") ||
     (transport === "image" && kind !== "image") ||
+    (kind === "selection" &&
+      (source !== "memory" ||
+        transport !== "resource" ||
+        attachment.mimeType !== "text/plain")) ||
     (kind === "image" && !isSupportedImageMimeType(attachment.mimeType))
   ) {
     return false;
@@ -444,7 +464,7 @@ export function isPromptAttachmentValid(attachment: PromptAttachment): boolean {
     );
   }
   if (
-    kind !== "file" ||
+    (kind !== "file" && kind !== "selection") ||
     payload?.type !== "text" ||
     typeof payload.text !== "string" ||
     (attachment.mimeType !== undefined &&
@@ -477,10 +497,10 @@ export function toAttachmentMetadata(
       : {}),
   };
 }
+
 /**
- * Builds one ordered ACP prompt path for links, embedded resources, and image
- * content. User text always precedes attachments. Optional content types are
- * emitted only when the agent explicitly advertised the matching capability.
+ * Builds one ordered ACP prompt path for links, embedded resources, images,
+ * and editor selections. User text always precedes attached context.
  */
 export function buildPromptContent(
   text: string,
@@ -522,21 +542,27 @@ export function buildPromptContent(
     if (
       attachment.payload?.type === "text" &&
       attachment.transport === "resource" &&
-      capabilities.embeddedContext === true &&
       isPromptAttachmentValid(attachment)
     ) {
       const size = new TextEncoder().encode(attachment.payload.text).byteLength;
       if (inlineBytes + size <= MAX_INLINE_ATTACHMENT_BYTES) {
-        blocks.push({
-          type: "resource",
-          resource: {
-            uri: attachment.uri,
-            text: attachment.payload.text,
-            ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
-          },
-        });
-        inlineBytes += size;
-        continue;
+        if (capabilities.embeddedContext === true) {
+          blocks.push({
+            type: "resource",
+            resource: {
+              uri: attachment.uri,
+              text: attachment.payload.text,
+              ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+            },
+          });
+          inlineBytes += size;
+          continue;
+        }
+        if (attachment.kind === "selection") {
+          blocks.push({ type: "text", text: attachment.payload.text });
+          inlineBytes += size;
+          continue;
+        }
       }
     }
     if ((attachment.source ?? "file") === "file") {

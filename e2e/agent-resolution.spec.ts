@@ -141,12 +141,23 @@ async function focusChat(window: Page): Promise<Frame> {
   await expect(command).toBeVisible({ timeout: 30000 });
   await commandInput.press("Enter");
 
+  let chatFrame: Frame | null = null;
   await expect
     .poll(
       async () => {
         for (const frame of window.frames()) {
-          if ((await frame.locator("#input").count()) > 0) {
-            return true;
+          if (frame.isDetached()) {
+            continue;
+          }
+          try {
+            if ((await frame.locator("#input").count()) > 0) {
+              chatFrame = frame;
+              return true;
+            }
+          } catch (error) {
+            if (!frame.isDetached()) {
+              throw error;
+            }
           }
         }
         return false;
@@ -155,12 +166,10 @@ async function focusChat(window: Page): Promise<Frame> {
     )
     .toBe(true);
 
-  for (const frame of window.frames()) {
-    if ((await frame.locator("#input").count()) > 0) {
-      return frame;
-    }
+  if (!chatFrame || (chatFrame as Frame).isDetached()) {
+    throw new Error("ACP chat frame disappeared after becoming ready");
   }
-  throw new Error("ACP chat frame disappeared after becoming ready");
+  return chatFrame;
 }
 
 test("ignores a workspace executable override in Restricted Mode", async ({}, testInfo) => {

@@ -1505,6 +1505,48 @@ suite("Webview", () => {
         );
       });
 
+      test("renders an editor selection chip and focuses the composer", () => {
+        elements.attachBtn.focus();
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "selection-1",
+              uri: "vscode-acp-attachment:///selection/selection-1/src%2Fexample.ts%3AL2-L3",
+              name: "src/example.ts:L2-L3",
+              mimeType: "text/plain",
+              size: 64,
+              source: "memory",
+              kind: "selection",
+              transport: "resource",
+            },
+          ],
+        });
+        controller.handleMessage({ type: "focusComposer" });
+
+        const chip = elements.attachmentsBar.querySelector(".attachment-chip");
+        assert.strictEqual(
+          chip?.querySelector(".attachment-chip-type")?.textContent,
+          "Selection"
+        );
+        assert.strictEqual(
+          chip?.querySelector(".attachment-chip-name")?.textContent,
+          "src/example.ts:L2-L3"
+        );
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
+      test("defers selection focus while a permission modal is visible", () => {
+        elements.permissionModal.classList.add("visible");
+        elements.attachBtn.focus();
+
+        controller.handleMessage({ type: "focusComposer" });
+        assert.strictEqual(document.activeElement, elements.attachBtn);
+
+        controller.hidePermissionModal();
+        assert.strictEqual(document.activeElement, elements.inputEl);
+      });
+
       test("pastes an image only after the agent advertises image support", async () => {
         const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
         const file = new window.File([png], "pasted.png");

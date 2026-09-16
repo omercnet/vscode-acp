@@ -64,6 +64,12 @@
         "icon": "$(comment-discussion)"
       },
       {
+        "command": "vscode-acp.addSelectionToChat",
+        "title": "Add Selection to Chat",
+        "category": "ACP",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "vscode-acp.newChat",
         "title": "New Chat",
         "category": "ACP",
@@ -131,10 +137,21 @@
           "group": "navigation@4"
         }
       ],
+      "editor/context": [
+        {
+          "command": "vscode-acp.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "1_modification@90"
+        }
+      ],
       "commandPalette": [
         {
           "command": "vscode-acp.startChat",
           "when": "true"
+        },
+        {
+          "command": "vscode-acp.addSelectionToChat",
+          "when": "editorHasSelection"
         },
         {
           "command": "vscode-acp.newChat",
@@ -154,6 +171,14 @@
         }
       ]
     },
+    "keybindings": [
+      {
+        "command": "vscode-acp.addSelectionToChat",
+        "key": "ctrl+alt+shift+i",
+        "mac": "cmd+shift+i",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
     "configuration": {
       "title": "VSCode ACP",
       "properties": {

@@ -86,6 +86,33 @@ export async function activate(
   );
 
   context.subscriptions.push(
+    vscode.commands.registerTextEditorCommand(
+      "vscode-acp.addSelectionToChat",
+      async (editor) => {
+        const selection = editor.selection;
+        if (selection.isEmpty) {
+          return;
+        }
+        const text = editor.document.getText(selection);
+        const endLine =
+          selection.end.character === 0 &&
+          selection.end.line > selection.start.line
+            ? selection.end.line
+            : selection.end.line + 1;
+        const selectionContext = {
+          uri: editor.document.uri,
+          text,
+          startLine: selection.start.line + 1,
+          endLine,
+        };
+
+        await vscode.commands.executeCommand("vscode-acp.chatView.focus");
+        await chatProvider?.addEditorSelection(selectionContext);
+      }
+    )
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.newChat", () => {
       chatProvider?.newChat();
     })
