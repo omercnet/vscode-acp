@@ -250,6 +250,39 @@ function memoryAttachmentUri(id: string, name: string): string {
   return `vscode-acp-attachment:///memory/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
 }
 
+function selectionAttachmentUri(id: string, name: string): string {
+  return `vscode-acp-attachment:///selection/${encodeURIComponent(id)}/${encodeURIComponent(name)}`;
+}
+
+function selectionAttachmentName(uri: string): string | null {
+  if (!uri.startsWith("vscode-acp-attachment:///selection/")) {
+    return null;
+  }
+  try {
+    const parsed = new URL(uri);
+    if (
+      parsed.protocol !== "vscode-acp-attachment:" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.port !== "" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      return null;
+    }
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (segments.length !== 3 || segments[0] !== "selection") {
+      return null;
+    }
+    const name = sanitizeAttachmentLabel(decodeURIComponent(segments[2]));
+    return name.length > 0 && name.length <= MAX_ATTACHMENT_NAME_LENGTH
+      ? name
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Validates bytes supplied by a browser File object and moves them into the
  * same host-owned draft used by picker attachments. The webview never chooses
@@ -401,6 +434,63 @@ export function createInlineAttachment(
 }
 
 /**
+ * Captures an editor selection as host-owned prompt context. ACP agents that
+ * advertise embedded context receive a resource block; other agents receive
+ * the same bounded context as a text block.
+ */
+export function createSelectionAttachment(
+  name: string,
+  selectedText: string,
+  id: string,
+  currentInlineBytes: number
+): PromptAttachment {
+  const safeName = sanitizeAttachmentLabel(name);
+  if (
+    safeName !== name ||
+    safeName.length === 0 ||
+    safeName.length > MAX_ATTACHMENT_NAME_LENGTH
+  ) {
+    throw new AttachmentInputError("The selection has an invalid location.");
+  }
+  if (
+    !Number.isSafeInteger(currentInlineBytes) ||
+    currentInlineBytes < 0 ||
+    currentInlineBytes > MAX_INLINE_ATTACHMENT_BYTES
+  ) {
+    throw new AttachmentInputError("The attachment byte total is invalid.");
+  }
+
+  const text = `Selected code from ${safeName}:\n\n${selectedText}`;
+  const size = Buffer.byteLength(text, "utf8");
+  if (size > MAX_EMBEDDED_RESOURCE_BYTES) {
+    throw new AttachmentInputError(
+      `Selections must be ${MAX_EMBEDDED_RESOURCE_BYTES / 1024 / 1024} MB or smaller.`
+    );
+  }
+  if (currentInlineBytes + size > MAX_INLINE_ATTACHMENT_BYTES) {
+    throw new AttachmentInputError(
+      `Attachments may embed at most ${MAX_INLINE_ATTACHMENT_BYTES / 1024 / 1024} MB per prompt.`
+    );
+  }
+
+  const attachment: PromptAttachment = {
+    id,
+    uri: selectionAttachmentUri(id, safeName),
+    name: safeName,
+    mimeType: "text/plain",
+    size,
+    source: "memory",
+    kind: "selection",
+    transport: "resource",
+    payload: { type: "text", text },
+  };
+  if (!isPromptAttachmentValid(attachment)) {
+    throw new AttachmentInputError("The selection metadata is invalid.");
+  }
+  return attachment;
+}
+
+/**
  * Revalidates a selected file immediately before sending, then materializes
  * only the content type the connected agent explicitly advertised. Text uses
  * VS Code's document buffer, so unsaved edits are embedded.
@@ -438,6 +528,7 @@ export async function prepareFileAttachment(
       (promptAttachment.payload.type === "image" &&
         capabilities.image !== true) ||
       (promptAttachment.payload.type === "text" &&
+        promptAttachment.kind !== "selection" &&
         capabilities.embeddedContext !== true)
     ) {
       throw new AttachmentInputError(
@@ -669,11 +760,19 @@ export function createReplayAttachment(
       return null;
     }
     const uri = resourceRecord.uri;
+    const selectionName = selectionAttachmentName(uri);
     let name: string;
-    try {
-      name = basenameFromUriPath(vscode.Uri.parse(uri, true));
-    } catch {
-      return null;
+    if (selectionName) {
+      if (!text.startsWith(`Selected code from ${selectionName}:\n\n`)) {
+        return null;
+      }
+      name = selectionName;
+    } else {
+      try {
+        name = basenameFromUriPath(vscode.Uri.parse(uri, true));
+      } catch {
+        return null;
+      }
     }
     const mimeType =
       typeof resourceRecord.mimeType === "string"
@@ -690,7 +789,7 @@ export function createReplayAttachment(
       mimeType,
       size,
       source,
-      kind: "file",
+      kind: selectionName ? "selection" : "file",
       transport: "resource",
     };
     return isFileAttachmentValid(attachment) ? attachment : null;

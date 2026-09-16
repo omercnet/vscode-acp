@@ -1143,11 +1143,13 @@ export class WebviewController {
     chip.setAttribute("role", "listitem");
     const transport = attachment.transport ?? "resource_link";
     const transportLabel =
-      transport === "image"
-        ? "Image"
-        : transport === "resource"
-          ? "Embedded"
-          : "Link";
+      attachment.kind === "selection"
+        ? "Selection"
+        : transport === "image"
+          ? "Image"
+          : transport === "resource"
+            ? "Embedded"
+            : "Link";
 
     const details = [
       transportLabel,
@@ -1176,7 +1178,7 @@ export class WebviewController {
       const icon = this.doc.createElement("span");
       icon.className = "attachment-chip-icon";
       icon.setAttribute("aria-hidden", "true");
-      icon.textContent = "📄";
+      icon.textContent = attachment.kind === "selection" ? "⌗" : "📄";
       chip.appendChild(icon);
     }
 
@@ -1957,6 +1959,7 @@ export class WebviewController {
     this.elements.sessionPicker.replaceChildren();
     this.sessionPickerPreviousFocus?.focus();
     this.sessionPickerPreviousFocus = null;
+    this.updateInputControls();
   }
 
   handleMessage(msg: ExtensionMessage): void {
@@ -1972,6 +1975,18 @@ export class WebviewController {
           this.elements.inputEl.style.height = "auto";
           this.elements.inputEl.focus();
           this.saveState();
+        }
+        break;
+
+      case "focusComposer":
+        if (
+          this.elements.inputEl.disabled ||
+          this.elements.permissionModal.classList.contains("visible") ||
+          this.elements.sessionPicker.classList.contains("visible")
+        ) {
+          this.restoreInputFocus = true;
+        } else {
+          this.elements.inputEl.focus();
         }
         break;
 

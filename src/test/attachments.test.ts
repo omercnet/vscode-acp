@@ -18,6 +18,7 @@ import {
   createFileAttachment,
   createInlineAttachment,
   createReplayAttachment,
+  createSelectionAttachment,
   escapeQuickPickLabel,
   guessMimeType,
   isTrustedWorkspaceFile,
@@ -564,6 +565,52 @@ suite("Resource link attachments", () => {
           { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
         ]
       );
+    });
+
+    test("sends editor selections as resources or plain text by capability", async () => {
+      const selection = createSelectionAttachment(
+        "src/example.ts:L2-L3",
+        "const answer = 42;",
+        "selection-1",
+        0
+      );
+      const expectedText =
+        "Selected code from src/example.ts:L2-L3:\n\nconst answer = 42;";
+
+      assert.strictEqual(selection.kind, "selection");
+      assert.strictEqual(isFileAttachmentValid(selection), true);
+      assert.deepStrictEqual(buildPromptContent("Explain", [selection]), [
+        { type: "text", text: "Explain" },
+        { type: "text", text: expectedText },
+      ]);
+      const richBlocks = buildPromptContent("Explain", [selection], {
+        embeddedContext: true,
+      });
+      assert.deepStrictEqual(richBlocks, [
+        { type: "text", text: "Explain" },
+        {
+          type: "resource",
+          resource: {
+            uri: selection.uri,
+            mimeType: "text/plain",
+            text: expectedText,
+          },
+        },
+      ]);
+      assert.deepStrictEqual(createReplayAttachment(richBlocks[1], "replay"), {
+        id: "replay",
+        uri: selection.uri,
+        name: "src/example.ts:L2-L3",
+        mimeType: "text/plain",
+        size: Buffer.byteLength(expectedText, "utf8"),
+        source: "memory",
+        kind: "selection",
+        transport: "resource",
+      });
+      assert.deepStrictEqual(await prepareFileAttachment(selection, {}, 0), {
+        attachment: selection,
+        inlineBytes: Buffer.byteLength(expectedText, "utf8"),
+      });
     });
 
     test("falls back to a resource link and drops memory payloads without capabilities", () => {
