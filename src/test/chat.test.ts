@@ -3007,12 +3007,14 @@ suite("ChatViewProvider", () => {
     });
 
     test("rechecks editors dirtied during asynchronous identity resolution", async () => {
-      // Avoid per-editor external-directory watches during immediate teardown.
-      const sandbox = await realpath(
-        await mkdtemp(join(workspaceRoot(), ".vscode-acp-editor-race-"))
-      );
-      const targetPath = join(sandbox, "target.txt");
-      const otherPath = join(sandbox, "other.txt");
+      // Keep fixtures directly under the existing workspace watch. Windows can
+      // retain the watched subdirectory handle after both editors close, making
+      // an immediate recursive rmdir fail with EBUSY even though file handles
+      // are closed.
+      const fixturePrefix = `.vscode-acp-editor-race-${process.pid}`;
+      const sandbox = workspaceRoot();
+      const targetPath = join(sandbox, `${fixturePrefix}-target.txt`);
+      const otherPath = join(sandbox, `${fixturePrefix}-other.txt`);
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
@@ -3083,7 +3085,8 @@ suite("ChatViewProvider", () => {
             "workbench.action.revertAndCloseActiveEditor"
           );
         }
-        await rm(sandbox, { recursive: true, force: true });
+        await rm(targetPath, { force: true });
+        await rm(otherPath, { force: true });
       }
     });
 
