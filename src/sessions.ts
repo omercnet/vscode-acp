@@ -3,14 +3,28 @@ import type { Memento } from "vscode";
 
 export const SESSION_HISTORY_KEY = "vscode-acp.sessionHistory";
 export const DEFAULT_SESSION_HISTORY_LIMIT = 50;
+export const MAX_AGENT_SESSION_PAGE_ENTRIES = 200;
+export const MAX_AGENT_SESSION_TOTAL_ENTRIES = 1000;
+export const MAX_AGENT_SESSION_PAGE_METADATA_BYTES = 1_048_576;
+export const MAX_AGENT_SESSION_TOTAL_METADATA_BYTES = 4_194_304;
+export const MAX_AGENT_SESSION_TOTAL_PAGES = 100;
 const MAX_SESSION_ID_LENGTH = 4096;
 const MAX_SESSION_PATH_LENGTH = 32_768;
 const MAX_SESSION_TITLE_LENGTH = 200;
+const MAX_SESSION_TITLE_INPUT_LENGTH = 4096;
+const MAX_SESSION_TIMESTAMP_LENGTH = 128;
 const MAX_ADDITIONAL_DIRECTORIES = 32;
 const UNSAFE_SESSION_TEXT =
   /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/u;
 const UNSAFE_SESSION_TEXT_GLOBAL =
   /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/gu;
+export class SessionDiscoveryLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionDiscoveryLimitError";
+  }
+}
+
 
 export interface StoredSession {
   sessionId: string;
@@ -35,6 +49,7 @@ export interface AgentOwnedSession {
 export interface AgentSessionPage {
   sessions: AgentOwnedSession[];
   nextCursor: string | null;
+  metadataBytes: number;
 }
 
 function isSafeSessionPath(value: unknown): value is string {
@@ -66,6 +81,11 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
   if (!Array.isArray(candidate.sessions)) {
     throw new Error("Agent returned an invalid session page");
   }
+  if (candidate.sessions.length > MAX_AGENT_SESSION_PAGE_ENTRIES) {
+    throw new SessionDiscoveryLimitError(
+      `Agent session listing exceeded the safe page limit of ${MAX_AGENT_SESSION_PAGE_ENTRIES} entries. Reduce the agent's stored sessions, then retry.`
+    );
+  }
   const nextCursor = candidate.nextCursor;
   if (
     nextCursor !== undefined &&
@@ -77,6 +97,8 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
   ) {
     throw new Error("Agent returned an invalid pagination cursor");
   }
+  let metadataBytes =
+    typeof nextCursor === "string" ? Buffer.byteLength(nextCursor, "utf8") : 0;
 
   const sessions = candidate.sessions.map((value): AgentOwnedSession => {
     if (typeof value !== "object" || value === null) {
@@ -100,19 +122,46 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
     ) {
       throw new Error("Agent returned invalid session directories");
     }
+    const title = session.title;
+    if (
+      title !== undefined &&
+      title !== null &&
+      (typeof title !== "string" ||
+        title.length > MAX_SESSION_TITLE_INPUT_LENGTH)
+    ) {
+      throw new Error("Agent returned invalid session metadata");
+    }
     const updatedAt = session.updatedAt;
     if (
       updatedAt !== undefined &&
       updatedAt !== null &&
-      (typeof updatedAt !== "string" || Number.isNaN(Date.parse(updatedAt)))
+      (typeof updatedAt !== "string" ||
+        updatedAt.length > MAX_SESSION_TIMESTAMP_LENGTH ||
+        Number.isNaN(Date.parse(updatedAt)))
     ) {
       throw new Error("Agent returned an invalid session timestamp");
+    }
+    const normalizedTitle = sanitizeTitle(title);
+    metadataBytes +=
+      Buffer.byteLength(session.sessionId, "utf8") +
+      Buffer.byteLength(session.cwd, "utf8") +
+      Buffer.byteLength(normalizedTitle, "utf8") +
+      (typeof updatedAt === "string"
+        ? Buffer.byteLength(updatedAt, "utf8")
+        : 0);
+    for (const directory of additionalDirectories) {
+      metadataBytes += Buffer.byteLength(directory, "utf8");
+    }
+    if (metadataBytes > MAX_AGENT_SESSION_PAGE_METADATA_BYTES) {
+      throw new SessionDiscoveryLimitError(
+        `Agent session listing exceeded the safe page limit of ${MAX_AGENT_SESSION_PAGE_METADATA_BYTES} metadata bytes. Reduce the agent's stored sessions, then retry.`
+      );
     }
     return {
       sessionId: session.sessionId,
       cwd: session.cwd,
       additionalDirectories: [...additionalDirectories],
-      title: sanitizeTitle(session.title),
+      title: normalizedTitle,
       ...(typeof updatedAt === "string" ? { updatedAt } : {}),
     };
   });
@@ -120,6 +169,7 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
   return {
     sessions,
     nextCursor: typeof nextCursor === "string" ? nextCursor : null,
+    metadataBytes,
   };
 }
 

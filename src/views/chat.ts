@@ -607,7 +607,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly acpClient: ACPClient,
     globalState: vscode.Memento,
     workspaceState: vscode.Memento = globalState,
-    private readonly getAgentResolutionOptions: () => AgentCommandResolutionOptions = () => ({})
+    private readonly getAgentResolutionOptions: () => AgentCommandResolutionOptions = () => ({}),
+    private readonly shouldPersistSessions: () => boolean = () =>
+      vscode.workspace
+        .getConfiguration("vscode-acp")
+        .get<boolean>("sessions.autoSave", true)
   ) {
     this.globalState = globalState;
     this.workspaceState = workspaceState;
@@ -1114,10 +1118,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async saveCurrentSession(preview?: string): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration("vscode-acp");
-    if (!configuration.get<boolean>("sessions.autoSave", true)) {
+    if (!this.shouldPersistSessions()) {
       return;
     }
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
 
     const sessionId = this.acpClient.getCurrentSessionId();
     if (!sessionId) {
@@ -1313,6 +1317,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }).catch(() => {
             console.warn("[Chat] Failed to update session metadata");
           });
+          if (
+            !this.isCurrentConversation(generation) ||
+            this.acpClient.getAgentId() !== request.agentId ||
+            this.acpClient.getCurrentSessionId() !== request.sessionId
+          ) {
+            return;
+          }
           this.isReplaying = false;
           this.replayGeneration = null;
           this.clearPendingAttachments();
@@ -1362,13 +1373,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async touchStoredSession(
     session: AgentSessionOpenRequest
   ): Promise<void> {
+    if (!this.shouldPersistSessions()) {
+      return;
+    }
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
     const history = this.getStoredSessions();
     const existing = history.find(
       (entry) =>
         entry.sessionId === session.sessionId &&
         entry.agentId === session.agentId
     );
-    const configuration = vscode.workspace.getConfiguration("vscode-acp");
     const configuredLimit = configuration.get<number>(
       "sessions.maxHistory",
       DEFAULT_SESSION_HISTORY_LIMIT

@@ -18,6 +18,10 @@ import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import {
   DEFAULT_SESSION_HISTORY_LIMIT,
   SESSION_HISTORY_KEY,
+  MAX_AGENT_SESSION_TOTAL_ENTRIES,
+  MAX_AGENT_SESSION_TOTAL_METADATA_BYTES,
+  MAX_AGENT_SESSION_TOTAL_PAGES,
+  SessionDiscoveryLimitError,
   normalizeAgentSessionPage,
   readStoredSessions,
   reconcileAgentSessions,
@@ -112,6 +116,9 @@ interface AgentState {
   nextCursor: string | null;
   requestedCursor: string | null;
   error: string | null;
+  metadataBytes: number;
+  pageCount: number;
+  seenCursors: Set<string>;
   staleSessionIds: Set<string>;
 }
 
@@ -154,7 +161,6 @@ export class AgentSessionTreeProvider
   readonly onDidChangeTreeData = this.changes.event;
   private readonly states = new Map<string, AgentState>();
   private disposed = false;
-
   constructor(
     private readonly workspaceState: vscode.Memento,
     private readonly getAgentDiscoveryOptions: () => AgentDiscoveryOptions,
@@ -171,8 +177,13 @@ export class AgentSessionTreeProvider
         writeTextFile: false,
       }));
       return client;
-    }
+    },
+    private readonly shouldPersistSessions: () => boolean = () =>
+      vscode.workspace
+        .getConfiguration("vscode-acp")
+        .get<boolean>("sessions.autoSave", true)
   ) {}
+
 
   getTreeItem(element: AgentSessionTreeNode): vscode.TreeItem {
     if (element.kind === "agent") {
@@ -372,7 +383,7 @@ export class AgentSessionTreeProvider
     const sessions = capabilities.list
       ? this.listedSessionNodes(element.agent.id, capabilities, state)
       : this.fallbackSessionNodes(element.agent.id, capabilities, state);
-    if (sessions.length === 0) {
+    if (sessions.length === 0 && !state.nextCursor) {
       return [
         { kind: "state", agentId: element.agent.id, state: "empty" },
       ];
@@ -568,6 +579,9 @@ export class AgentSessionTreeProvider
         nextCursor: null,
         requestedCursor: null,
         error: null,
+        metadataBytes: 0,
+        pageCount: 0,
+        seenCursors: new Set(),
         staleSessionIds: new Set(),
       };
       this.states.set(agentId, state);
@@ -686,8 +700,24 @@ export class AgentSessionTreeProvider
       const page = normalizeAgentSessionPage(
         await probe.listSessions(cursor ? { cursor } : {})
       );
-      if (page.nextCursor && page.nextCursor === cursor) {
-        throw new Error("Agent returned a repeated pagination cursor");
+      const seenCursors = reset
+        ? new Set<string>()
+        : new Set(state.seenCursors);
+      if (page.nextCursor && seenCursors.has(page.nextCursor)) {
+        throw new SessionDiscoveryLimitError(
+          "Agent session listing repeated a pagination cursor. Refresh the agent after its session listing is corrected."
+        );
+      }
+      const projectedMetadataBytes =
+        (reset ? 0 : state.metadataBytes) + page.metadataBytes;
+      const projectedPageCount = (reset ? 0 : state.pageCount) + 1;
+      if (
+        projectedMetadataBytes > MAX_AGENT_SESSION_TOTAL_METADATA_BYTES ||
+        projectedPageCount > MAX_AGENT_SESSION_TOTAL_PAGES
+      ) {
+        throw new SessionDiscoveryLimitError(
+          "Agent session listing exceeded the safe accumulated limit. Reduce the agent's stored sessions, then retry."
+        );
       }
       const merged = new Map<string, AgentOwnedSession>();
       if (!reset) {
@@ -698,11 +728,22 @@ export class AgentSessionTreeProvider
       for (const session of page.sessions) {
         merged.set(session.sessionId, session);
       }
+      if (merged.size > MAX_AGENT_SESSION_TOTAL_ENTRIES) {
+        throw new SessionDiscoveryLimitError(
+          "Agent session listing exceeded the safe accumulated limit. Reduce the agent's stored sessions, then retry."
+        );
+      }
+      if (page.nextCursor) {
+        seenCursors.add(page.nextCursor);
+      }
       state.sessions = [...merged.values()];
+      state.metadataBytes = projectedMetadataBytes;
+      state.pageCount = projectedPageCount;
+      state.seenCursors = seenCursors;
       state.nextCursor = page.nextCursor;
       state.requestedCursor = null;
       state.status = "connected";
-      if (!page.nextCursor) {
+      if (!page.nextCursor && this.shouldPersistSessions()) {
         const configuredLimit = vscode.workspace
           .getConfiguration("vscode-acp")
           .get<number>("sessions.maxHistory", DEFAULT_SESSION_HISTORY_LIMIT);
@@ -722,6 +763,9 @@ export class AgentSessionTreeProvider
       this.changes.fire(undefined);
     } catch (error) {
       const presentation = describeACPError(error);
+      if (error instanceof SessionDiscoveryLimitError) {
+        state.nextCursor = null;
+      }
       const failedLaterPage =
         state.requestedCursor !== null && state.sessions.length > 0;
       state.status =

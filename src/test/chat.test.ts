@@ -2914,6 +2914,127 @@ suite("ChatViewProvider", () => {
         provider.dispose();
       }
     });
+
+    test("does not publish resume success after connection invalidation during history write", async () => {
+      let releaseHistoryWrite!: () => void;
+      let markHistoryWriteStarted!: () => void;
+      const historyWriteStarted = new Promise<void>((resolve) => {
+        markHistoryWriteStarted = resolve;
+      });
+      const historyWriteGate = new Promise<void>((resolve) => {
+        releaseHistoryWrite = resolve;
+      });
+      class DelayedHistoryState extends TestMemento {
+        async update(key: string, value: unknown): Promise<void> {
+          if (key === "vscode-acp.sessionHistory") {
+            markHistoryWriteStarted();
+            await historyWriteGate;
+          }
+          await super.update(key, value);
+        }
+      }
+      class ResumingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const client = new ResumingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        new DelayedHistoryState() as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const opening = provider.openAgentSession({
+        agentId: "test-agent",
+        sessionId: "invalidated-resume",
+        cwd: process.cwd(),
+        mode: "resume",
+      });
+      await historyWriteStarted;
+
+      client.emitStateChange("disconnected");
+      releaseHistoryWrite();
+      await opening;
+      assert.ok(!messages.some((message) => message.type === "chatCleared"));
+      assert.ok(
+        !messages.some((message) => message.type === "replayComplete")
+      );
+      const lifecycle = provider as unknown as { hasSession: boolean };
+      assert.strictEqual(lifecycle.hasSession, false);
+      provider.dispose();
+    });
+
+    test("does not persist opened sessions while auto-save is disabled", async () => {
+      class ResumingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      const existing = {
+        sessionId: "existing-session",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Existing",
+        messageCount: 1,
+      };
+      await workspaceState.update("vscode-acp.sessionHistory", [existing]);
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ResumingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento,
+        () => ({}),
+        () => false
+      );
+
+      try {
+        await provider.openAgentSession({
+          agentId: "test-agent",
+          sessionId: "not-persisted",
+          cwd: process.cwd(),
+          mode: "resume",
+        });
+        assert.deepStrictEqual(readStoredSessions(workspaceState), [existing]);
+      } finally {
+        provider.dispose();
+      }
+    });
   });
   suite("Client capability handlers", () => {
     test("reads the authorized file instead of a stale dirty buffer", async () => {

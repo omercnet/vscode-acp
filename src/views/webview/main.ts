@@ -2243,6 +2243,7 @@ export class WebviewController {
         this.saveState();
         break;
       case "chatCleared":
+        this.hideSessionHistory();
         this.clearChatState();
         this.clearAttachments();
         modeSelector.style.display = "none";

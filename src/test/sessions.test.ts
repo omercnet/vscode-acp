@@ -16,6 +16,7 @@ import {
 import {
   SESSION_HISTORY_KEY,
   readStoredSessions,
+  normalizeAgentSessionPage,
   type StoredSession,
 } from "../sessions";
 
@@ -242,6 +243,160 @@ suite("Agent session tree", () => {
       assert.deepStrictEqual(
         readStoredSessions(workspaceState).map((session) => session.sessionId),
         ["listed-2", "listed-1", "other-agent-session"]
+      );
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test("keeps Load More actionable after an empty intermediate page", async () => {
+    const probe = new TestProbe(LISTING_CAPABILITIES, [
+      { sessions: [], nextCursor: "next-page" },
+      {
+        sessions: [
+          {
+            sessionId: "listed-after-empty",
+            cwd: "/workspace",
+            title: "Listed after empty page",
+          },
+        ],
+      },
+    ]);
+    const provider = new AgentSessionTreeProvider(
+      new TestMemento(),
+      discoveryOptions,
+      async () => {},
+      () => probe
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const firstPage = provider.getChildren(agent);
+      assert.deepStrictEqual(
+        firstPage.map((node) => (node.kind === "state" ? node.state : node.kind)),
+        ["load-more"]
+      );
+
+      await provider.loadMore("opencode");
+
+      const completed = provider.getChildren(agent);
+      assert.strictEqual(completed.length, 1);
+      assert.strictEqual(completed[0].kind, "session");
+      if (completed[0].kind === "session") {
+        assert.strictEqual(completed[0].session.sessionId, "listed-after-empty");
+      }
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test("does not reconcile discovered sessions while auto-save is disabled", async () => {
+    const workspaceState = new TestMemento();
+    const local = storedSession("recoverable-local");
+    await workspaceState.update(SESSION_HISTORY_KEY, [local]);
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async () => {},
+      () =>
+        new TestProbe(LISTING_CAPABILITIES, [
+          {
+            sessions: [
+              {
+                sessionId: "agent-owned",
+                cwd: "/workspace",
+                title: "Agent owned",
+              },
+            ],
+          },
+        ]),
+      () => false
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      assert.ok(
+        provider
+          .getChildren(agent)
+          .some(
+            (node) =>
+              node.kind === "session" &&
+              node.session.sessionId === "agent-owned"
+          )
+      );
+      assert.deepStrictEqual(readStoredSessions(workspaceState), [local]);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test("fails closed on oversized pages and accumulated session metadata", async () => {
+    const session = (sessionId: string) => ({
+      sessionId,
+      cwd: "/workspace",
+      title: sessionId,
+    });
+    assert.throws(
+      () =>
+        normalizeAgentSessionPage({
+          sessions: Array.from({ length: 201 }, (_, index) =>
+            session(`oversized-page-${index}`)
+          ),
+        }),
+      /safe page limit/
+    );
+    const longPath = `/${"a".repeat(32_760)}`;
+    assert.throws(
+      () =>
+        normalizeAgentSessionPage({
+          sessions: [
+            {
+              ...session("oversized-bytes"),
+              cwd: longPath,
+              additionalDirectories: Array(32).fill(longPath),
+            },
+          ],
+        }),
+      /safe page limit/
+    );
+
+    const pages = Array.from({ length: 6 }, (_, pageIndex) => ({
+      sessions: Array.from(
+        { length: pageIndex < 5 ? 200 : 1 },
+        (_, sessionIndex) =>
+          session(`page-${pageIndex}-session-${sessionIndex}`)
+      ),
+      ...(pageIndex < 5 ? { nextCursor: `page-${pageIndex + 2}` } : {}),
+    }));
+    const provider = new AgentSessionTreeProvider(
+      new TestMemento(),
+      discoveryOptions,
+      async () => {},
+      () => new TestProbe(LISTING_CAPABILITIES, pages)
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      for (let page = 0; page < 5; page++) {
+        await provider.loadMore("opencode");
+      }
+      const children = provider.getChildren(agent);
+      assert.strictEqual(
+        children.filter((node) => node.kind === "session").length,
+        1000
+      );
+      const states = children.filter(
+        (node): node is Extract<AgentSessionTreeNode, { kind: "state" }> =>
+          node.kind === "state"
+      );
+      assert.deepStrictEqual(
+        states.map((node) => node.state),
+        ["error"]
+      );
+      assert.match(states[0].message ?? "", /safe accumulated limit/);
+      assert.strictEqual(
+        provider.getTreeItem(states[0]).command?.command,
+        "vscode-acp.sessions.refreshAgent"
       );
     } finally {
       provider.dispose();
