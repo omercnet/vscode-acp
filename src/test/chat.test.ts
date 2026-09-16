@@ -4830,6 +4830,68 @@ suite("ChatViewProvider", () => {
       });
     }
 
+    test("suppresses a stale stop reason if the connection changes during session save", async () => {
+      let markSaving!: () => void;
+      let finishSaving!: () => void;
+      const saving = new Promise<void>((resolve) => {
+        markSaving = resolve;
+      });
+      const saved = new Promise<void>((resolve) => {
+        finishSaving = resolve;
+      });
+      class DelayedHistory extends TestMemento {
+        async update(key: string, value: unknown): Promise<void> {
+          if (key === "vscode-acp.sessionHistory") {
+            markSaving();
+            await saved;
+          }
+          await super.update(key, value);
+        }
+      }
+      class RefusingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+        async sendMessage(): Promise<{ stopReason: string }> {
+          return { stopReason: "refusal" };
+        }
+      }
+      const client = new RefusingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        new DelayedHistory() as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const internals = provider as unknown as {
+        hasSession: boolean;
+        view: FakeWebview["view"];
+        handleUserMessage(text: string): Promise<void>;
+      };
+      internals.hasSession = true;
+      internals.view = fakeWebview.view;
+      const prompt = internals.handleUserMessage("Pending history write");
+      try {
+        await saving;
+        assert.ok(
+          !fakeWebview.messages.some((message) => message.type === "streamEnd")
+        );
+        client.emitStateChange("disconnected");
+        finishSaving();
+        await prompt;
+        assert.deepStrictEqual(fakeWebview.messages.at(-1), {
+          type: "streamEnd",
+          stopReason: "cancelled",
+          suppressStopReason: true,
+        });
+      } finally {
+        finishSaving();
+        await prompt;
+        provider.dispose();
+      }
+    });
+
     test("publishes identity only while its initialized connection is active", () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,

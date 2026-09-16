@@ -2623,6 +2623,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } catch (error) {
         console.warn("[Chat] Failed to save session metadata:", error);
       }
+      if (
+        !this.isCurrentConversation(promptGeneration) ||
+        promptSessionId !== this.acpClient.getCurrentSessionId()
+      ) {
+        this.postMessage({
+          type: "streamEnd",
+          stopReason: "cancelled",
+          suppressStopReason: true,
+        });
+        return;
+      }
 
       if (this.streamingText.length === 0) {
         console.log(

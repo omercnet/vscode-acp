@@ -7,6 +7,7 @@ import {
 import { mkdir, rm, writeFile } from "fs/promises";
 import { delimiter, join } from "path";
 import {
+  closeVSCode,
   cmdOrCtrl,
   findVSCodeExecutable,
   PROJECT_ROOT,
@@ -184,7 +185,7 @@ test("shows protocol metadata and opens a trusted tool location", async () => {
       path: join(SCREENSHOTS_DIR, "protocol-metadata-navigation.png"),
     });
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(DEMO_DIR, { recursive: true, force: true });
     await rm(USER_DATA_DIR, { recursive: true, force: true });
   }
