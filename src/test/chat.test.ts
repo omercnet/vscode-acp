@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import { EventEmitter } from "events";
 import * as vscode from "vscode";
+import { JSDOM } from "jsdom";
 import fsPromises, {
   chmod,
   copyFile,
@@ -42,6 +43,11 @@ import type {
 } from "@agentclientprotocol/sdk";
 import * as attachmentHelpers from "../attachments";
 import type { FileAttachment } from "../shared/attachments";
+import {
+  getElements,
+  WebviewController,
+  type ExtensionMessage,
+} from "../views/webview/main";
 
 interface MockMemento {
   get<T>(key: string): T | undefined;
@@ -549,6 +555,103 @@ suite("ChatViewProvider", () => {
   });
 
   suite("Mode/Model Persistence with Validation", () => {
+    test("keeps rich attachments available after restoring saved mode and model", async () => {
+      await memento.update("vscode-acp.selectedMode", "saved-mode");
+      await memento.update("vscode-acp.selectedModel", "saved-model");
+      class RichClient extends TestACPClient {
+        getPromptCapabilities(): PromptCapabilities {
+          return { image: true, embeddedContext: true };
+        }
+        getSessionMetadata() {
+          return {
+            modes: {
+              availableModes: [{ id: "saved-mode", name: "Saved mode" }],
+              currentModeId: this.lastSetModeId ?? "initial-mode",
+            },
+            models: {
+              availableModels: [
+                { modelId: "saved-model", name: "Saved model" },
+              ],
+              currentModelId: this.lastSetModelId ?? "initial-model",
+            },
+            commands: [],
+          };
+        }
+      }
+      const client = new RichClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento
+      );
+      // Exercise the real host/renderer contract using the provider's own HTML.
+      const lifecycle = provider as unknown as {
+        getHtmlContent(
+          webview: Pick<vscode.Webview, "asWebviewUri" | "cspSource">
+        ): string;
+        restoreSavedModeAndModel(): Promise<void>;
+      };
+      const dom = new JSDOM(
+        lifecycle.getHtmlContent({
+          asWebviewUri: (uri) => uri,
+          cspSource: "vscode-webview:",
+        }),
+        { url: "https://localhost" }
+      );
+      try {
+        const uploads: unknown[] = [];
+        const elements = getElements(dom.window.document);
+        const ui = new WebviewController(
+          {
+            postMessage(message: unknown) {
+              if (
+                typeof message === "object" &&
+                message !== null &&
+                "type" in message &&
+                message.type === "attachContent" &&
+                "name" in message
+              ) {
+                uploads.push(message.name);
+              }
+            },
+            getState: () => undefined,
+            setState: (state) => state,
+          },
+          elements,
+          dom.window.document,
+          dom.window as unknown as Window
+        );
+        Object.defineProperty(provider, "postMessage", {
+          value: (message: ExtensionMessage) => ui.handleMessage(message),
+        });
+        ui.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: client.getPromptCapabilities(),
+        });
+        await lifecycle.restoreSavedModeAndModel();
+        // FileReader and capability gating run normally; only the VS Code bridge is captured.
+        const composer = ui as unknown as {
+          attachBrowserFiles(files: File[]): Promise<void>;
+        };
+        await composer.attachBrowserFiles([
+          new dom.window.File(
+            [Buffer.from("iVBORw0KGgo=", "base64")],
+            "snapshot.png",
+            { type: "image/png" }
+          ),
+          new dom.window.File(["unsaved context"], "context.txt", {
+            type: "text/plain",
+          }),
+        ]);
+        assert.deepStrictEqual(uploads, ["snapshot.png", "context.txt"]);
+        assert.strictEqual(elements.modeSelector.value, "saved-mode");
+        assert.strictEqual(elements.modelSelector.value, "saved-model");
+      } finally {
+        dom.window.close();
+        provider.dispose();
+      }
+    });
+
     test("should validate and restore saved mode against available modes", async () => {
       await memento.update("vscode-acp.selectedMode", "test-mode");
 

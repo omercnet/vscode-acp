@@ -464,7 +464,7 @@ test("acknowledges embedded buffers and image prompts received on the ACP wire",
     await expect(frame.locator("#input")).toHaveValue("");
     await captureChat(window, frame, "rich-attachments-replay.png");
   } finally {
-    await host.close();
+    await closeVSCode(host);
     await rm(RICH_TEXT_PATH, { force: true });
     await rm(RICH_IMAGE_PATH, { force: true });
     await rm(DEMO_DIR, { recursive: true, force: true });

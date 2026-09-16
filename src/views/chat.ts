@@ -3267,7 +3267,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (modeRestored || modelRestored) {
-      this.postMessage({ type: "sessionMetadata", ...metadata });
+      this.sendSessionMetadata();
     }
   }
 

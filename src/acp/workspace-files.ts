@@ -799,7 +799,7 @@ export async function readOpenedWorkspaceFileBytes(
   maximumBytes = MAX_WORKSPACE_FILE_BYTES
 ): Promise<Buffer> {
   if (
-    __omp_shell("Number.isSafeInteger(maximumBytes) ||")
+    !Number.isSafeInteger(maximumBytes) ||
     maximumBytes < 0 ||
     maximumBytes > MAX_WORKSPACE_FILE_BYTES ||
     opened.byteLength > maximumBytes
