@@ -5463,6 +5463,57 @@ suite("ChatViewProvider", () => {
       );
     });
 
+    test("replays plain-text selection fallbacks as attachment chips", () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const internals = provider as unknown as {
+        isReplaying: boolean;
+        replayMessages: Array<{
+          text: string;
+          attachments: FileAttachment[];
+        }>;
+        handleSessionUpdate(notification: SessionNotification): void;
+      };
+      internals.isReplaying = true;
+
+      for (const text of [
+        "Explain this",
+        "Selected code from src/example.ts:L2-L3:\n\nconst answer = 42;",
+      ]) {
+        internals.handleSessionUpdate({
+          sessionId: "test-session",
+          update: {
+            sessionUpdate: "user_message_chunk",
+            messageId: "user-selection",
+            content: { type: "text", text },
+          },
+        } satisfies SessionNotification);
+      }
+
+      assert.strictEqual(internals.replayMessages[0].text, "Explain this");
+      assert.deepStrictEqual(
+        internals.replayMessages[0].attachments.map(
+          ({ name, mimeType, kind, transport }) => ({
+            name,
+            mimeType,
+            kind,
+            transport,
+          })
+        ),
+        [
+          {
+            name: "src/example.ts:L2-L3",
+            mimeType: "text/plain",
+            kind: "selection",
+            transport: "resource",
+          },
+        ]
+      );
+    });
+
     test("does not send a file prepared after the conversation generation changes", async () => {
       const original = Object.getOwnPropertyDescriptor(
         attachmentHelpers,
@@ -5645,6 +5696,51 @@ suite("ChatViewProvider", () => {
       }
     });
 
+    test("drops stale queued selections before enforcing the draft limit", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const staleSelection = {
+        uri: vscode.Uri.file("/workspace/stale.ts"),
+        text: "stale();",
+        startLine: 1,
+        endLine: 1,
+      };
+      const internals = provider as unknown as {
+        webviewReady: boolean;
+        conversationGeneration: number;
+        queuedEditorSelections: Array<{
+          selection: typeof staleSelection;
+          conversationGeneration: number;
+        }>;
+      };
+      internals.webviewReady = false;
+      internals.conversationGeneration = 2;
+      internals.queuedEditorSelections = Array.from({ length: 10 }, () => ({
+        selection: staleSelection,
+        conversationGeneration: 1,
+      }));
+
+      await provider.addEditorSelection({
+        uri: vscode.Uri.file("/workspace/current.ts"),
+        text: "current();",
+        startLine: 1,
+        endLine: 1,
+      });
+
+      assert.strictEqual(internals.queuedEditorSelections.length, 1);
+      assert.strictEqual(
+        internals.queuedEditorSelections[0].conversationGeneration,
+        2
+      );
+      assert.strictEqual(
+        internals.queuedEditorSelections[0].selection.text,
+        "current();"
+      );
+    });
+
     test("caps overlapping editor selections at the attachment limit", async () => {
       const original = Object.getOwnPropertyDescriptor(
         attachmentHelpers,
@@ -5674,8 +5770,21 @@ suite("ChatViewProvider", () => {
           value: (message: Record<string, unknown>) => messages.push(message),
         });
         const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
           webviewReady: boolean;
           pendingAttachments: Map<string, FileAttachment>;
+        };
+        internals.view = {
+          webview: {
+            postMessage: async (message) => {
+              messages.push(message);
+              return true;
+            },
+          },
         };
         internals.webviewReady = true;
         for (let index = 0; index < 9; index += 1) {
@@ -5715,6 +5824,101 @@ suite("ChatViewProvider", () => {
       }
     });
 
+    test("restores a send attempted while a selection chip is publishing", async () => {
+      const original = Object.getOwnPropertyDescriptor(
+        attachmentHelpers,
+        "isTrustedWorkspaceFile"
+      );
+      assert.ok(original);
+      Object.defineProperty(attachmentHelpers, "isTrustedWorkspaceFile", {
+        configurable: true,
+        value: async () => true,
+      });
+
+      let publicationStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        publicationStarted = resolve;
+      });
+      let finishPublication!: () => void;
+      const publication = new Promise<void>((resolve) => {
+        finishPublication = resolve;
+      });
+
+      try {
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          acpClient as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
+          webviewReady: boolean;
+          editorSelectionPreparations: number;
+          pendingAttachments: Map<string, FileAttachment>;
+          handleUserMessage(
+            text: string,
+            attachmentIds?: string[]
+          ): Promise<void>;
+        };
+        internals.view = {
+          webview: {
+            postMessage: async (message) => {
+              messages.push(message);
+              if (message.type === "filesAttached") {
+                publicationStarted();
+                await publication;
+              }
+              return true;
+            },
+          },
+        };
+        internals.webviewReady = true;
+
+        const adding = provider.addEditorSelection({
+          uri: vscode.Uri.file("/workspace/src/example.ts"),
+          text: "selected();",
+          startLine: 1,
+          endLine: 1,
+        });
+        await started;
+        assert.strictEqual(internals.editorSelectionPreparations, 1);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+
+        await internals.handleUserMessage("Keep this draft", []);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+        assert.ok(
+          messages.some(
+            (message) =>
+              message.type === "restoreInput" &&
+              message.text === "Keep this draft"
+          )
+        );
+        assert.ok(
+          messages.some(
+            (message) =>
+              message.type === "streamEnd" &&
+              message.suppressStopReason === true
+          )
+        );
+
+        finishPublication();
+        await adding;
+        assert.strictEqual(internals.editorSelectionPreparations, 0);
+        assert.strictEqual(internals.pendingAttachments.size, 1);
+      } finally {
+        finishPublication?.();
+        Object.defineProperty(
+          attachmentHelpers,
+          "isTrustedWorkspaceFile",
+          original
+        );
+      }
+    });
     test("keeps a concurrent picker result out of a full selection draft", async () => {
       const originalTrust = Object.getOwnPropertyDescriptor(
         attachmentHelpers,
@@ -5756,9 +5960,17 @@ suite("ChatViewProvider", () => {
           memento as unknown as vscode.Memento
         );
         const internals = provider as unknown as {
+          view: {
+            webview: {
+              postMessage(message: Record<string, unknown>): Promise<boolean>;
+            };
+          };
           webviewReady: boolean;
           pendingAttachments: Map<string, FileAttachment>;
           handleRequestAttachFiles(currentCount: number): Promise<void>;
+        };
+        internals.view = {
+          webview: { postMessage: async () => true },
         };
         internals.webviewReady = true;
         for (let index = 0; index < 9; index += 1) {

@@ -579,10 +579,24 @@ suite("Resource link attachments", () => {
 
       assert.strictEqual(selection.kind, "selection");
       assert.strictEqual(isFileAttachmentValid(selection), true);
-      assert.deepStrictEqual(buildPromptContent("Explain", [selection]), [
+      const fallbackBlocks = buildPromptContent("Explain", [selection]);
+      assert.deepStrictEqual(fallbackBlocks, [
         { type: "text", text: "Explain" },
         { type: "text", text: expectedText },
       ]);
+      assert.deepStrictEqual(
+        createReplayAttachment(fallbackBlocks[1], "fallback-replay"),
+        {
+          id: "fallback-replay",
+          uri: "vscode-acp-attachment:///selection/fallback-replay/src%2Fexample.ts%3AL2-L3",
+          name: "src/example.ts:L2-L3",
+          mimeType: "text/plain",
+          size: Buffer.byteLength(expectedText, "utf8"),
+          source: "memory",
+          kind: "selection",
+          transport: "resource",
+        }
+      );
       const richBlocks = buildPromptContent("Explain", [selection], {
         embeddedContext: true,
       });
@@ -607,6 +621,25 @@ suite("Resource link attachments", () => {
         kind: "selection",
         transport: "resource",
       });
+      assert.deepStrictEqual(
+        createReplayAttachment(
+          {
+            type: "resource",
+            resource: { uri: selection.uri, text: expectedText },
+          },
+          "mime-default"
+        ),
+        {
+          id: "mime-default",
+          uri: selection.uri,
+          name: "src/example.ts:L2-L3",
+          mimeType: "text/plain",
+          size: Buffer.byteLength(expectedText, "utf8"),
+          source: "memory",
+          kind: "selection",
+          transport: "resource",
+        }
+      );
       assert.deepStrictEqual(await prepareFileAttachment(selection, {}, 0), {
         attachment: selection,
         inlineBytes: Buffer.byteLength(expectedText, "utf8"),

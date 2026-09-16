@@ -599,6 +599,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private attachmentDraftVersion = 0;
   private webviewReady = false;
   private queuedEditorSelections: QueuedEditorSelection[] = [];
+  private editorSelectionPreparations = 0;
   private readonly openWorkspaceFile = openTrustedWorkspaceFile;
 
   constructor(
@@ -868,6 +869,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
       return;
     }
+    this.queuedEditorSelections = this.queuedEditorSelections.filter(
+      (queued) => queued.conversationGeneration === this.conversationGeneration
+    );
     if (!this.webviewReady) {
       if (
         this.pendingAttachments.size + this.queuedEditorSelections.length >=
@@ -905,38 +909,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const draftVersion = this.attachmentDraftVersion;
     const generation = this.conversationGeneration;
     const originatingView = this.view;
-    const trusted = await isTrustedWorkspaceFile(selection.uri);
-    if (
-      draftVersion !== this.attachmentDraftVersion ||
-      generation !== this.conversationGeneration ||
-      originatingView !== this.view ||
-      !this.webviewReady ||
-      this.sessionTransition !== null ||
-      this.isReplaying
-    ) {
-      return;
+    this.editorSelectionPreparations += 1;
+    if (this.editorSelectionPreparations === 1) {
+      this.postMessage({ type: "attachmentPreparation", active: true });
     }
-    if (!trusted) {
-      void vscode.window.showWarningMessage(
-        "Only selections from files inside a trusted local workspace can be added to chat."
-      );
-      return;
-    }
-    if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
-      void vscode.window.showWarningMessage(
-        `You can attach up to ${MAX_ATTACHMENTS} files or selections per prompt.`
-      );
-      return;
-    }
-
-    const relativePath = vscode.workspace
-      .asRelativePath(selection.uri, true)
-      .replace(/\\/g, "/");
-    const lines =
-      selection.startLine === selection.endLine
-        ? `L${selection.startLine}`
-        : `L${selection.startLine}-L${selection.endLine}`;
     try {
+      const trusted = await isTrustedWorkspaceFile(selection.uri);
+      if (
+        draftVersion !== this.attachmentDraftVersion ||
+        generation !== this.conversationGeneration ||
+        originatingView !== this.view ||
+        !this.webviewReady ||
+        this.sessionTransition !== null ||
+        this.isReplaying
+      ) {
+        return;
+      }
+      if (!trusted) {
+        void vscode.window.showWarningMessage(
+          "Only selections from files inside a trusted local workspace can be added to chat."
+        );
+        return;
+      }
+      if (this.pendingAttachments.size >= MAX_ATTACHMENTS) {
+        void vscode.window.showWarningMessage(
+          `You can attach up to ${MAX_ATTACHMENTS} files or selections per prompt.`
+        );
+        return;
+      }
+
+      const relativePath = vscode.workspace
+        .asRelativePath(selection.uri, true)
+        .replace(/\\/g, "/");
+      const lines =
+        selection.startLine === selection.endLine
+          ? `L${selection.startLine}`
+          : `L${selection.startLine}-L${selection.endLine}`;
       const attachment = createSelectionAttachment(
         `${relativePath}:${lines}`,
         selection.text,
@@ -944,10 +952,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pendingInlineBytes()
       );
       this.pendingAttachments.set(attachment.id, attachment);
-      this.postMessage({
-        type: "filesAttached",
-        attachments: [toAttachmentMetadata(attachment)],
-      });
+      const published =
+        (await originatingView?.webview.postMessage({
+          type: "filesAttached",
+          attachments: [toAttachmentMetadata(attachment)],
+        })) ?? false;
+      if (
+        !published ||
+        draftVersion !== this.attachmentDraftVersion ||
+        generation !== this.conversationGeneration ||
+        originatingView !== this.view ||
+        !this.webviewReady
+      ) {
+        if (this.pendingAttachments.get(attachment.id) === attachment) {
+          this.pendingAttachments.delete(attachment.id);
+        }
+        return;
+      }
       this.postMessage({ type: "focusComposer" });
     } catch (error) {
       void vscode.window.showWarningMessage(
@@ -955,6 +976,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ? error.message
           : "The selection could not be added to chat."
       );
+    } finally {
+      this.editorSelectionPreparations -= 1;
+      if (this.editorSelectionPreparations === 0) {
+        this.postMessage({ type: "attachmentPreparation", active: false });
+      }
     }
   }
 
@@ -1294,14 +1320,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       SessionNotification["update"],
       { sessionUpdate: "user_message_chunk" }
     >["content"]
-  ): void {
+  ): boolean {
     const message = this.findOrCreateReplayMessage("user", messageId);
     if (message.attachments.length >= MAX_ATTACHMENTS) {
-      return;
+      return false;
     }
     const attachment = createReplayAttachment(content, this.nextAttachmentId());
     if (!attachment) {
-      return;
+      return false;
     }
     const replayInlineBytes = message.attachments.reduce(
       (total, existing) =>
@@ -1314,9 +1340,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       attachment.transport !== "resource_link" &&
       replayInlineBytes + (attachment.size ?? 0) > MAX_INLINE_ATTACHMENT_BYTES
     ) {
-      return;
+      return false;
     }
     message.attachments.push(attachment);
+    return true;
   }
 
   private stderrBuffer = "";
@@ -2373,12 +2400,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     if (this.isReplaying) {
       if (
-        (update.sessionUpdate === "user_message_chunk" ||
-          update.sessionUpdate === "agent_message_chunk") &&
+        update.sessionUpdate === "user_message_chunk" &&
+        update.content.type === "text"
+      ) {
+        if (!this.appendReplayAttachment(update.messageId, update.content)) {
+          this.appendReplayChunk("user", update.messageId, update.content.text);
+        }
+      } else if (
+        update.sessionUpdate === "agent_message_chunk" &&
         update.content.type === "text"
       ) {
         this.appendReplayChunk(
-          update.sessionUpdate === "user_message_chunk" ? "user" : "assistant",
+          "assistant",
           update.messageId,
           update.content.text
         );
@@ -2698,6 +2731,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postMessage({
         type: "agentError",
         text: "Wait for the conversation to finish restoring before sending.",
+      });
+      return;
+    }
+
+    if (this.editorSelectionPreparations > 0) {
+      this.postMessage({ type: "restoreInput", text });
+      const attachments = Array.from(this.pendingAttachments.values()).map(
+        toAttachmentMetadata
+      );
+      if (attachments.length > 0) {
+        this.postMessage({ type: "filesAttached", attachments });
+      }
+      this.postMessage({
+        type: "attachmentWarning",
+        text: "Wait for the editor selection to finish attaching before sending.",
+      });
+      this.postMessage({
+        type: "streamEnd",
+        stopReason: "error",
+        suppressStopReason: true,
       });
       return;
     }

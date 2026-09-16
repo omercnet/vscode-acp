@@ -18,6 +18,7 @@ import {
   isPromptAttachmentValid,
   isSupportedImageMimeType,
   sanitizeAttachmentLabel,
+  toAttachmentMetadata,
   type FileAttachment,
   type PromptAttachment,
   type SupportedImageMimeType,
@@ -701,6 +702,27 @@ export function createReplayAttachment(
   content: ContentBlock,
   id: string
 ): FileAttachment | null {
+  if (content.type === "text") {
+    const match = /^Selected code from (.+:L\d+(?:-L\d+)?):\n\n/.exec(
+      content.text
+    );
+    if (!match) {
+      return null;
+    }
+    try {
+      return toAttachmentMetadata(
+        createSelectionAttachment(
+          match[1],
+          content.text.slice(match[0].length),
+          id,
+          0
+        )
+      );
+    } catch {
+      return null;
+    }
+  }
+
   if (content.type === "resource_link") {
     if (
       typeof content.name !== "string" ||
@@ -777,7 +799,9 @@ export function createReplayAttachment(
     const mimeType =
       typeof resourceRecord.mimeType === "string"
         ? resourceRecord.mimeType
-        : undefined;
+        : selectionName
+          ? "text/plain"
+          : undefined;
     if (isSupportedImageMimeType(mimeType)) {
       return null;
     }
