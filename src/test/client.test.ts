@@ -343,6 +343,7 @@ suite("ACPClient with Mock Server", () => {
             PATH: "/trusted/bin",
             AGENT_TEST_VALUE: "preserved",
           },
+          detached: process.platform !== "win32",
           shell: false,
         },
       });
@@ -1767,22 +1768,42 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getSessionMetadata(), null);
     });
 
-    test("keeps the new connection usable when reconnecting right after dispose", async () => {
+    test("waits for the old process to exit before reconnecting", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const previousProcess = mockProcesses[0];
+      previousProcess.kill = () => true;
 
       client.dispose();
-      await client.connect();
-      // Let the killed process deliver its exit event.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const reconnecting = client.connect();
 
+      assert.strictEqual(mockProcesses.length, 1);
+      previousProcess.emit("exit", 0);
+      await reconnecting;
+      assert.strictEqual(mockProcesses.length, 2);
       assert.strictEqual(client.getState(), "connected");
       const session = await client.newSession({
         cwd: "/test/dir",
         mcpServers: [],
       });
       assert.ok(session.sessionId);
+    });
+
+    test("escalates process termination when graceful shutdown hangs", async () => {
+      await client.connect();
+      const previousProcess = mockProcesses[0];
+      const signals: Array<NodeJS.Signals | number | undefined> = [];
+      previousProcess.kill = (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") {
+          setImmediate(() => previousProcess.emit("exit", null, "SIGKILL"));
+        }
+        return true;
+      };
+      await client.disconnect();
+
+      assert.deepStrictEqual(signals, ["SIGTERM", "SIGKILL"]);
+      assert.strictEqual(client.getState(), "disconnected");
     });
 
     test("does not let a disposed connection attempt tear down its replacement", async () => {

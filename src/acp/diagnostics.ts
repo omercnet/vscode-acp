@@ -13,6 +13,13 @@ interface PendingRequest {
   startedAt: number;
 }
 
+type BoundedRequestId = string | number;
+
+interface TraceState {
+  clientRequests: Map<BoundedRequestId, PendingRequest>;
+  agentRequests: Map<BoundedRequestId, PendingRequest>;
+}
+
 export interface ACPDiagnosticsSink {
   appendLine(value: string): void;
   show(preserveFocus?: boolean): void;
@@ -92,6 +99,31 @@ const CONTENT_KINDS = [
 const MAX_PENDING_REQUESTS = 256;
 const MAX_COUNT = 10_000;
 const MAX_DURATION_MS = 86_400_000;
+const MAX_REQUEST_ID_BYTES = 256;
+
+function createTraceState(): TraceState {
+  return {
+    clientRequests: new Map(),
+    agentRequests: new Map(),
+  };
+}
+
+function clearTraceState(state: TraceState): void {
+  state.clientRequests.clear();
+  state.agentRequests.clear();
+}
+
+function boundedRequestId(value: unknown): BoundedRequestId | undefined {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) ? value : undefined;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return Buffer.byteLength(value, "utf8") <= MAX_REQUEST_ID_BYTES
+    ? value
+    : undefined;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -115,7 +147,7 @@ function isCall(
   return "method" in message;
 }
 
-function isRequest(
+function hasRequestId(
   message: AnyMessage
 ): message is Extract<AnyMessage, { method: string; id: JsonRpcId }> {
   return isCall(message) && "id" in message;
@@ -168,7 +200,11 @@ function requestMetadata(method: string, params: unknown): StructuralMetadata {
       const updateType = update?.sessionUpdate;
       return {
         updateType:
-          typeof updateType === "string" && SESSION_UPDATE_KINDS[updateType]
+          typeof updateType === "string" &&
+          Object.prototype.hasOwnProperty.call(
+            SESSION_UPDATE_KINDS,
+            updateType
+          )
             ? updateType
             : "unknown",
       };
@@ -236,8 +272,7 @@ function responseMetadata(method: string, result: unknown): StructuralMetadata {
  * payload metadata.
  */
 export class ACPDiagnostics {
-  private readonly clientRequests = new Map<JsonRpcId, PendingRequest>();
-  private readonly agentRequests = new Map<JsonRpcId, PendingRequest>();
+  private readonly directState = createTraceState();
   private nextCorrelation = 0;
 
   constructor(
@@ -251,40 +286,52 @@ export class ACPDiagnostics {
   }
 
   record(direction: ACPDiagnosticsDirection, message: AnyMessage): void {
-    if (!this.isEnabled()) {
-      this.clientRequests.clear();
-      this.agentRequests.clear();
-      return;
-    }
-
-    if (isCall(message)) {
-      this.recordCall(direction, message);
-      return;
-    }
-    this.recordResponse(direction, message);
+    this.recordMessage(this.directState, direction, message);
   }
 
   wrap(stream: Stream): Stream {
+    const state = createTraceState();
     const writer = stream.writable.getWriter();
     const reader = stream.readable.getReader();
+    let writerReleased = false;
+    let readerReleased = false;
+    const releaseWriter = () => {
+      if (!writerReleased) {
+        writerReleased = true;
+        writer.releaseLock();
+      }
+    };
+    const releaseReader = () => {
+      if (!readerReleased) {
+        readerReleased = true;
+        reader.releaseLock();
+      }
+    };
     return {
       writable: new WritableStream<AnyMessage>({
         write: async (message) => {
-          this.record("client->agent", message);
-          await writer.write(message);
+          this.recordMessage(state, "client->agent", message);
+          try {
+            await writer.write(message);
+          } catch (error) {
+            clearTraceState(state);
+            throw error;
+          }
         },
         close: async () => {
+          clearTraceState(state);
           try {
             await writer.close();
           } finally {
-            writer.releaseLock();
+            releaseWriter();
           }
         },
         abort: async (reason) => {
+          clearTraceState(state);
           try {
             await writer.abort(reason);
           } finally {
-            writer.releaseLock();
+            releaseWriter();
           }
         },
       }),
@@ -293,37 +340,70 @@ export class ACPDiagnostics {
           try {
             const { done, value } = await reader.read();
             if (done) {
+              clearTraceState(state);
               controller.close();
-              reader.releaseLock();
+              releaseReader();
               return;
             }
-            this.record("agent->client", value);
+            this.recordMessage(state, "agent->client", value);
             controller.enqueue(value);
           } catch (error) {
+            clearTraceState(state);
             controller.error(error);
-            reader.releaseLock();
+            releaseReader();
           }
         },
         cancel: async (reason) => {
+          clearTraceState(state);
           try {
             await reader.cancel(reason);
           } finally {
-            reader.releaseLock();
+            releaseReader();
           }
         },
       }),
     };
   }
 
+  private recordMessage(
+    state: TraceState,
+    direction: ACPDiagnosticsDirection,
+    message: AnyMessage
+  ): void {
+    if (!this.isEnabled()) {
+      clearTraceState(state);
+      return;
+    }
+    if (isCall(message)) {
+      this.recordCall(state, direction, message);
+      return;
+    }
+    this.recordResponse(state, direction, message);
+  }
+
   private recordCall(
+    state: TraceState,
     direction: ACPDiagnosticsDirection,
     message: Extract<AnyMessage, { method: string }>
   ): void {
     const method =
-      typeof message.method === "string" && KNOWN_METHODS[message.method]
+      typeof message.method === "string" &&
+      Object.prototype.hasOwnProperty.call(KNOWN_METHODS, message.method)
         ? message.method
         : "unknown";
-    if (isRequest(message)) {
+    if (hasRequestId(message)) {
+      const requestId = boundedRequestId(message.id);
+      if (requestId === undefined) {
+        this.write(
+          direction,
+          method,
+          null,
+          0,
+          "unmatched",
+          requestMetadata(method, message.params)
+        );
+        return;
+      }
       const pending = {
         correlation: `rpc-${++this.nextCorrelation}`,
         method,
@@ -331,12 +411,12 @@ export class ACPDiagnostics {
       };
       const requests =
         direction === "client->agent"
-          ? this.clientRequests
-          : this.agentRequests;
+          ? state.clientRequests
+          : state.agentRequests;
       if (requests.size >= MAX_PENDING_REQUESTS) {
-        requests.delete(requests.keys().next().value as JsonRpcId);
+        requests.delete(requests.keys().next().value as BoundedRequestId);
       }
-      requests.set(message.id, pending);
+      requests.set(requestId, pending);
       this.write(
         direction,
         method,
@@ -359,17 +439,25 @@ export class ACPDiagnostics {
   }
 
   private recordResponse(
+    state: TraceState,
     direction: ACPDiagnosticsDirection,
     message: Exclude<AnyMessage, { method: string }>
   ): void {
     const requests =
-      direction === "agent->client" ? this.clientRequests : this.agentRequests;
-    const pending = requests.get(message.id);
+      direction === "agent->client"
+        ? state.clientRequests
+        : state.agentRequests;
+    const requestId = boundedRequestId(message.id);
+    if (requestId === undefined) {
+      this.write(direction, "unknown", null, 0, "unmatched", {});
+      return;
+    }
+    const pending = requests.get(requestId);
     if (!pending) {
       this.write(direction, "unknown", null, 0, "unmatched", {});
       return;
     }
-    requests.delete(message.id);
+    requests.delete(requestId);
     let code: number | undefined;
     if (isErrorResponse(message)) {
       const error = asRecord(message.error);

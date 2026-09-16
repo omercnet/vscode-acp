@@ -1,6 +1,6 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
-import type { AnyMessage } from "@agentclientprotocol/sdk";
+import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
 import { ACPDiagnostics, type ACPDiagnosticsSink } from "../acp/diagnostics";
 
 class TestSink implements ACPDiagnosticsSink {
@@ -18,6 +18,30 @@ class TestSink implements ACPDiagnosticsSink {
 
 function message(value: Record<string, unknown>): AnyMessage {
   return value as AnyMessage;
+}
+
+function controlledStream(): {
+  stream: Stream;
+  push(message: AnyMessage): void;
+  end(): void;
+} {
+  let input!: ReadableStreamDefaultController<AnyMessage>;
+  return {
+    stream: {
+      writable: new WritableStream<AnyMessage>({ write() {} }),
+      readable: new ReadableStream<AnyMessage>({
+        start(controller) {
+          input = controller;
+        },
+      }),
+    },
+    push(message) {
+      input.enqueue(message);
+    },
+    end() {
+      input.close();
+    },
+  };
 }
 
 suite("ACP diagnostics", () => {
@@ -268,6 +292,96 @@ suite("ACP diagnostics", () => {
     assert.strictEqual(response.outcome, "error");
     assert.ok(!sink.lines.join("\n").includes(secret));
   });
+
+  test("rejects unbounded request IDs", () => {
+    const sink = new TestSink();
+    const diagnostics = new ACPDiagnostics(sink, () => true);
+    const invalidIds = [
+      { attacker: true },
+      "x".repeat(257),
+      Number.NaN,
+      1.5,
+      null,
+    ];
+    for (const id of invalidIds) {
+      diagnostics.record(
+        "client->agent",
+        message({ jsonrpc: "2.0", id, method: "session/prompt", params: {} })
+      );
+    }
+
+    const records = sink.lines.map((line) => JSON.parse(line));
+    for (const record of records) {
+      assert.strictEqual(record.correlation, null);
+      assert.strictEqual(record.outcome, "unmatched");
+    }
+  });
+
+  test("rejects prototype-derived allowlist entries", () => {
+    const sink = new TestSink();
+    const diagnostics = new ACPDiagnostics(sink, () => true);
+    diagnostics.record(
+      "client->agent",
+      message({ jsonrpc: "2.0", id: 1, method: "toString", params: {} })
+    );
+    diagnostics.record(
+      "agent->client",
+      message({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: { update: { sessionUpdate: "toString" } },
+      })
+    );
+
+    const records = sink.lines.map((line) => JSON.parse(line));
+    assert.strictEqual(records[0].method, "unknown");
+    assert.strictEqual(records[1].metadata.updateType, "unknown");
+  });
+
+  for (const teardown of ["eof", "cancel", "close"] as const) {
+    test(`clears pending correlations on transport ${teardown}`, async () => {
+      const sink = new TestSink();
+      const diagnostics = new ACPDiagnostics(sink, () => true);
+      const first = controlledStream();
+      const firstWrapped = diagnostics.wrap(first.stream);
+      const firstWriter = firstWrapped.writable.getWriter();
+      const firstReader = firstWrapped.readable.getReader();
+      await firstWriter.write(
+        message({
+          jsonrpc: "2.0",
+          id: "shared-id",
+          method: "session/prompt",
+          params: {},
+        })
+      );
+
+      if (teardown === "eof") {
+        first.end();
+        assert.strictEqual((await firstReader.read()).done, true);
+        await firstWriter.close();
+      } else if (teardown === "cancel") {
+        await firstReader.cancel();
+        await firstWriter.close();
+      } else {
+        await firstWriter.close();
+        await firstReader.cancel();
+      }
+
+      const replacement = controlledStream();
+      const replacementWrapped = diagnostics.wrap(replacement.stream);
+      const replacementReader = replacementWrapped.readable.getReader();
+      replacement.push(
+        message({ jsonrpc: "2.0", id: "shared-id", result: {} })
+      );
+      await replacementReader.read();
+      await replacementReader.cancel();
+
+      const response = JSON.parse(sink.lines.at(-1)!);
+      assert.strictEqual(response.method, "unknown");
+      assert.strictEqual(response.correlation, null);
+      assert.strictEqual(response.outcome, "unmatched");
+    });
+  }
 
   test("registers diagnostics and lifecycle commands", async () => {
     const extension = vscode.extensions.getExtension("omercnet.vscode-acp");

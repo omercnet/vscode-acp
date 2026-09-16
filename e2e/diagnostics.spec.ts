@@ -26,18 +26,21 @@ const MCP_SECRET = "diagnostics-mcp-secret";
 
 const AGENT_SOURCE = `#!/usr/bin/env node
 const fs = require("fs");
+const { spawn } = require("child_process");
 const lifecyclePath = process.env.VSCODE_ACP_DIAGNOSTICS_LIFECYCLE;
-fs.appendFileSync(lifecyclePath, "start\\n");
-let stopped = false;
-function stop() {
-  if (!stopped) {
-    stopped = true;
-    fs.appendFileSync(lifecyclePath, "stop\\n");
-  }
-  process.exit(0);
-}
-process.on("SIGTERM", stop);
-process.on("SIGINT", stop);
+const worker = spawn(
+  process.execPath,
+  ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+  { stdio: "ignore" }
+);
+fs.appendFileSync(
+  lifecyclePath,
+  "start:" + process.pid + ":" + worker.pid + "\\n"
+);
+process.on("SIGTERM", () => {
+  fs.appendFileSync(lifecyclePath, "term:" + process.pid + "\\n");
+});
+process.on("SIGINT", () => {});
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
 let buffer = "";
 let sessionCounter = 0;
@@ -125,6 +128,22 @@ async function lifecycleEvents(): Promise<string[]> {
   }
 }
 
+function startedProcessIds(event: string): number[] {
+  return event
+    .split(":")
+    .slice(1)
+    .map((value) => Number(value));
+}
+
+function processExists(processId: number): boolean {
+  try {
+    process.kill(processId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
 test.beforeAll(async () => {
   await rm(DEMO_DIR, { recursive: true, force: true });
   await mkdir(BIN_DIR, { recursive: true });
@@ -184,9 +203,17 @@ test("shows redacted traffic and reuses restart and disconnect cleanup", async (
     await expect
       .poll(
         async () =>
-          (await lifecycleEvents()).filter((event) => event === "start").length
+          (await lifecycleEvents()).filter((event) =>
+            event.startsWith("start:")
+          ).length
       )
       .toBe(2);
+    const startsAfterRestart = (await lifecycleEvents()).filter((event) =>
+      event.startsWith("start:")
+    );
+    for (const processId of startedProcessIds(startsAfterRestart[0])) {
+      expect(processExists(processId)).toBe(false);
+    }
     await expect(input).toBeEnabled({ timeout: 10000 });
 
     const disconnect = window.locator(
@@ -195,12 +222,16 @@ test("shows redacted traffic and reuses restart and disconnect cleanup", async (
     await expect(disconnect).toBeVisible();
     await disconnect.click();
     await expect(frame.locator("#status-text")).toHaveText("Disconnected");
+    const activeStart = (await lifecycleEvents())
+      .filter((event) => event.startsWith("start:"))
+      .at(-1)!;
     await expect
-      .poll(
-        async () =>
-          (await lifecycleEvents()).filter((event) => event === "stop").length
+      .poll(() =>
+        startedProcessIds(activeStart).every(
+          (processId) => !processExists(processId)
+        )
       )
-      .toBe(2);
+      .toBe(true);
   } finally {
     await closeVSCode(host);
   }

@@ -102,6 +102,7 @@ interface MockACPClient {
   setOnRequestPermission: (callback: any) => void;
   isConnected: () => boolean;
   getState: () => ACPConnectionState;
+  disconnect: () => Promise<void>;
   connect: () => Promise<void>;
   newSession: (params: NewSessionRequest) => Promise<void>;
   sendMessage: (text: string) => Promise<{ stopReason: string }>;
@@ -276,6 +277,9 @@ class TestACPClient implements MockACPClient {
   }
   getState(): ACPConnectionState {
     return this.isConnected() ? "connected" : "disconnected";
+  }
+  async disconnect(): Promise<void> {
+    this.dispose();
   }
   async connect(): Promise<void> {}
   async newSession(_params: NewSessionRequest): Promise<void> {}
@@ -1969,14 +1973,135 @@ suite("ChatViewProvider", () => {
         this.currentSessionId = "replacement-session";
       }
 
-      dispose(): void {
-        this.calls.push("dispose");
+      async disconnect(): Promise<void> {
+        this.calls.push("disconnect");
         this.currentSessionId = null;
         if (this.connectionState !== "disconnected") {
           this.connectionState = "disconnected";
           this.emitStateChange("disconnected");
         }
       }
+
+      dispose(): void {
+        void this.disconnect();
+      }
+    }
+
+    for (const blockedOperation of ["initialize", "new", "load"] as const) {
+      test(`disconnect interrupts a blocked ${blockedOperation} transition`, async () => {
+        let markStarted!: () => void;
+        let releaseBlocked!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        const blocked = new Promise<void>((resolve) => {
+          releaseBlocked = resolve;
+        });
+
+        class BlockedClient extends TestACPClient {
+          public disconnectCalled = false;
+          private connectionState:
+            | "disconnected"
+            | "connecting"
+            | "connected"
+            | "error" =
+            blockedOperation === "initialize" ? "disconnected" : "connected";
+
+          getState(): "disconnected" | "connecting" | "connected" | "error" {
+            return this.connectionState;
+          }
+
+          isConnected(): boolean {
+            return this.connectionState === "connected";
+          }
+
+          async connect(): Promise<void> {
+            if (blockedOperation !== "initialize") {
+              return;
+            }
+            this.connectionState = "connecting";
+            markStarted();
+            await blocked;
+            throw new RequestError(-32800, "Request cancelled");
+          }
+
+          async newSession(): Promise<void> {
+            if (blockedOperation !== "new") {
+              return;
+            }
+            markStarted();
+            await blocked;
+            throw new RequestError(-32800, "Request cancelled");
+          }
+
+          supportsSessionLoad(): boolean {
+            return blockedOperation === "load";
+          }
+
+          async loadSession(): Promise<void> {
+            if (blockedOperation !== "load") {
+              return;
+            }
+            markStarted();
+            await blocked;
+            throw new RequestError(-32800, "Request cancelled");
+          }
+
+          async disconnect(): Promise<void> {
+            this.disconnectCalled = true;
+            this.connectionState = "disconnected";
+            this.emitStateChange("disconnected");
+            releaseBlocked();
+          }
+
+          dispose(): void {
+            void this.disconnect();
+          }
+        }
+
+        const client = new BlockedClient();
+        const provider = new ChatViewProvider(
+          mockExtensionUri,
+          client as unknown as ACPClient,
+          memento as unknown as vscode.Memento
+        );
+        const lifecycle = provider as unknown as {
+          connect(): Promise<void>;
+          disconnectAgent(): Promise<void>;
+          loadStoredSession(session: {
+            sessionId: string;
+            agentId: string;
+            cwd: string;
+            createdAt: number;
+            lastUsedAt: number;
+            preview: string;
+            messageCount: number;
+          }): Promise<void>;
+        };
+        const operation =
+          blockedOperation === "load"
+            ? lifecycle.loadStoredSession({
+                sessionId: "blocked-session",
+                agentId: "test-agent",
+                cwd: process.cwd(),
+                createdAt: 1,
+                lastUsedAt: 1,
+                preview: "Blocked session",
+                messageCount: 1,
+              })
+            : lifecycle.connect();
+        await started;
+
+        const teardown = lifecycle.disconnectAgent();
+        await Promise.resolve();
+        const interrupted = client.disconnectCalled;
+        if (!interrupted) {
+          releaseBlocked();
+        }
+        await Promise.allSettled([operation, teardown]);
+
+        assert.strictEqual(interrupted, true);
+      });
     }
 
     test("disconnect reuses cleanup and revokes pending permissions", async () => {
@@ -2004,7 +2129,7 @@ suite("ChatViewProvider", () => {
 
       await lifecycle.disconnectAgent();
 
-      assert.deepStrictEqual(client.calls, ["dispose"]);
+      assert.deepStrictEqual(client.calls, ["disconnect"]);
       assert.deepStrictEqual(await permission, {
         outcome: { outcome: "cancelled" },
       });
@@ -2053,19 +2178,31 @@ suite("ChatViewProvider", () => {
 
       const restarting = lifecycle.restartAgent();
       await cleanupStarted;
-      assert.deepStrictEqual(client.calls, ["dispose", "cleanupTerminals"]);
+      assert.deepStrictEqual(client.calls, ["disconnect", "cleanupTerminals"]);
 
       releaseCleanup();
       await restarting;
 
       assert.deepStrictEqual(client.calls, [
-        "dispose",
+        "disconnect",
         "cleanupTerminals",
         "connect",
         "newSession",
       ]);
       assert.strictEqual(lifecycle.hasSession, true);
-      assert.ok(messages.some((entry) => entry.type === "chatCleared"));
+      const clearIndex = messages.findIndex(
+        (entry) => entry.type === "chatCleared"
+      );
+      const connectedIndex = messages.findIndex(
+        (entry) =>
+          entry.type === "connectionState" && entry.state === "connected"
+      );
+      const metadataIndex = messages.findIndex(
+        (entry) => entry.type === "sessionMetadata"
+      );
+      assert.ok(clearIndex >= 0);
+      assert.ok(clearIndex < connectedIndex);
+      assert.ok(clearIndex < metadataIndex);
       assert.deepStrictEqual(
         messages.filter((entry) => entry.type === "sessionTransition").at(-1),
         { type: "sessionTransition", active: false }

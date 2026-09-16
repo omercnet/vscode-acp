@@ -1,5 +1,6 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
+import { join } from "path";
 import * as acp from "@agentclientprotocol/sdk";
 import { ACPDiagnostics } from "./diagnostics";
 import {
@@ -495,6 +496,145 @@ export type SpawnFunction = (
   options: SpawnOptions
 ) => ChildProcess;
 
+const AGENT_TERMINATION_GRACE_MS = 1000;
+
+function hasExited(child: ChildProcess): boolean {
+  return (
+    typeof child.exitCode === "number" || typeof child.signalCode === "string"
+  );
+}
+
+function processGroupExists(processId: number): boolean {
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForProcessGroupExit(processId: number): Promise<boolean> {
+  const deadline = Date.now() + AGENT_TERMINATION_GRACE_MS;
+  while (processGroupExists(processId)) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+function waitForChildExit(child: ChildProcess): Promise<boolean> {
+  if (hasExited(child)) {
+    return Promise.resolve(true);
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timeout = setTimeout(
+      () => finish(hasExited(child)),
+      AGENT_TERMINATION_GRACE_MS
+    );
+    child.once("exit", onExit);
+  });
+}
+
+function runTerminationCommand(command: string, args: string[]): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = nodeSpawn(command, args, {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish();
+    }, AGENT_TERMINATION_GRACE_MS);
+    child.once("error", finish);
+    child.once("close", finish);
+  });
+}
+
+async function terminateAgentProcessTree(child: ChildProcess): Promise<void> {
+  const processId = child.pid;
+  if (process.platform === "win32" && processId) {
+    const windowsRoot =
+      process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
+    const taskkill = join(windowsRoot, "System32", "taskkill.exe");
+    await runTerminationCommand(taskkill, ["/pid", String(processId), "/T"]);
+    if (await waitForChildExit(child)) {
+      return;
+    }
+    await runTerminationCommand(taskkill, [
+      "/pid",
+      String(processId),
+      "/T",
+      "/F",
+    ]);
+    if (await waitForChildExit(child)) {
+      return;
+    }
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+
+  if (processId && processGroupExists(processId)) {
+    try {
+      process.kill(-processId, "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw new Error("Failed to terminate ACP agent process tree");
+      }
+    }
+    if (await waitForProcessGroupExit(processId)) {
+      return;
+    }
+    try {
+      process.kill(-processId, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw new Error("Failed to terminate ACP agent process tree");
+      }
+    }
+    if (await waitForProcessGroupExit(processId)) {
+      return;
+    }
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child)) {
+    return;
+  }
+  child.kill("SIGKILL");
+  if (!(await waitForChildExit(child))) {
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+}
+
 export interface ACPClientOptions {
   agentConfig?: AgentConfig;
   spawn?: SpawnFunction;
@@ -556,6 +696,7 @@ export class ACPClient {
   private spawnFn: SpawnFunction;
   private resolutionOptions: () => AgentCommandResolutionOptions;
   private diagnostics: ACPDiagnostics | null;
+  private processTermination: Promise<void> = Promise.resolve();
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
@@ -762,6 +903,10 @@ export class ACPClient {
     this.setState("connecting");
 
     try {
+      await this.processTermination;
+      if (attemptGeneration !== this.connectionGeneration) {
+        throw new Error("Connection attempt was disposed");
+      }
       console.log(
         `[ACP] Launching ${this.agentConfig.name} via ${launch.source}`
       );
@@ -771,6 +916,7 @@ export class ACPClient {
           cwd: launch.cwd,
           env: createAgentEnvironment(resolutionOptions),
           shell: false,
+          detached: process.platform !== "win32",
         });
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code ?? "unknown";
@@ -1007,9 +1153,13 @@ export class ACPClient {
       if (this.connection === connection) {
         this.connection = null;
       }
+      let processCleanup: Promise<void> | null = null;
       if (this.process === child) {
-        child?.kill();
         this.process = null;
+        processCleanup = child ? this.queueProcessTermination(child) : null;
+      }
+      if (processCleanup) {
+        await processCleanup;
       }
       if (isCurrentAttempt) {
         this.currentSessionId = null;
@@ -1678,15 +1828,13 @@ export class ACPClient {
     });
   }
 
-  dispose(): void {
+  disconnect(): Promise<void> {
     ++this.connectionGeneration;
     ++this.sessionRequestGeneration;
     this.connection?.close();
     this.connection = null;
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
-    }
+    const child = this.process;
+    this.process = null;
     this.currentSessionId = null;
     this.agentInfo = null;
     this.sessionMetadata = null;
@@ -1710,6 +1858,24 @@ export class ACPClient {
     this.activePrompt = null;
     this.authenticationMethods = [];
     this.setState("disconnected");
+    return child ? this.queueProcessTermination(child) : this.processTermination;
+  }
+
+  dispose(): void {
+    void this.disconnect().catch(() => {
+      console.error("[ACP] Failed to terminate agent process tree");
+    });
+  }
+
+  private queueProcessTermination(child: ChildProcess): Promise<void> {
+    const previous = this.processTermination.catch(() => undefined);
+    const current = Promise.all([
+      previous,
+      terminateAgentProcessTree(child),
+    ]).then(() => undefined);
+    current.catch(() => undefined);
+    this.processTermination = current;
+    return current;
   }
 
   private setState(state: ACPConnectionState): void {

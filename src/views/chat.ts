@@ -1018,21 +1018,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async disconnectAgent(): Promise<void> {
+    const cleanup = this.disconnectCurrentAgent();
+    void cleanup.catch(() => undefined);
     await this.runSessionTransition("Disconnecting agent…", async () => {
-      await this.disconnectCurrentAgent();
+      await cleanup;
     });
   }
 
   public async restartAgent(): Promise<void> {
+    const cleanup = this.disconnectCurrentAgent();
+    void cleanup.catch(() => undefined);
+    this.clearPendingAttachments();
+    this.postMessage({ type: "chatCleared" });
     await this.runSessionTransition("Restarting agent…", async () => {
-      await this.disconnectCurrentAgent();
+      await cleanup;
       const generation = this.conversationGeneration;
       try {
         await this.startWorkspaceSession(generation);
-        if (this.isCurrentConversation(generation)) {
-          this.clearPendingAttachments();
-          this.postMessage({ type: "chatCleared" });
-        }
       } catch (error) {
         throw this.mcpSecretRedactor.redactError(error);
       }
@@ -2548,14 +2550,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async disconnectCurrentAgent(): Promise<void> {
+  private disconnectCurrentAgent(): Promise<void> {
     const wasDisconnected = this.acpClient.getState() === "disconnected";
-    this.acpClient.dispose();
+    const agentCleanup = this.acpClient.disconnect();
     if (wasDisconnected) {
       this.handleConnectionEnded();
     }
-    await this.terminalCleanup;
-    this.mcpSecretRedactor.clear();
+    return Promise.all([agentCleanup, this.terminalCleanup]).then(() => {
+      this.mcpSecretRedactor.clear();
+    });
   }
 
   private async disposeTerminals(): Promise<void> {
