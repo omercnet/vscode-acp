@@ -2,9 +2,16 @@ import * as vscode from "vscode";
 import { ACPClient, formatACPError } from "./acp/client";
 import { ChatViewProvider } from "./views/chat";
 import type { AgentCommandResolutionOptions } from "./acp/agentCommand";
+import { selectAgentPaths } from "./acp/agentPaths";
+import {
+  AgentSessionTreeProvider,
+  type AgentSessionTreeNode,
+  type SessionOpenMode,
+} from "./views/sessions";
 
 let acpClient: ACPClient | undefined;
 let chatProvider: ChatViewProvider | undefined;
+let sessionTreeProvider: AgentSessionTreeProvider | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 const CHAT_VIEW_LOCATION_INITIALIZED = "vscode-acp.chatViewSecondarySidebarV1";
 
@@ -28,6 +35,16 @@ export async function activate(
           .map((folder) => folder.uri.fsPath)
           .filter((path) => path !== ""),
   });
+  const getAgentDiscoveryOptions = () => {
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
+    return {
+      ...getAgentResolutionOptions(),
+      agentPaths: selectAgentPaths(
+        configuration.inspect<Record<string, string>>("agentPaths"),
+        vscode.workspace.isTrusted
+      ),
+    };
+  };
   acpClient = new ACPClient({ resolutionOptions: getAgentResolutionOptions });
   chatProvider = new ChatViewProvider(
     context.extensionUri,
@@ -35,6 +52,14 @@ export async function activate(
     context.globalState,
     context.workspaceState,
     getAgentResolutionOptions
+  );
+  sessionTreeProvider = new AgentSessionTreeProvider(
+    context.workspaceState,
+    getAgentDiscoveryOptions,
+    async (request) => {
+      await vscode.commands.executeCommand("vscode-acp.chatView.focus");
+      return (await chatProvider?.openAgentSession(request)) ?? false;
+    }
   );
 
   statusBarItem = vscode.window.createStatusBarItem(
@@ -61,6 +86,21 @@ export async function activate(
         },
       }
     )
+  );
+  context.subscriptions.push(
+    sessionTreeProvider,
+    vscode.window.createTreeView(AgentSessionTreeProvider.viewType, {
+      treeDataProvider: sessionTreeProvider,
+      showCollapseAll: true,
+    }),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("vscode-acp.agentPaths")) {
+        sessionTreeProvider?.refresh();
+      }
+    }),
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      sessionTreeProvider?.refresh();
+    })
   );
   if (!context.globalState.get<boolean>(CHAT_VIEW_LOCATION_INITIALIZED)) {
     await vscode.commands.executeCommand("vscode.moveViews", {
@@ -131,6 +171,52 @@ export async function activate(
       await chatProvider?.deleteSession();
     })
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("vscode-acp.sessions.refresh", () => {
+      sessionTreeProvider?.refresh();
+    }),
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.refreshAgent",
+      async (agentId: string) => {
+        sessionTreeProvider?.refresh(agentId);
+      }
+    ),
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.loadMore",
+      async (agentId: string) => {
+        await sessionTreeProvider?.loadMore(agentId);
+      }
+    ),
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.authenticate",
+      async (agentId: string) => {
+        await sessionTreeProvider?.authenticate(agentId);
+      }
+    )
+  );
+
+  const openTreeSession = async (
+    node: AgentSessionTreeNode,
+    mode?: SessionOpenMode
+  ): Promise<void> => {
+    if (node?.kind === "session") {
+      await sessionTreeProvider?.openSession(node, mode);
+    }
+  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.open",
+      (node: AgentSessionTreeNode) => openTreeSession(node)
+    ),
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.load",
+      (node: AgentSessionTreeNode) => openTreeSession(node, "load")
+    ),
+    vscode.commands.registerCommand(
+      "vscode-acp.sessions.resume",
+      (node: AgentSessionTreeNode) => openTreeSession(node, "resume")
+    )
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("vscode-acp.clearChat", () => {
@@ -142,6 +228,7 @@ export async function activate(
     dispose: () => {
       chatProvider?.dispose();
       acpClient?.dispose();
+      sessionTreeProvider?.dispose();
     },
   });
 }
@@ -185,4 +272,5 @@ export function deactivate() {
   console.log("VSCode ACP extension deactivating");
   chatProvider?.dispose();
   acpClient?.dispose();
+  sessionTreeProvider?.dispose();
 }

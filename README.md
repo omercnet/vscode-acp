@@ -73,7 +73,11 @@ You can keep typing while attachments are prepared, but Send waits until their c
 
 ### Session History
 
-Sessions are stored in the current workspace after the first completed turn. Use **ACP: Load Session** to restore a saved conversation when the selected agent advertises ACP `loadSession`; the conversation is replayed before it accepts new prompts. **ACP: New Chat** starts a separate session. **ACP: Delete Session** removes an entry from this workspace's history only; it does not delete the agent's underlying conversation.
+The **Agent Sessions** tree connects to each available agent independently, probes its advertised capabilities, and pages through agent-owned sessions when `sessionCapabilities.list` is advertised. A complete agent listing becomes authoritative for that agent; partial pages and failed refreshes leave recoverable workspace history intact. Agents without listing support use this workspace history as the fallback when they advertise the top-level `loadSession` capability or `sessionCapabilities.resume`.
+
+Opening a listed session deliberately chooses **Load Session with History** or **Resume Session without History**. Loading replays prior messages before accepting prompts. Resuming continues the agent context without replaying history. Authentication, stale sessions, unsupported agents, empty results, retryable errors, and additional pages appear as actionable tree states.
+
+Sessions are stored in the current workspace after the first completed turn, when a listed or saved session is opened, or when an agent-owned listing is fully reconciled, provided `sessions.autoSave` is enabled. **ACP: Load Session** restores a saved conversation using loading when available, otherwise resuming. **ACP: New Chat** starts a separate session. **ACP: Delete Session** removes an entry from this workspace's history only; it does not delete the agent's underlying conversation.
 
 | Setting                          | Default | Effect                                                             |
 | -------------------------------- | ------- | ------------------------------------------------------------------ |

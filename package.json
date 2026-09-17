@@ -92,6 +92,46 @@
         "title": "Delete Session",
         "category": "ACP",
         "icon": "$(trash)"
+      },
+      {
+        "command": "vscode-acp.sessions.refresh",
+        "title": "Refresh Sessions",
+        "category": "ACP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-acp.sessions.refreshAgent",
+        "title": "Retry Session Discovery",
+        "category": "ACP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-acp.sessions.loadMore",
+        "title": "Load More Sessions",
+        "category": "ACP"
+      },
+      {
+        "command": "vscode-acp.sessions.open",
+        "title": "Open Session",
+        "category": "ACP"
+      },
+      {
+        "command": "vscode-acp.sessions.load",
+        "title": "Load Session with History",
+        "category": "ACP",
+        "icon": "$(history)"
+      },
+      {
+        "command": "vscode-acp.sessions.resume",
+        "title": "Resume Session without History",
+        "category": "ACP",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "vscode-acp.sessions.authenticate",
+        "title": "Sign In to Agent",
+        "category": "ACP",
+        "icon": "$(account)"
       }
     ],
     "viewsContainers": {
@@ -111,6 +151,12 @@
           "name": "Chat",
           "icon": "$(comment-discussion)",
           "contextualTitle": "ACP Chat"
+        },
+        {
+          "id": "vscode-acp.sessionsView",
+          "name": "Agent Sessions",
+          "icon": "$(history)",
+          "contextualTitle": "ACP Agent Sessions"
         }
       ]
     },
@@ -135,6 +181,23 @@
           "command": "vscode-acp.clearChat",
           "when": "view == vscode-acp.chatView",
           "group": "navigation@4"
+        },
+        {
+          "command": "vscode-acp.sessions.refresh",
+          "when": "view == vscode-acp.sessionsView",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vscode-acp.sessions.load",
+          "when": "view == vscode-acp.sessionsView && viewItem =~ /vscode-acp\\.session\\.(load|load-resume)/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-acp.sessions.resume",
+          "when": "view == vscode-acp.sessionsView && viewItem =~ /vscode-acp\\.session\\.(resume|load-resume)/",
+          "group": "inline@2"
         }
       ],
       "editor/context": [
@@ -168,6 +231,30 @@
         {
           "command": "vscode-acp.deleteSession",
           "when": "true"
+        },
+        {
+          "command": "vscode-acp.sessions.refreshAgent",
+          "when": "false"
+        },
+        {
+          "command": "vscode-acp.sessions.loadMore",
+          "when": "false"
+        },
+        {
+          "command": "vscode-acp.sessions.open",
+          "when": "false"
+        },
+        {
+          "command": "vscode-acp.sessions.load",
+          "when": "false"
+        },
+        {
+          "command": "vscode-acp.sessions.resume",
+          "when": "false"
+        },
+        {
+          "command": "vscode-acp.sessions.authenticate",
+          "when": "false"
         }
       ]
     },

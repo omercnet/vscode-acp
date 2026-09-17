@@ -72,6 +72,17 @@ import {
   type FileAttachment,
   type PromptAttachment,
 } from "../shared/attachments";
+import {
+  readStoredSessions,
+  DEFAULT_SESSION_HISTORY_LIMIT,
+  updateStoredSessions,
+  type StoredSession,
+} from "../sessions";
+import type {
+  AgentSessionOpenRequest,
+  SessionOpenMode,
+} from "./sessions";
+
 interface WebviewToolLocation {
   path: string;
   label: string;
@@ -85,21 +96,10 @@ const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 
-const SESSION_HISTORY_KEY = "vscode-acp.sessionHistory";
-const DEFAULT_SESSION_HISTORY_LIMIT = 50;
-
-interface StoredSession {
-  sessionId: string;
-  agentId: string;
-  cwd: string;
-  configurationResource?: string;
-  createdAt: number;
-  lastUsedAt: number;
-  preview: string;
-  messageCount: number;
-}
-
-type SessionContext = Pick<StoredSession, "cwd" | "configurationResource">;
+type SessionContext = Pick<
+  StoredSession,
+  "cwd" | "configurationResource" | "additionalDirectories"
+>;
 
 interface ReplayMessage {
   role: "user" | "assistant";
@@ -607,7 +607,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly acpClient: ACPClient,
     globalState: vscode.Memento,
     workspaceState: vscode.Memento = globalState,
-    private readonly getAgentResolutionOptions: () => AgentCommandResolutionOptions = () => ({})
+    private readonly getAgentResolutionOptions: () => AgentCommandResolutionOptions = () => ({}),
+    private readonly shouldPersistSessions: () => boolean = () =>
+      vscode.workspace
+        .getConfiguration("vscode-acp")
+        .get<boolean>("sessions.autoSave", true)
   ) {
     this.globalState = globalState;
     this.workspaceState = workspaceState;
@@ -1032,11 +1036,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       if (mode === "load") {
         await this.ensureConnection();
       }
-      if (mode === "load" && !this.acpClient.supportsSessionLoad()) {
-        vscode.window.showErrorMessage(
-          "The selected agent does not support loading previous sessions."
-        );
-        return;
+      if (mode === "load") {
+        const capabilities = this.acpClient.getSessionCapabilities();
+        if (!capabilities.load && !capabilities.resume) {
+          vscode.window.showErrorMessage(
+            "The selected agent does not support loading or resuming previous sessions."
+          );
+          return;
+        }
       }
 
       const sessions = this.getStoredSessions().filter(
@@ -1072,29 +1079,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.settleSessionLock();
       return;
     }
-    await this.loadStoredSession(session);
+    const capabilities = this.acpClient.getSessionCapabilities();
+    const mode: SessionOpenMode = capabilities.load ? "load" : "resume";
+    await this.openAgentSession({ ...session, mode });
   }
 
   private async handleDeleteStoredSession(sessionId: string): Promise<void> {
-    const session = this.getStoredSessions().find(
-      (entry) =>
-        entry.sessionId === sessionId &&
-        entry.agentId === this.acpClient.getAgentId()
-    );
-    if (!session) {
-      return;
-    }
-
+    const agentId = this.acpClient.getAgentId();
     try {
-      await this.workspaceState.update(
-        SESSION_HISTORY_KEY,
-        this.getStoredSessions().filter(
+      let deleted = false;
+      await updateStoredSessions(this.workspaceState, (history) => {
+        const updated = history.filter(
           (entry) =>
-            entry.sessionId !== session.sessionId ||
-            entry.agentId !== session.agentId
-        )
-      );
-      this.postMessage({ type: "sessionDeleted", sessionId });
+            entry.sessionId !== sessionId || entry.agentId !== agentId
+        );
+        deleted = updated.length !== history.length;
+        return updated;
+      });
+      if (deleted) {
+        this.postMessage({ type: "sessionDeleted", sessionId });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postMessage({
@@ -1105,33 +1109,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private getStoredSessions(): StoredSession[] {
-    const value = this.workspaceState.get<unknown>(SESSION_HISTORY_KEY);
-    if (!Array.isArray(value)) {
-      return [];
-    }
-
-    return value.filter(
-      (session): session is StoredSession =>
-        typeof session === "object" &&
-        session !== null &&
-        typeof session.sessionId === "string" &&
-        typeof session.agentId === "string" &&
-        typeof session.cwd === "string" &&
-        (session.configurationResource === undefined ||
-          typeof session.configurationResource === "string") &&
-        typeof session.createdAt === "number" &&
-        typeof session.lastUsedAt === "number" &&
-        typeof session.preview === "string" &&
-        typeof session.messageCount === "number"
-    );
+    return readStoredSessions(this.workspaceState);
   }
 
   private async saveCurrentSession(preview?: string): Promise<void> {
-    const configuration = vscode.workspace.getConfiguration("vscode-acp");
-    if (!configuration.get<boolean>("sessions.autoSave", true)) {
+    if (!this.shouldPersistSessions()) {
       return;
     }
-
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
     const sessionId = this.acpClient.getCurrentSessionId();
     if (!sessionId) {
       return;
@@ -1149,136 +1134,287 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       cwd: workspaceFolder?.uri.fsPath || process.cwd(),
       configurationResource: workspaceFolder?.uri.toString(),
     };
-    const cwd = sessionContext.cwd;
-    const history = this.getStoredSessions();
-    const existing = history.find(
-      (session) =>
-        session.sessionId === sessionId &&
-        session.agentId === this.acpClient.getAgentId()
-    );
+    const agentId = this.acpClient.getAgentId();
     const normalizedPreview = preview
       ?.replace(/\s+/g, " ")
       .trim()
       .slice(0, 120);
     const now = Date.now();
-    const entry: StoredSession = {
-      sessionId,
-      agentId: this.acpClient.getAgentId(),
-      configurationResource: sessionContext.configurationResource,
-      cwd,
-      createdAt: existing?.createdAt ?? now,
-      lastUsedAt: now,
-      preview: normalizedPreview || existing?.preview || "",
-      messageCount: (existing?.messageCount ?? 0) + (preview ? 1 : 0),
-    };
-    const updatedHistory = [
-      entry,
-      ...history.filter(
+    await updateStoredSessions(this.workspaceState, (history) => {
+      const existing = history.find(
         (session) =>
-          session.sessionId !== sessionId ||
-          session.agentId !== this.acpClient.getAgentId()
-      ),
-    ]
-      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-      .slice(0, limit);
-
-    await this.workspaceState.update(SESSION_HISTORY_KEY, updatedHistory);
+          session.sessionId === sessionId && session.agentId === agentId
+      );
+      const entry: StoredSession = {
+        sessionId,
+        agentId,
+        configurationResource: sessionContext.configurationResource,
+        cwd: sessionContext.cwd,
+        ...(sessionContext.additionalDirectories?.length
+          ? {
+              additionalDirectories: [
+                ...sessionContext.additionalDirectories,
+              ],
+            }
+          : {}),
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+        preview: normalizedPreview || existing?.preview || "",
+        messageCount: (existing?.messageCount ?? 0) + (preview ? 1 : 0),
+      };
+      return [
+        entry,
+        ...history.filter(
+          (session) =>
+            session.sessionId !== sessionId || session.agentId !== agentId
+        ),
+      ]
+        .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+        .slice(0, limit);
+    });
   }
 
   private async loadStoredSession(session: StoredSession): Promise<void> {
-    await this.runSessionTransition("Restoring conversation…", async () => {
-      const previousSessionContext = this.activeSessionContext;
-      const hadSession = this.hasSession;
-      const hadRestoredModeModel = this.hasRestoredModeModel;
-      const generation = ++this.conversationGeneration;
-      this.expirePermissionRequests();
-      await this.disposeTerminals();
-      if (!this.isCurrentConversation(generation)) {
-        return;
-      }
-      this.isReplaying = true;
-      this.replayGeneration = generation;
-      this.replayMessages = [];
-      this.postMessage({ type: "replayStart" });
+    await this.openAgentSession({ ...session, mode: "load" });
+  }
 
-      try {
-        await this.ensureConnection();
+  public async openAgentSession(
+    request: AgentSessionOpenRequest
+  ): Promise<boolean> {
+    let opened = false;
+    await this.runSessionTransition(
+      request.mode === "load"
+        ? "Loading conversation history…"
+        : "Resuming conversation…",
+      async () => {
+        const sameAgent = this.acpClient.getAgentId() === request.agentId;
+        const agent = sameAgent
+          ? undefined
+          : this.getConfiguredAgent(request.agentId);
+        if (!sameAgent && !agent) {
+          throw new Error("The selected agent is no longer configured");
+        }
+        const previousSessionContext = this.activeSessionContext;
+        const hadSession = sameAgent && this.hasSession;
+        const hadRestoredModeModel = sameAgent && this.hasRestoredModeModel;
+        let generation = ++this.conversationGeneration;
+        this.expirePermissionRequests();
+        await this.disposeTerminals();
         if (!this.isCurrentConversation(generation)) {
           return;
         }
-        const resource = session.configurationResource
-          ? vscode.Uri.parse(session.configurationResource)
-          : undefined;
-        const parameters = await this.getSessionParameters(
-          session.cwd,
-          resource,
-          generation
-        );
-        if (!parameters || !this.isCurrentConversation(generation)) {
-          return;
+
+        if (!sameAgent) {
+          this.mcpSecretRedactor.clear();
+          this.acpClient.setAgent(agent!);
+          generation = ++this.conversationGeneration;
+          void Promise.resolve(
+            this.globalState.update(SELECTED_AGENT_KEY, request.agentId)
+          ).catch(() => {
+            console.warn("[Chat] Failed to persist selected agent");
+          });
+          this.hasSession = false;
+          this.activeSessionContext = null;
+          this.clearPendingAttachments();
+          this.postMessage({ type: "agentChanged", agentId: request.agentId });
+          this.postMessage({
+            type: "sessionMetadata",
+            modes: null,
+            models: null,
+            commands: null,
+          });
+          this.sendAgentStatus();
         }
-        const request = {
-          sessionId: session.sessionId,
-          ...parameters,
-        };
-        await this.acpClient.loadSession(request);
-        if (!this.isCurrentConversation(generation)) {
-          return;
+
+        this.isReplaying = request.mode === "load";
+        this.replayGeneration = this.isReplaying ? generation : null;
+        this.replayMessages = [];
+        if (this.isReplaying) {
+          this.postMessage({ type: "replayStart" });
         }
-        this.activeSessionContext = {
-          cwd: session.cwd,
-          configurationResource: session.configurationResource,
-        };
-        this.hasSession = true;
-        this.hasRestoredModeModel = false;
-        const history = this.getStoredSessions().map((entry) =>
+
+        try {
+          await this.ensureConnection();
+          if (!this.isCurrentConversation(generation)) {
+            return;
+          }
+          const capabilities = this.acpClient.getSessionCapabilities();
+          if (!capabilities[request.mode]) {
+            throw new Error(
+              request.mode === "load"
+                ? "Agent does not support session loading"
+                : "Agent does not support session resuming"
+            );
+          }
+          const resource = request.configurationResource
+            ? vscode.Uri.parse(request.configurationResource)
+            : (vscode.workspace.workspaceFolders ?? []).find((folder) => {
+                const fromRoot = relative(folder.uri.fsPath, request.cwd);
+                return (
+                  fromRoot === "" ||
+                  (!fromRoot.startsWith("..") && !isAbsolute(fromRoot))
+                );
+              })?.uri;
+          const parameters = await this.getSessionParameters(
+            request.cwd,
+            resource,
+            generation
+          );
+          if (!parameters || !this.isCurrentConversation(generation)) {
+            return;
+          }
+          const sessionRequest = {
+            sessionId: request.sessionId,
+            ...parameters,
+            ...(capabilities.additionalDirectories &&
+            request.additionalDirectories?.length
+              ? {
+                  additionalDirectories: [
+                    ...request.additionalDirectories,
+                  ],
+                }
+              : {}),
+          };
+          await this.requestSessionWithAuthentication(
+            () =>
+              request.mode === "load"
+                ? this.acpClient.loadSession(sessionRequest)
+                : this.acpClient.resumeSession(sessionRequest),
+            generation,
+            request.mode === "load"
+              ? () => {
+                  this.replayMessages = [];
+                }
+              : undefined
+          );
+          if (!this.isCurrentConversation(generation)) {
+            return;
+          }
+
+          this.activeSessionContext = {
+            cwd: request.cwd,
+            configurationResource:
+              request.configurationResource ?? resource?.toString(),
+            ...(sessionRequest.additionalDirectories?.length
+              ? {
+                  additionalDirectories: [
+                    ...sessionRequest.additionalDirectories,
+                  ],
+                }
+              : {}),
+          };
+          this.hasSession = true;
+          this.hasRestoredModeModel = false;
+          await this.touchStoredSession({
+            ...request,
+            configurationResource:
+              request.configurationResource ?? resource?.toString(),
+            additionalDirectories:
+              sessionRequest.additionalDirectories ?? [],
+          }).catch(() => {
+            console.warn("[Chat] Failed to update session metadata");
+          });
+          if (
+            !this.isCurrentConversation(generation) ||
+            this.acpClient.getAgentId() !== request.agentId ||
+            this.acpClient.getCurrentSessionId() !== request.sessionId
+          ) {
+            return;
+          }
+          this.isReplaying = false;
+          this.replayGeneration = null;
+          this.clearPendingAttachments();
+          if (request.mode === "load") {
+            this.postMessage({
+              type: "replayComplete",
+              messages: this.replayMessages.map((message) => ({
+                role: message.role,
+                text: message.text,
+                ...(message.attachments.length > 0
+                  ? { attachments: message.attachments }
+                  : {}),
+              })),
+            });
+          } else {
+            this.postMessage({ type: "chatCleared" });
+            vscode.window.showInformationMessage(
+              "Session resumed without replaying conversation history."
+            );
+          }
+          this.replayMessages = [];
+          this.sendSessionMetadata();
+          opened = true;
+        } catch (error) {
+          if (!this.isCurrentConversation(generation)) {
+            return;
+          }
+          const redacted = this.mcpSecretRedactor.redactError(error);
+          this.isReplaying = false;
+          this.replayGeneration = null;
+          this.replayMessages = [];
+          this.hasSession = hadSession;
+          this.hasRestoredModeModel = hadRestoredModeModel;
+          this.activeSessionContext = sameAgent
+            ? previousSessionContext
+            : null;
+          this.postMessage({
+            type: "replayFailed",
+            text: formatACPError(redacted),
+          });
+          this.sendSessionMetadata();
+          throw redacted;
+        }
+      }
+    );
+    return opened;
+  }
+
+  private async touchStoredSession(
+    session: AgentSessionOpenRequest
+  ): Promise<void> {
+    if (!this.shouldPersistSessions()) {
+      return;
+    }
+    const configuration = vscode.workspace.getConfiguration("vscode-acp");
+    const configuredLimit = configuration.get<number>(
+      "sessions.maxHistory",
+      DEFAULT_SESSION_HISTORY_LIMIT
+    );
+    const limit = Number.isFinite(configuredLimit)
+      ? Math.max(1, Math.min(200, Math.floor(configuredLimit)))
+      : DEFAULT_SESSION_HISTORY_LIMIT;
+    const now = Date.now();
+    await updateStoredSessions(this.workspaceState, (history) => {
+      const existing = history.find(
+        (entry) =>
           entry.sessionId === session.sessionId &&
           entry.agentId === session.agentId
-            ? { ...entry, lastUsedAt: Date.now() }
-            : entry
-        );
-        void Promise.resolve(
-          this.workspaceState.update(
-            SESSION_HISTORY_KEY,
-            history.sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-          )
-        ).catch((error: unknown) =>
-          console.warn("[Chat] Failed to update session metadata:", error)
-        );
-        this.isReplaying = false;
-        this.replayGeneration = null;
-        this.clearPendingAttachments();
-        this.postMessage({
-          type: "replayComplete",
-          messages: this.replayMessages.map((message) => ({
-            role: message.role,
-            text: message.text,
-            ...(message.attachments.length > 0
-              ? { attachments: message.attachments }
-              : {}),
-          })),
-        });
-        this.replayMessages = [];
-        this.sendSessionMetadata();
-      } catch (error) {
-        if (!this.isCurrentConversation(generation)) {
-          return;
-        }
-        const redacted = this.mcpSecretRedactor.redactError(error);
-
-        this.isReplaying = false;
-        this.replayGeneration = null;
-        this.replayMessages = [];
-        this.hasSession = hadSession;
-        this.hasRestoredModeModel = hadRestoredModeModel;
-        this.activeSessionContext = previousSessionContext;
-        this.postMessage({
-          type: "replayFailed",
-          text: formatACPError(redacted),
-        });
-        this.sendSessionMetadata();
-        throw redacted;
-      }
+      );
+      const updated: StoredSession = {
+        sessionId: session.sessionId,
+        agentId: session.agentId,
+        cwd: session.cwd,
+        ...(session.configurationResource
+          ? { configurationResource: session.configurationResource }
+          : {}),
+        ...(session.additionalDirectories?.length
+          ? { additionalDirectories: [...session.additionalDirectories] }
+          : {}),
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+        preview: session.preview ?? existing?.preview ?? "",
+        messageCount: existing?.messageCount ?? 0,
+      };
+      return [
+        updated,
+        ...history.filter(
+          (entry) =>
+            entry.sessionId !== session.sessionId ||
+            entry.agentId !== session.agentId
+        ),
+      ]
+        .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+        .slice(0, limit);
     });
   }
   private findOrCreateReplayMessage(
@@ -2601,12 +2737,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return selection?.methodId ?? null;
   }
 
-  private async createSessionWithAuthentication(
-    request: NewSessionRequest,
-    generation: number
-  ): Promise<void> {
+  private async requestSessionWithAuthentication<T>(
+    request: () => Promise<T>,
+    generation: number,
+    prepareRetry?: () => void
+  ): Promise<T> {
     try {
-      await this.acpClient.newSession(request);
+      return await request();
     } catch (error) {
       if (
         !this.isCurrentConversation(generation) ||
@@ -2631,16 +2768,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.setSessionTransitionInputPaused(false);
       }
       if (!this.isCurrentConversation(generation)) {
-        return;
+        throw new RequestError(-32800, "Request cancelled");
       }
       if (!methodId) {
         throw new Error("Authentication cancelled");
       }
       await this.acpClient.authenticate(methodId, selectedGeneration);
       if (!this.isCurrentConversation(generation)) {
-        return;
+        throw new RequestError(-32800, "Request cancelled");
       }
-      await this.acpClient.newSession(request);
+      prepareRetry?.();
+      return request();
     }
   }
 
@@ -2700,7 +2838,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ) {
             return;
           }
-          await this.createSessionWithAuthentication(request, generation);
+          await this.requestSessionWithAuthentication(
+            () => this.acpClient.newSession(request),
+            generation
+          );
           if (!this.isCurrentConversation(generation)) {
             return;
           }
@@ -3007,7 +3148,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         if (!request || !this.isCurrentConversation(generation)) {
           return;
         }
-        await this.createSessionWithAuthentication(request, generation);
+        await this.requestSessionWithAuthentication(
+          () => this.acpClient.newSession(request),
+          generation
+        );
         if (!this.isCurrentConversation(generation)) {
           return;
         }

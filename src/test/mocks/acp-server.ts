@@ -76,6 +76,7 @@ export type DemoMode =
   | "load"
   | "mcp-transports"
   | "load-failure"
+  | "sessions"
   | "no-initialize"
   | "session-isolation"
   | "mode-update"
@@ -118,6 +119,8 @@ export class MockACPServer {
   private newSessionRequestCount = 0;
   private newSessionRequests: acp.NewSessionRequest[] = [];
   private loadSessionRequests: acp.LoadSessionRequest[] = [];
+  private listSessionRequests: acp.ListSessionsRequest[] = [];
+  private resumeSessionRequests: acp.ResumeSessionRequest[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -136,6 +139,13 @@ export class MockACPServer {
 
   getLoadSessionRequests(): readonly acp.LoadSessionRequest[] {
     return this.loadSessionRequests;
+  }
+  getListSessionRequests(): readonly acp.ListSessionsRequest[] {
+    return this.listSessionRequests;
+  }
+
+  getResumeSessionRequests(): readonly acp.ResumeSessionRequest[] {
+    return this.resumeSessionRequests;
   }
 
   getAuthenticationRequests(): readonly string[] {
@@ -231,15 +241,29 @@ export class MockACPServer {
               loadSession:
                 this.demoMode === "load" ||
                 this.demoMode === "load-failure" ||
-                this.demoMode === "authentication-mcp",
+                this.demoMode === "authentication-mcp" ||
+                this.demoMode === "sessions",
               ...(this.demoMode === "mcp-transports" ||
               this.demoMode === "authentication-mcp"
                 ? { mcpCapabilities: { http: true, sse: true } }
                 : {}),
-              ...(this.demoMode === "session-close" ||
-              this.demoMode === "session-close-hangs"
-                ? { sessionCapabilities: { close: {} } }
-                : {}),
+              ...((this.demoMode === "session-close" ||
+                this.demoMode === "session-close-hangs" ||
+                this.demoMode === "sessions") && {
+                sessionCapabilities: {
+                  ...(this.demoMode === "sessions"
+                    ? {
+                        list: {},
+                        resume: {},
+                        additionalDirectories: {},
+                      }
+                    : {}),
+                  ...(this.demoMode === "session-close" ||
+                  this.demoMode === "session-close-hangs"
+                    ? { close: {} }
+                    : {}),
+                },
+              }),
               ...(this.demoMode === "rich-attachments"
                 ? {
                     promptCapabilities: {
@@ -280,6 +304,16 @@ export class MockACPServer {
       case "session/load":
         if (id !== undefined) {
           this.handleLoadSession(id, params);
+        }
+        break;
+      case "session/list":
+        if (id !== undefined) {
+          this.handleListSessions(id, params);
+        }
+        break;
+      case "session/resume":
+        if (id !== undefined) {
+          this.handleResumeSession(id, params);
         }
         break;
       case "session/prompt":
@@ -561,6 +595,54 @@ export class MockACPServer {
       },
       configOptions: session.configOptions,
     } satisfies acp.LoadSessionResponse);
+  }
+  private handleListSessions(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    const request = (params ?? {}) as acp.ListSessionsRequest;
+    this.listSessionRequests.push(request);
+    if (request.cursor === "page-2") {
+      this.sendResponse(id, {
+        sessions: [
+          {
+            sessionId: "listed-session-2",
+            cwd: "/test/dir",
+            title: "Second listed session",
+            updatedAt: "2026-09-15T12:00:00.000Z",
+          },
+        ],
+      } satisfies acp.ListSessionsResponse);
+      return;
+    }
+    this.sendResponse(id, {
+      sessions: [
+        {
+          sessionId: "listed-session-1",
+          cwd: "/test/dir",
+          additionalDirectories: ["/test/shared"],
+          title: "First listed session",
+          updatedAt: "2026-09-15T11:00:00.000Z",
+        },
+      ],
+      nextCursor: "page-2",
+    } satisfies acp.ListSessionsResponse);
+  }
+
+  private handleResumeSession(
+    id: number,
+    params?: Record<string, unknown>
+  ): void {
+    if (params) {
+      this.resumeSessionRequests.push(params as acp.ResumeSessionRequest);
+    }
+    this.sendResponse(id, {
+      modes: {
+        availableModes: [{ id: "code", name: "Code" }],
+        currentModeId: "code",
+      },
+      configOptions: [],
+    } satisfies acp.ResumeSessionResponse);
   }
 
   private handleSetConfigOption(

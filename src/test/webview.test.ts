@@ -2938,6 +2938,51 @@ suite("Webview", () => {
       assert.ok(!picker.classList.contains("visible"));
     });
 
+    test("closes stored-session picker after resume and replay success paths", () => {
+      const showPicker = (): HTMLElement => {
+        controller.handleMessage({
+          type: "sessionHistory",
+          mode: "load",
+          sessions: [
+            {
+              sessionId: "session-1",
+              cwd: "/workspace/project",
+              createdAt: 1,
+              lastUsedAt: 2,
+              preview: "Restore this conversation",
+              messageCount: 2,
+            },
+          ],
+        });
+        const picker = document.getElementById("session-picker");
+        assert.ok(picker);
+        picker.querySelector<HTMLButtonElement>(".session-history-item")?.click();
+        assert.ok(picker.classList.contains("visible"));
+        return picker;
+      };
+
+      let picker = showPicker();
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({
+        type: "sessionTransition",
+        active: true,
+        text: "Resuming conversation…",
+      });
+      controller.handleMessage({ type: "chatCleared" });
+      assert.ok(!picker.classList.contains("visible"));
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({ type: "sessionTransition", active: false });
+      assert.strictEqual(input.disabled, false);
+
+      picker = showPicker();
+      controller.handleMessage({ type: "replayStart" });
+      assert.ok(!picker.classList.contains("visible"));
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({ type: "replayComplete", messages: [] });
+      assert.strictEqual(input.disabled, false);
+    });
+
     test("keeps Tab and Shift+Tab focus inside session history", () => {
       controller.handleMessage({
         type: "sessionHistory",

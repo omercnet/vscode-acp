@@ -134,7 +134,10 @@ export function getAgentsWithStatus(
 ): AgentWithStatus[] {
   const { agentPaths = {}, ...resolutionOptions } = options;
   return AGENTS.map((configuredAgent) => {
-    const agent = getAgent(configuredAgent.id, agentPaths) ?? configuredAgent;
+    const agent =
+      TEST_AGENT_COMMAND && configuredAgent.id === AGENTS[0].id
+        ? { ...configuredAgent, command: TEST_AGENT_COMMAND, args: [] }
+        : (getAgent(configuredAgent.id, agentPaths) ?? configuredAgent);
     return {
       ...agent,
       available: resolveAgentCommand(agent, resolutionOptions) !== undefined,

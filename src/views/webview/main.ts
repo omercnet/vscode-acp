@@ -1900,7 +1900,7 @@ export class WebviewController {
       item.addEventListener("click", () => {
         item.disabled = true;
         if (mode === "load") {
-          this.setInputLock("session", true, "Restoring conversation…");
+          this.setInputLock("session-picker", true, "Restoring conversation…");
         }
         this.vscode.postMessage({
           type: mode === "load" ? "selectSession" : "deleteSession",
@@ -1957,6 +1957,7 @@ export class WebviewController {
   private hideSessionHistory(): void {
     this.elements.sessionPicker.classList.remove("visible");
     this.elements.sessionPicker.replaceChildren();
+    this.setInputLock("session-picker", false);
     this.sessionPickerPreviousFocus?.focus();
     this.sessionPickerPreviousFocus = null;
     this.updateInputControls();
@@ -2243,6 +2244,7 @@ export class WebviewController {
         this.saveState();
         break;
       case "chatCleared":
+        this.hideSessionHistory();
         this.clearChatState();
         this.clearAttachments();
         modeSelector.style.display = "none";
