@@ -142,6 +142,17 @@ suite("Agent process termination helpers", () => {
     assert.ok(commands[1].command.endsWith("powershell.exe"));
     assert.ok(commands[1].args.includes("-NonInteractive"));
   });
+
+  test("treats an already-exited Windows root as successful", async function () {
+    if (process.platform !== "win32") {
+      this.skip();
+    }
+    const parent = createMockProcess() as unknown as ChildProcess;
+    Object.defineProperty(parent, "exitCode", { value: 0 });
+
+    await terminateWindowsProcessTree(parent, 2_000_000_000);
+  });
+
 });
 
 suite("ACP error presentation", () => {

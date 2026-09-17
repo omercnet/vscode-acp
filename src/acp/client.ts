@@ -609,6 +609,27 @@ interface WindowsTerminationOptions {
   waitForExit?: (child: ChildProcess) => Promise<boolean>;
 }
 
+export function buildWindowsOrphanTerminationScript(
+  processId: number
+): string {
+  if (!Number.isSafeInteger(processId) || processId <= 0) {
+    throw new Error("Invalid ACP agent process id");
+  }
+  return [
+    "$ErrorActionPreference='Stop'",
+    `$root=[uint32]${processId}`,
+    "$all=Get-CimInstance Win32_Process",
+    "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
+    "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
+    "$queue.Enqueue($root)",
+    "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
+    "function Stop-OwnedProcess([uint32]$id){try{Stop-Process -Id $id -Force -ErrorAction Stop}catch{if($null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)){throw}}}",
+    "$ids | Sort-Object -Descending | ForEach-Object { Stop-OwnedProcess $_ }",
+    "Stop-OwnedProcess $root",
+    "exit 0",
+  ].join(";");
+}
+
 export async function terminateWindowsProcessTree(
   child: ChildProcess,
   processId: number,
@@ -651,17 +672,7 @@ export async function terminateWindowsProcessTree(
     "v1.0",
     "powershell.exe"
   );
-  const script = [
-    "$ErrorActionPreference='Stop'",
-    `$root=[uint32]${processId}`,
-    "$all=Get-CimInstance Win32_Process",
-    "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
-    "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
-    "$queue.Enqueue($root)",
-    "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
-    "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
-    "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
-  ].join(";");
+  const script = buildWindowsOrphanTerminationScript(processId);
   const terminated = await runCommand(powershell, [
     "-NoLogo",
     "-NoProfile",
