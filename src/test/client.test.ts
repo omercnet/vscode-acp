@@ -899,9 +899,7 @@ suite("ACPClient with Mock Server", () => {
       });
 
       const mutation = client.setSessionConfigOption("interaction", "review");
-      while (
-        mockProcesses[0].server.getConfigOptionRequests().length === 0
-      ) {
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       await assert.rejects(
@@ -934,9 +932,7 @@ suite("ACPClient with Mock Server", () => {
       });
 
       const mutation = client.setSessionConfigOption("interaction", "review");
-      while (
-        mockProcesses[0].server.getConfigOptionRequests().length === 0
-      ) {
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       await assert.rejects(
@@ -970,9 +966,7 @@ suite("ACPClient with Mock Server", () => {
         client.setSessionConfigOption("interaction", "review"),
         /Configuration selection is stale/
       );
-      while (
-        mockProcesses[0].server.getConfigOptionRequests().length === 0
-      ) {
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       const replacement = await client.newSession({
@@ -1088,9 +1082,7 @@ suite("ACPClient with Mock Server", () => {
       });
 
       const mutation = client.setSessionConfigOption("interaction", "review");
-      while (
-        mockProcesses[0].server.getConfigOptionRequests().length === 0
-      ) {
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       await client.loadSession({
@@ -1540,6 +1532,51 @@ suite("ACPClient with Mock Server", () => {
     });
   });
 
+  suite("setModel", () => {
+    test("changes a legacy model only when configOptions is absent", async () => {
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const metadata = client.getSessionMetadata();
+      assert.ok(metadata?.models);
+      metadata.configOptions = null;
+
+      await client.setModel("claude-3-opus");
+
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        [
+          {
+            sessionId: "mock-session-1",
+            configId: "model",
+            value: "claude-3-opus",
+          },
+        ]
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.models?.currentModelId,
+        "claude-3-opus"
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
+        "claude-3-opus"
+      );
+    });
+
+    test("rejects the legacy model path when configOptions is present", async () => {
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await assert.rejects(
+        () => client.setModel("claude-3-opus"),
+        /Legacy model selection is unavailable/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        []
+      );
+    });
+  });
+
   suite("setSessionConfigOption", () => {
     test("replaces the full option set returned by a cascading change", async () => {
       demoMode = "cascading-config";
@@ -1597,9 +1634,9 @@ suite("ACPClient with Mock Server", () => {
         ]
       );
       assert.deepStrictEqual(
-        mockProcesses[0].server.getConfigOptionRequests().map(
-          ({ configId, value }) => ({ configId, value })
-        ),
+        mockProcesses[0].server
+          .getConfigOptionRequests()
+          .map(({ configId, value }) => ({ configId, value })),
         [{ configId: "interaction", value: "review" }]
       );
     });

@@ -172,6 +172,7 @@ interface WebviewMessage {
     | "ready"
     | "selectAgent"
     | "selectMode"
+    | "selectModel"
     | "selectConfigOption"
     | "connect"
     | "newChat"
@@ -190,6 +191,7 @@ interface WebviewMessage {
   mimeType?: string;
   agentId?: string;
   modeId?: string;
+  modelId?: string;
   configId?: string;
   value?: string;
   requestId?: string;
@@ -802,6 +804,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "selectMode":
           if (message.modeId) {
             await this.handleModeChange(message.modeId);
+          }
+          break;
+        case "selectModel":
+          if (message.modelId) {
+            await this.handleModelChange(message.modelId);
           }
           break;
         case "selectConfigOption":
@@ -3110,12 +3117,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleModeChange(modeId: string): Promise<void> {
+    if (this.acpClient.getSessionMetadata()?.configOptions != null) {
+      return;
+    }
     try {
       await this.acpClient.setMode(modeId);
       await this.globalState.update(SELECTED_MODE_KEY, modeId);
       this.sendSessionMetadata();
     } catch (error) {
       this.postACPError("Failed to set mode", error);
+      this.sendSessionMetadata();
+    }
+  }
+
+  private async handleModelChange(modelId: string): Promise<void> {
+    if (this.acpClient.getSessionMetadata()?.configOptions != null) {
+      return;
+    }
+    try {
+      await this.acpClient.setModel(modelId);
+      await this.globalState.update(SELECTED_MODEL_KEY, modelId);
+      this.sendSessionMetadata();
+    } catch (error) {
+      this.postACPError("Failed to set model", error);
       this.sendSessionMetadata();
     }
   }
@@ -3601,11 +3625,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private sendSessionMetadata(): void {
     const metadata = this.acpClient.getSessionMetadata();
+    const configOptions = metadata?.configOptions ?? null;
     this.postMessage({
       type: "sessionMetadata",
       modes: metadata?.modes ?? null,
-      models: null,
-      configOptions: metadata?.configOptions ?? null,
+      models: configOptions === null ? (metadata?.models ?? null) : null,
+      configOptions,
       commands: metadata?.commands ?? null,
       promptCapabilities: this.acpClient.getPromptCapabilities(),
     });
@@ -3613,7 +3638,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (!this.hasRestoredLegacyMode && this.hasSession) {
       this.hasRestoredLegacyMode = true;
       this.restoreSavedMode().catch((error) =>
-        this.postACPError("Failed to restore saved mode", error)
+        this.postACPError("Failed to restore saved mode/model", error)
       );
     }
   }
@@ -3628,17 +3653,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const availableModes = Array.isArray(metadata?.modes?.availableModes)
       ? metadata.modes.availableModes
       : [];
+    const availableModels = Array.isArray(metadata?.models?.availableModels)
+      ? metadata.models.availableModels
+      : [];
     const savedModeId = this.globalState.get<string>(SELECTED_MODE_KEY);
-    if (
-      !savedModeId ||
-      !availableModes.some((mode) => mode.id === savedModeId)
-    ) {
-      return;
-    }
+    const savedModelId = this.globalState.get<string>(SELECTED_MODEL_KEY);
+    let restored = false;
 
-    await this.acpClient.setMode(savedModeId);
-    console.log("[Chat] Restored saved mode");
-    this.sendSessionMetadata();
+    if (savedModeId && availableModes.some((mode) => mode.id === savedModeId)) {
+      await this.acpClient.setMode(savedModeId);
+      console.log("[Chat] Restored saved mode");
+      restored = true;
+    }
+    if (
+      savedModelId &&
+      availableModels.some((model) => model.modelId === savedModelId)
+    ) {
+      await this.acpClient.setModel(savedModelId);
+      console.log("[Chat] Restored saved model");
+      restored = true;
+    }
+    if (restored) {
+      this.sendSessionMetadata();
+    }
   }
 
   private getPersistedSessionConfigKey(configId: string): string | null {

@@ -20,6 +20,44 @@ export type SupportedSessionConfigOption = Extract<
   { type: "select" }
 >;
 
+interface ModelSelectionState {
+  configId: string;
+  availableModels: Array<{ modelId: string; name: string }>;
+  currentModelId: string;
+}
+
+function getModelState(
+  configOptions: readonly SupportedSessionConfigOption[] | null | undefined
+): ModelSelectionState | null {
+  const modelConfig = configOptions?.find(
+    (option) => option.category === "model"
+  );
+  if (!modelConfig) {
+    return null;
+  }
+
+  const availableModels: ModelSelectionState["availableModels"] = [];
+  for (const option of modelConfig.options) {
+    if ("value" in option) {
+      availableModels.push({ modelId: option.value, name: option.name });
+    } else {
+      for (const value of option.options) {
+        availableModels.push({ modelId: value.value, name: value.name });
+      }
+    }
+  }
+  if (
+    !availableModels.some((model) => model.modelId === modelConfig.currentValue)
+  ) {
+    return null;
+  }
+  return {
+    configId: modelConfig.id,
+    availableModels,
+    currentModelId: modelConfig.currentValue,
+  };
+}
+
 function parseSelectValue(value: unknown): acp.SessionConfigSelectOption {
   if (typeof value !== "object" || value === null) {
     throw new Error("Invalid session configuration options");
@@ -221,6 +259,8 @@ function normalizeAgentInfo(value: unknown): acp.Implementation | null {
 
 export interface SessionMetadata {
   modes: acp.SessionModeState | null;
+  /** Legacy composer projection; the host suppresses it when configOptions exists. */
+  models?: ModelSelectionState | null;
   configOptions: SupportedSessionConfigOption[] | null;
   commands: acp.AvailableCommand[] | null;
 }
@@ -952,6 +992,7 @@ export class ACPClient {
       }
       if (isCurrentSession && this.sessionMetadata) {
         this.sessionMetadata.configOptions = configOptions;
+        this.sessionMetadata.models = getModelState(configOptions);
       } else if (this.pendingSessionRequestGeneration !== null) {
         this.pendingConfigOptionsBySession.set(params.sessionId, configOptions);
       }
@@ -1030,7 +1071,7 @@ export class ACPClient {
         response.configOptions
       );
       const configOptions = hasBufferedConfigOptions
-        ? bufferedConfigOptions ?? []
+        ? (bufferedConfigOptions ?? [])
         : responseConfigOptions;
       const modes = response.modes ?? null;
       const bufferedMode = this.pendingModeBySession.get(response.sessionId);
@@ -1043,6 +1084,7 @@ export class ACPClient {
       }
       const metadata: SessionMetadata = {
         modes,
+        models: getModelState(configOptions),
         configOptions,
         commands: this.pendingCommandsBySession.get(response.sessionId) ?? null,
       };
@@ -1084,6 +1126,7 @@ export class ACPClient {
           }
           if (configOptions) {
             replacedSessionMetadata.configOptions = configOptions;
+            replacedSessionMetadata.models = getModelState(configOptions);
           }
           if (
             modeId &&
@@ -1200,7 +1243,7 @@ export class ACPClient {
         response.configOptions
       );
       const configOptions = hasBufferedConfigOptions
-        ? bufferedConfigOptions ?? []
+        ? (bufferedConfigOptions ?? [])
         : responseConfigOptions;
       const modes = response.modes ?? null;
       const bufferedMode = this.pendingModeBySession.get(sessionId);
@@ -1213,6 +1256,7 @@ export class ACPClient {
       }
       const metadata: SessionMetadata = {
         modes,
+        models: getModelState(configOptions),
         configOptions,
         commands: this.pendingCommandsBySession.get(sessionId) ?? null,
       };
@@ -1261,6 +1305,7 @@ export class ACPClient {
           }
           if (configOptions) {
             replacedSessionMetadata.configOptions = configOptions;
+            replacedSessionMetadata.models = getModelState(configOptions);
           }
           if (
             modeId &&
@@ -1352,6 +1397,28 @@ export class ACPClient {
     }
   }
 
+  async setModel(modelId: string): Promise<void> {
+    const metadata = this.sessionMetadata;
+    if (!this.connection || !this.currentSessionId) {
+      throw new Error("No active session");
+    }
+    if (
+      metadata?.configOptions !== null &&
+      metadata?.configOptions !== undefined
+    ) {
+      throw new Error("Legacy model selection is unavailable");
+    }
+    const models = metadata?.models;
+    if (!models) {
+      throw new Error("Agent does not support model selection");
+    }
+    if (!models.availableModels.some((model) => model.modelId === modelId)) {
+      throw new Error(`Model is not available: ${modelId}`);
+    }
+
+    await this.setSessionConfigOption(models.configId, modelId);
+  }
+
   async setSessionConfigOption(configId: string, value: string): Promise<void> {
     const connection = this.connection;
     const sessionId = this.currentSessionId;
@@ -1372,13 +1439,24 @@ export class ACPClient {
       ) {
         throw new Error("Configuration selection is stale");
       }
-      const option = this.sessionMetadata?.configOptions?.find(
+      const metadata = this.sessionMetadata;
+      const option = metadata?.configOptions?.find(
         (candidate) => candidate.id === configId
       );
-      if (!option) {
+      const legacyModels =
+        metadata?.configOptions == null &&
+        metadata?.models?.configId === configId
+          ? metadata.models
+          : null;
+      if (!option && !legacyModels) {
         throw new Error(`Configuration option is not available: ${configId}`);
       }
-      if (!hasConfigValue(option, value)) {
+      const hasValue = option
+        ? hasConfigValue(option, value)
+        : legacyModels?.availableModels.some(
+            (model) => model.modelId === value
+          );
+      if (!hasValue) {
         throw new Error(`Configuration value is not available: ${value}`);
       }
 
@@ -1413,8 +1491,10 @@ export class ACPClient {
         ) {
           throw new Error("Configuration selection is stale");
         }
-        this.sessionMetadata.configOptions =
+        const finalConfigOptions =
           mutation.supersedingConfigOptions ?? configOptions;
+        this.sessionMetadata.configOptions = finalConfigOptions;
+        this.sessionMetadata.models = getModelState(finalConfigOptions);
       } catch (error) {
         await this.waitForSessionTransition(
           connection,
@@ -1430,6 +1510,7 @@ export class ACPClient {
           this.sessionMetadata
         ) {
           this.sessionMetadata.configOptions = bufferedConfigOptions;
+          this.sessionMetadata.models = getModelState(bufferedConfigOptions);
         }
         throw error;
       } finally {

@@ -106,6 +106,7 @@ interface MockACPClient {
   getMcpCapabilities: () => McpCapabilities;
   getPromptCapabilities: () => PromptCapabilities;
   setMode: (modeId: string) => Promise<void>;
+  setModel: (modelId: string) => Promise<void>;
   setSessionConfigOption: (configId: string, value: string) => Promise<void>;
   getSessionMetadata: () => SessionMetadata | null;
   dispose: () => void;
@@ -176,6 +177,7 @@ class TestMemento implements MockMemento {
 class TestACPClient implements MockACPClient {
   private agentIdValue = "test-agent";
   private setModeCallCount = 0;
+  private setModelCallCount = 0;
   public agentInfo: {
     name: string;
     title?: string | null;
@@ -189,6 +191,7 @@ class TestACPClient implements MockACPClient {
     ((update: SessionNotification) => void) | null = null;
   private stderrCallback: ((text: string) => void) | null = null;
   public lastSetModeId: string | null = null;
+  public lastSetModelId: string | null = null;
   public sessionMetadata: SessionMetadata = {
     modes: null,
     configOptions: null,
@@ -305,6 +308,14 @@ class TestACPClient implements MockACPClient {
     this.lastSetModeId = modeId;
   }
 
+  async setModel(modelId: string): Promise<void> {
+    this.setModelCallCount++;
+    this.lastSetModelId = modelId;
+    if (this.sessionMetadata.models) {
+      this.sessionMetadata.models.currentModelId = modelId;
+    }
+  }
+
   async setSessionConfigOption(configId: string, value: string): Promise<void> {
     this.configOptionCalls.push({ configId, value });
   }
@@ -319,14 +330,20 @@ class TestACPClient implements MockACPClient {
     return this.setModeCallCount;
   }
 
+  getSetModelCallCount(): number {
+    return this.setModelCallCount;
+  }
+
   getConfigOptionCalls(): ReadonlyArray<{ configId: string; value: string }> {
     return this.configOptionCalls;
   }
 
   resetCallCounts(): void {
     this.setModeCallCount = 0;
+    this.setModelCallCount = 0;
     this.configOptionCalls = [];
     this.lastSetModeId = null;
+    this.lastSetModelId = null;
   }
 
   emitStateChange(
@@ -666,8 +683,9 @@ suite("ChatViewProvider", () => {
       }
     });
 
-    test("restores a saved legacy mode only when configOptions is absent", async () => {
+    test("restores saved legacy mode and model only without configOptions", async () => {
       await memento.update("vscode-acp.selectedMode", "test-mode");
+      await memento.update("vscode-acp.selectedModel", "accurate");
       acpClient.sessionMetadata = {
         modes: {
           availableModes: [
@@ -675,6 +693,14 @@ suite("ChatViewProvider", () => {
             { id: "other-mode", name: "Other Mode" },
           ],
           currentModeId: "other-mode",
+        },
+        models: {
+          configId: "model",
+          availableModels: [
+            { modelId: "fast", name: "Fast" },
+            { modelId: "accurate", name: "Accurate" },
+          ],
+          currentModelId: "fast",
         },
         configOptions: null,
         commands: null,
@@ -691,15 +717,23 @@ suite("ChatViewProvider", () => {
       await lifecycle.restoreSavedMode();
 
       assert.strictEqual(acpClient.lastSetModeId, "test-mode");
+      assert.strictEqual(acpClient.lastSetModelId, "accurate");
       assert.strictEqual(acpClient.getSetModeCallCount(), 1);
+      assert.strictEqual(acpClient.getSetModelCallCount(), 1);
     });
 
-    test("does not restore legacy mode when configOptions is present", async () => {
+    test("does not restore legacy selections when configOptions is present", async () => {
       await memento.update("vscode-acp.selectedMode", "test-mode");
+      await memento.update("vscode-acp.selectedModel", "accurate");
       acpClient.sessionMetadata = {
         modes: {
           availableModes: [{ id: "test-mode", name: "Test Mode" }],
           currentModeId: "test-mode",
+        },
+        models: {
+          configId: "model",
+          availableModels: [{ modelId: "accurate", name: "Accurate" }],
+          currentModelId: "accurate",
         },
         configOptions: [],
         commands: null,
@@ -716,6 +750,7 @@ suite("ChatViewProvider", () => {
       await lifecycle.restoreSavedMode();
 
       assert.strictEqual(acpClient.getSetModeCallCount(), 0);
+      assert.strictEqual(acpClient.getSetModelCallCount(), 0);
     });
 
     test("restores saved config selections for supported categories", async () => {
@@ -1036,6 +1071,106 @@ suite("ChatViewProvider", () => {
         memento.get<string>("vscode-acp.selectedMode"),
         "new-mode"
       );
+    });
+
+    test("publishes legacy models only when configOptions is absent", () => {
+      const models = {
+        configId: "model",
+        availableModels: [
+          { modelId: "fast", name: "Fast" },
+          { modelId: "accurate", name: "Accurate" },
+        ],
+        currentModelId: "fast",
+      };
+      acpClient.sessionMetadata = {
+        modes: null,
+        models,
+        configOptions: null,
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        sendSessionMetadata(): void;
+      };
+
+      lifecycle.sendSessionMetadata();
+      assert.deepStrictEqual(messages.at(-1)?.models, models);
+
+      acpClient.sessionMetadata.configOptions = [];
+      lifecycle.sendSessionMetadata();
+      assert.strictEqual(messages.at(-1)?.models, null);
+      assert.deepStrictEqual(messages.at(-1)?.configOptions, []);
+      provider.dispose();
+    });
+
+    test("routes legacy model selections from the webview", async () => {
+      const models = {
+        configId: "model",
+        availableModels: [
+          { modelId: "fast", name: "Fast" },
+          { modelId: "accurate", name: "Accurate" },
+        ],
+        currentModelId: "fast",
+      };
+      acpClient.sessionMetadata = {
+        modes: null,
+        models,
+        configOptions: null,
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      let receive:
+        ((message: Record<string, unknown>) => Promise<void>) | undefined;
+      const view = {
+        webview: {
+          options: {},
+          html: "",
+          cspSource: "vscode-webview:",
+          asWebviewUri: (uri: vscode.Uri) => uri,
+          postMessage: async () => true,
+          onDidReceiveMessage: (
+            handler: (message: Record<string, unknown>) => Promise<void>
+          ) => {
+            receive = handler;
+            return { dispose: () => undefined };
+          },
+        },
+        onDidDispose: () => ({ dispose: () => undefined }),
+        show: () => undefined,
+      };
+      provider.resolveWebviewView(
+        view as unknown as vscode.WebviewView,
+        {} as vscode.WebviewViewResolveContext,
+        {} as vscode.CancellationToken
+      );
+      assert.ok(receive);
+
+      await receive({ type: "selectModel", modelId: "accurate" });
+
+      assert.strictEqual(acpClient.lastSetModelId, "accurate");
+      assert.strictEqual(acpClient.getSetModelCallCount(), 1);
+      assert.strictEqual(
+        memento.get<string>("vscode-acp.selectedModel"),
+        "accurate"
+      );
+
+      acpClient.sessionMetadata.configOptions = [];
+      await receive({ type: "selectModel", modelId: "fast" });
+      assert.strictEqual(acpClient.lastSetModelId, "accurate");
+      assert.strictEqual(acpClient.getSetModelCallCount(), 1);
+      provider.dispose();
     });
   });
 
