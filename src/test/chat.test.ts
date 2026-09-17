@@ -798,7 +798,6 @@ suite("ChatViewProvider", () => {
         "new-mode"
       );
     });
-
   });
 
   test("restores session metadata when a replacement chat fails", async () => {
@@ -3280,6 +3279,7 @@ suite("ChatViewProvider", () => {
         assert.strictEqual(target.getText(), "concurrent user edit");
       } finally {
         fsPromises.realpath = originalRealpath;
+        provider.dispose();
         for (const document of documents) {
           await vscode.window.showTextDocument(document);
           await vscode.commands.executeCommand(
@@ -3296,10 +3296,15 @@ suite("ChatViewProvider", () => {
       "unavailable direct path",
     ] as const) {
       test(`preserves a dirty editor with ${scenario}`, async () => {
-        const sandbox = await realpath(
-          await mkdtemp(join(tmpdir(), "vscode-acp-editor-identity-"))
-        );
-        const filePath = join(sandbox, "notes.txt");
+        const sandbox = workspaceRoot();
+        const fixture = `.vscode-acp-editor-identity-${process.pid}-${
+          scenario === "renamed inode" ? "renamed" : "unavailable"
+        }`;
+        const filePath = join(sandbox, `${fixture}-original.txt`);
+        const documentPath =
+          scenario === "renamed inode"
+            ? join(sandbox, `${fixture}-renamed.txt`)
+            : filePath;
         const provider = new ChatViewProvider(
           mockExtensionUri,
           acpClient as unknown as ACPClient,
@@ -3312,10 +3317,6 @@ suite("ChatViewProvider", () => {
         try {
           await writeFile(filePath, "saved");
           fileHandle = await open(filePath, "r+");
-          const documentPath =
-            scenario === "renamed inode"
-              ? join(sandbox, "renamed.txt")
-              : filePath;
           if (scenario === "renamed inode") {
             await fsPromises.rename(filePath, documentPath);
           }
@@ -3365,12 +3366,15 @@ suite("ChatViewProvider", () => {
         } finally {
           fsPromises.realpath = originalRealpath;
           await fileHandle?.close();
+          provider.dispose();
           if (document) {
+            await vscode.window.showTextDocument(document);
             await vscode.commands.executeCommand(
               "workbench.action.revertAndCloseActiveEditor"
             );
           }
-          await rm(sandbox, { recursive: true, force: true });
+          await rm(filePath, { force: true });
+          await rm(documentPath, { force: true });
         }
       });
     }
@@ -3566,7 +3570,7 @@ suite("ChatViewProvider", () => {
         command: NODE_EXECUTABLE,
         args: [
           "-e",
-          `process.stdout.write(\`${"${process.argv[1]}"}|${"${process.env.VSCODE_ACP_TERMINAL_TEST_SECRET ?? 'missing'}"}\`)`,
+          `process.stdout.write(\`${"${process.argv[1]}"}|${"${process.env.VSCODE_ACP_TERMINAL_TEST_SECRET ?? 'missing'}"}\`, () => process.exit(0))`,
           "literal && echo injected",
         ],
         cwd: workspaceRoot(),
