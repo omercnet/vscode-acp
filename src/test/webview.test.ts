@@ -2962,12 +2962,25 @@ suite("Webview", () => {
       };
 
       let picker = showPicker();
+      const input = document.getElementById("input") as HTMLTextAreaElement;
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({
+        type: "sessionTransition",
+        active: true,
+        text: "Resuming conversation…",
+      });
       controller.handleMessage({ type: "chatCleared" });
       assert.ok(!picker.classList.contains("visible"));
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({ type: "sessionTransition", active: false });
+      assert.strictEqual(input.disabled, false);
 
       picker = showPicker();
       controller.handleMessage({ type: "replayStart" });
       assert.ok(!picker.classList.contains("visible"));
+      assert.strictEqual(input.disabled, true);
+      controller.handleMessage({ type: "replayComplete", messages: [] });
+      assert.strictEqual(input.disabled, false);
     });
 
     test("keeps Tab and Shift+Tab focus inside session history", () => {

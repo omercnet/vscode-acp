@@ -17,14 +17,16 @@ import {
 import type { AgentCommandResolutionOptions } from "../acp/agentCommand";
 import {
   DEFAULT_SESSION_HISTORY_LIMIT,
-  SESSION_HISTORY_KEY,
   MAX_AGENT_SESSION_TOTAL_ENTRIES,
   MAX_AGENT_SESSION_TOTAL_METADATA_BYTES,
   MAX_AGENT_SESSION_TOTAL_PAGES,
   SessionDiscoveryLimitError,
   normalizeAgentSessionPage,
   readStoredSessions,
+  mergeAgentOwnedSession,
+  onStoredSessionsChanged,
   reconcileAgentSessions,
+  updateStoredSessions,
   type AgentOwnedSession,
   type StoredSession,
 } from "../sessions";
@@ -161,12 +163,13 @@ export class AgentSessionTreeProvider
   readonly onDidChangeTreeData = this.changes.event;
   private readonly states = new Map<string, AgentState>();
   private disposed = false;
+  private readonly disposeHistoryListener: () => void;
   constructor(
     private readonly workspaceState: vscode.Memento,
     private readonly getAgentDiscoveryOptions: () => AgentDiscoveryOptions,
     private readonly openInChat: (
       request: AgentSessionOpenRequest
-    ) => Promise<void>,
+    ) => Promise<boolean>,
     private readonly createProbe: SessionProbeFactory = (
       agent,
       resolutionOptions
@@ -182,7 +185,16 @@ export class AgentSessionTreeProvider
       vscode.workspace
         .getConfiguration("vscode-acp")
         .get<boolean>("sessions.autoSave", true)
-  ) {}
+  ) {
+    this.disposeHistoryListener = onStoredSessionsChanged(
+      this.workspaceState,
+      () => {
+        if (!this.disposed) {
+          this.changes.fire(undefined);
+        }
+      }
+    );
+  }
 
 
   getTreeItem(element: AgentSessionTreeNode): vscode.TreeItem {
@@ -233,9 +245,7 @@ export class AgentSessionTreeProvider
       item.description = element.stale
         ? "Stale session"
         : new Date(element.session.lastUsedAt).toLocaleString();
-      item.tooltip = new vscode.MarkdownString(
-        `**${title}**\n\n${element.session.cwd}\n\nSession: \`${element.session.sessionId}\``
-      );
+      item.tooltip = `${title}\n${element.session.cwd}\nSession: ${element.session.sessionId}`;
       item.iconPath = new vscode.ThemeIcon(
         element.stale ? "warning" : "history"
       );
@@ -360,18 +370,31 @@ export class AgentSessionTreeProvider
       ];
     }
     if (state.status === "error") {
+      const action: StateNode = {
+        kind: "state",
+        agentId: element.agent.id,
+        state: "error",
+        message: state.error ?? undefined,
+      };
+      if (state.sessions.length === 0 || !state.capabilities?.list) {
+        return [action];
+      }
       return [
-        {
-          kind: "state",
-          agentId: element.agent.id,
-          state: "error",
-          message: state.error ?? undefined,
-        },
+        ...this.listedSessionNodes(
+          element.agent.id,
+          state.capabilities,
+          state
+        ),
+        action,
       ];
     }
 
     const capabilities = state.capabilities ?? EMPTY_CAPABILITIES;
-    if (!capabilities.load && !capabilities.resume) {
+    if (
+      !capabilities.list &&
+      !capabilities.load &&
+      !capabilities.resume
+    ) {
       return [
         {
           kind: "state",
@@ -526,7 +549,7 @@ export class AgentSessionTreeProvider
     }
 
     try {
-      await this.openInChat({
+      const opened = await this.openInChat({
         agentId: node.agentId,
         sessionId: node.session.sessionId,
         cwd: node.session.cwd,
@@ -535,7 +558,12 @@ export class AgentSessionTreeProvider
         preview: node.session.preview,
         mode,
       });
+      if (!opened) {
+        return;
+      }
       node.stale = false;
+      const state = this.states.get(node.agentId);
+      state?.staleSessionIds.delete(node.session.sessionId);
       node.session.lastUsedAt = Date.now();
       this.changes.fire(node);
     } catch (error) {
@@ -564,6 +592,7 @@ export class AgentSessionTreeProvider
       this.disposeProbe(id);
     }
     this.states.clear();
+    this.disposeHistoryListener();
     this.changes.dispose();
   }
 
@@ -599,33 +628,17 @@ export class AgentSessionTreeProvider
         .filter((session) => session.agentId === agentId)
         .map((session) => [session.sessionId, session] as const)
     );
-    return state.sessions.map((listed) => {
-      const saved = stored.get(listed.sessionId);
-      const updatedAt = listed.updatedAt
-        ? Date.parse(listed.updatedAt)
-        : saved?.lastUsedAt ?? Date.now();
-      return {
-        kind: "session",
+    return state.sessions.map((listed) => ({
+      kind: "session",
+      agentId,
+      capabilities,
+      stale: state.staleSessionIds.has(listed.sessionId),
+      session: mergeAgentOwnedSession(
         agentId,
-        capabilities,
-        stale: state.staleSessionIds.has(listed.sessionId),
-        session: {
-          sessionId: listed.sessionId,
-          agentId,
-          cwd: listed.cwd,
-          ...(saved?.configurationResource && saved.cwd === listed.cwd
-            ? { configurationResource: saved.configurationResource }
-            : {}),
-          ...(listed.additionalDirectories.length > 0
-            ? { additionalDirectories: [...listed.additionalDirectories] }
-            : {}),
-          createdAt: saved?.createdAt ?? updatedAt,
-          lastUsedAt: updatedAt,
-          preview: listed.title || saved?.preview || "",
-          messageCount: saved?.messageCount ?? 0,
-        },
-      };
-    });
+        listed,
+        stored.get(listed.sessionId)
+      ),
+    }));
   }
 
   private fallbackSessionNodes(
@@ -638,10 +651,27 @@ export class AgentSessionTreeProvider
       .map((session) => ({
         kind: "session",
         agentId,
-        session,
+        session: {
+          ...session,
+          ...(session.additionalDirectories
+            ? { additionalDirectories: [...session.additionalDirectories] }
+            : {}),
+        },
         capabilities,
         stale: state.staleSessionIds.has(session.sessionId),
       }));
+  }
+
+  private ownsLoadState(
+    agentId: string,
+    state: AgentState,
+    probe?: SessionProbe | null
+  ): boolean {
+    return (
+      !this.disposed &&
+      this.states.get(agentId) === state &&
+      (!probe || state.probe === probe)
+    );
   }
 
   private async loadPage(agent: AgentConfig, reset: boolean): Promise<void> {
@@ -653,8 +683,8 @@ export class AgentSessionTreeProvider
     state.error = null;
     this.changes.fire(undefined);
 
+    let probe = state.probe;
     try {
-      let probe = state.probe;
       if (!probe || probe.getState() !== "connected") {
         this.disposeProbe(agent.id);
         probe = this.createProbe(agent, () =>
@@ -670,13 +700,17 @@ export class AgentSessionTreeProvider
             state.error = "Agent connection failed";
           } else if (
             connectionState === "disconnected" &&
-            state.status === "connected"
+            (state.status === "connected" ||
+              state.status === "authentication")
           ) {
             state.status = "idle";
           }
           this.changes.fire(undefined);
         });
         await probe.connect();
+        if (!this.ownsLoadState(agent.id, state, probe)) {
+          return;
+        }
         state.capabilities = probe.getSessionCapabilities();
       }
 
@@ -697,9 +731,11 @@ export class AgentSessionTreeProvider
         return;
       }
       state.requestedCursor = cursor;
-      const page = normalizeAgentSessionPage(
-        await probe.listSessions(cursor ? { cursor } : {})
-      );
+      const response = await probe.listSessions(cursor ? { cursor } : {});
+      if (!this.ownsLoadState(agent.id, state, probe)) {
+        return;
+      }
+      const page = normalizeAgentSessionPage(response);
       const seenCursors = reset
         ? new Set<string>()
         : new Set(state.seenCursors);
@@ -750,18 +786,24 @@ export class AgentSessionTreeProvider
         const limit = Number.isFinite(configuredLimit)
           ? Math.max(1, Math.min(200, Math.floor(configuredLimit)))
           : DEFAULT_SESSION_HISTORY_LIMIT;
-        await this.workspaceState.update(
-          SESSION_HISTORY_KEY,
-          reconcileAgentSessions(
-            readStoredSessions(this.workspaceState),
-            agent.id,
-            state.sessions,
-            limit
-          )
-        );
+        try {
+          await updateStoredSessions(this.workspaceState, (history) =>
+            this.ownsLoadState(agent.id, state, probe)
+              ? reconcileAgentSessions(history, agent.id, state.sessions, limit)
+              : null
+          );
+        } catch {
+          console.warn("[Sessions] Failed to persist reconciled session history");
+        }
+        if (!this.ownsLoadState(agent.id, state, probe)) {
+          return;
+        }
       }
       this.changes.fire(undefined);
     } catch (error) {
+      if (!this.ownsLoadState(agent.id, state, probe)) {
+        return;
+      }
       const presentation = describeACPError(error);
       if (error instanceof SessionDiscoveryLimitError) {
         state.nextCursor = null;

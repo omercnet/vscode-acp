@@ -6,6 +6,7 @@ export const DEFAULT_SESSION_HISTORY_LIMIT = 50;
 export const MAX_AGENT_SESSION_PAGE_ENTRIES = 200;
 export const MAX_AGENT_SESSION_TOTAL_ENTRIES = 1000;
 export const MAX_AGENT_SESSION_PAGE_METADATA_BYTES = 1_048_576;
+export const MAX_AGENT_SESSION_PAGE_WIRE_BYTES = 1_048_576;
 export const MAX_AGENT_SESSION_TOTAL_METADATA_BYTES = 4_194_304;
 export const MAX_AGENT_SESSION_TOTAL_PAGES = 100;
 const MAX_SESSION_ID_LENGTH = 4096;
@@ -13,6 +14,7 @@ const MAX_SESSION_PATH_LENGTH = 32_768;
 const MAX_SESSION_TITLE_LENGTH = 200;
 const MAX_SESSION_TITLE_INPUT_LENGTH = 4096;
 const MAX_SESSION_TIMESTAMP_LENGTH = 128;
+const MAX_AGENT_SESSION_PAGE_JSON_NODES = 20_000;
 const MAX_ADDITIONAL_DIRECTORIES = 32;
 const UNSAFE_SESSION_TEXT =
   /[\u0000-\u001f\u007f-\u009f\p{Bidi_Control}\p{Default_Ignorable_Code_Point}]/u;
@@ -41,7 +43,7 @@ export interface StoredSession {
 export interface AgentOwnedSession {
   sessionId: string;
   cwd: string;
-  additionalDirectories: string[];
+  additionalDirectories?: string[];
   title: string;
   updatedAt?: string;
 }
@@ -73,6 +75,57 @@ function sanitizeTitle(value: unknown): string {
     .slice(0, MAX_SESSION_TITLE_LENGTH);
 }
 
+/** Unknown future fields are ignored only after their complete JSON cost is bounded. */
+function assertBoundedSessionPagePayload(value: unknown): void {
+  let bytes = 0;
+  let nodes = 0;
+  const ancestors = new WeakSet<object>();
+  const visit = (entry: unknown, depth: number): void => {
+    nodes += 1;
+    if (
+      nodes > MAX_AGENT_SESSION_PAGE_JSON_NODES ||
+      depth > 16
+    ) {
+      throw new SessionDiscoveryLimitError(
+        "Agent session listing exceeded the safe wire limit. Reduce the agent's stored sessions, then retry."
+      );
+    }
+    if (entry === null) {
+      bytes += 4;
+    } else if (typeof entry === "string") {
+      bytes += Buffer.byteLength(entry, "utf8") + 2;
+    } else if (typeof entry === "number" || typeof entry === "boolean") {
+      bytes += String(entry).length;
+    } else if (typeof entry === "object") {
+      if (ancestors.has(entry)) {
+        throw new Error("Agent returned an invalid session page");
+      }
+      ancestors.add(entry);
+      if (Array.isArray(entry)) {
+        for (const item of entry) {
+          visit(item, depth + 1);
+        }
+      } else {
+        for (const key in entry) {
+          if (Object.prototype.hasOwnProperty.call(entry, key)) {
+            bytes += Buffer.byteLength(key, "utf8") + 2;
+            visit((entry as Record<string, unknown>)[key], depth + 1);
+          }
+        }
+      }
+      ancestors.delete(entry);
+    } else {
+      throw new Error("Agent returned an invalid session page");
+    }
+    if (bytes > MAX_AGENT_SESSION_PAGE_WIRE_BYTES) {
+      throw new SessionDiscoveryLimitError(
+        "Agent session listing exceeded the safe wire limit. Reduce the agent's stored sessions, then retry."
+      );
+    }
+  };
+  visit(value, 0);
+}
+
 export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
   if (typeof value !== "object" || value === null) {
     throw new Error("Agent returned an invalid session page");
@@ -86,6 +139,7 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
       `Agent session listing exceeded the safe page limit of ${MAX_AGENT_SESSION_PAGE_ENTRIES} entries. Reduce the agent's stored sessions, then retry.`
     );
   }
+  assertBoundedSessionPagePayload(value);
   const nextCursor = candidate.nextCursor;
   if (
     nextCursor !== undefined &&
@@ -114,14 +168,19 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
     ) {
       throw new Error("Agent returned invalid session metadata");
     }
-    const additionalDirectories = session.additionalDirectories ?? [];
+    const rawAdditionalDirectories = session.additionalDirectories;
     if (
-      !Array.isArray(additionalDirectories) ||
-      additionalDirectories.length > MAX_ADDITIONAL_DIRECTORIES ||
-      !additionalDirectories.every(isSafeSessionPath)
+      rawAdditionalDirectories !== undefined &&
+      rawAdditionalDirectories !== null &&
+      (!Array.isArray(rawAdditionalDirectories) ||
+        rawAdditionalDirectories.length > MAX_ADDITIONAL_DIRECTORIES ||
+        !rawAdditionalDirectories.every(isSafeSessionPath))
     ) {
       throw new Error("Agent returned invalid session directories");
     }
+    const additionalDirectories = Array.isArray(rawAdditionalDirectories)
+      ? [...rawAdditionalDirectories]
+      : undefined;
     const title = session.title;
     if (
       title !== undefined &&
@@ -149,7 +208,7 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
       (typeof updatedAt === "string"
         ? Buffer.byteLength(updatedAt, "utf8")
         : 0);
-    for (const directory of additionalDirectories) {
+    for (const directory of additionalDirectories ?? []) {
       metadataBytes += Buffer.byteLength(directory, "utf8");
     }
     if (metadataBytes > MAX_AGENT_SESSION_PAGE_METADATA_BYTES) {
@@ -160,7 +219,9 @@ export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
     return {
       sessionId: session.sessionId,
       cwd: session.cwd,
-      additionalDirectories: [...additionalDirectories],
+      ...(additionalDirectories !== undefined
+        ? { additionalDirectories }
+        : {}),
       title: normalizedTitle,
       ...(typeof updatedAt === "string" ? { updatedAt } : {}),
     };
@@ -203,6 +264,93 @@ export function readStoredSessions(workspaceState: Memento): StoredSession[] {
   });
 }
 
+export type StoredSessionMutation = (
+  current: readonly StoredSession[]
+) => StoredSession[] | null;
+
+const sessionHistoryUpdates = new WeakMap<Memento, Promise<unknown>>();
+const sessionHistoryListeners = new WeakMap<Memento, Set<() => void>>();
+
+export function onStoredSessionsChanged(
+  workspaceState: Memento,
+  listener: () => void
+): () => void {
+  let listeners = sessionHistoryListeners.get(workspaceState);
+  if (!listeners) {
+    listeners = new Set();
+    sessionHistoryListeners.set(workspaceState, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners?.delete(listener);
+    if (listeners?.size === 0) {
+      sessionHistoryListeners.delete(workspaceState);
+    }
+  };
+}
+
+export async function updateStoredSessions(
+  workspaceState: Memento,
+  mutate: StoredSessionMutation
+): Promise<boolean> {
+  const previous = sessionHistoryUpdates.get(workspaceState) ?? Promise.resolve();
+  const queued = previous.catch(() => undefined).then(async () => {
+    const updated = mutate(readStoredSessions(workspaceState));
+    if (updated === null) {
+      return false;
+    }
+    await workspaceState.update(SESSION_HISTORY_KEY, updated);
+    for (const listener of sessionHistoryListeners.get(workspaceState) ?? []) {
+      try {
+        listener();
+      } catch {
+        console.error("[Sessions] History listener failed");
+      }
+    }
+    return true;
+  });
+  sessionHistoryUpdates.set(workspaceState, queued);
+  try {
+    return await queued;
+  } finally {
+    if (sessionHistoryUpdates.get(workspaceState) === queued) {
+      sessionHistoryUpdates.delete(workspaceState);
+    }
+  }
+}
+
+export function mergeAgentOwnedSession(
+  agentId: string,
+  listed: AgentOwnedSession,
+  saved: StoredSession | undefined
+): StoredSession {
+  const listedTime = listed.updatedAt
+    ? Date.parse(listed.updatedAt)
+    : saved?.lastUsedAt ?? 0;
+  const sameCwd = saved?.cwd === listed.cwd;
+  const additionalDirectories =
+    listed.additionalDirectories !== undefined
+      ? listed.additionalDirectories
+      : sameCwd
+        ? saved?.additionalDirectories
+        : undefined;
+  return {
+    sessionId: listed.sessionId,
+    agentId,
+    cwd: listed.cwd,
+    ...(saved?.configurationResource && sameCwd
+      ? { configurationResource: saved.configurationResource }
+      : {}),
+    ...(additionalDirectories?.length
+      ? { additionalDirectories: [...additionalDirectories] }
+      : {}),
+    createdAt: saved?.createdAt ?? listedTime,
+    lastUsedAt: Math.max(saved?.lastUsedAt ?? listedTime, listedTime),
+    preview: listed.title || saved?.preview || "",
+    messageCount: saved?.messageCount ?? 0,
+  };
+}
+
 export function reconcileAgentSessions(
   history: readonly StoredSession[],
   agentId: string,
@@ -214,28 +362,13 @@ export function reconcileAgentSessions(
       .filter((session) => session.agentId === agentId)
       .map((session) => [session.sessionId, session] as const)
   );
-  const now = Date.now();
-  const authoritative = listed.map((session) => {
-    const saved = existing.get(session.sessionId);
-    const listedTime = session.updatedAt
-      ? Date.parse(session.updatedAt)
-      : saved?.lastUsedAt ?? now;
-    return {
-      sessionId: session.sessionId,
+  const authoritative = listed.map((session) =>
+    mergeAgentOwnedSession(
       agentId,
-      cwd: session.cwd,
-      ...(saved?.configurationResource && saved.cwd === session.cwd
-        ? { configurationResource: saved.configurationResource }
-        : {}),
-      ...(session.additionalDirectories.length > 0
-        ? { additionalDirectories: [...session.additionalDirectories] }
-        : {}),
-      createdAt: saved?.createdAt ?? listedTime,
-      lastUsedAt: listedTime,
-      preview: session.title || saved?.preview || "",
-      messageCount: saved?.messageCount ?? 0,
-    } satisfies StoredSession;
-  });
+      session,
+      existing.get(session.sessionId)
+    )
+  );
 
   return [
     ...history.filter((session) => session.agentId !== agentId),

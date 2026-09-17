@@ -74,8 +74,8 @@ import {
 } from "../shared/attachments";
 import {
   readStoredSessions,
-  SESSION_HISTORY_KEY,
   DEFAULT_SESSION_HISTORY_LIMIT,
+  updateStoredSessions,
   type StoredSession,
 } from "../sessions";
 import type {
@@ -1085,25 +1085,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleDeleteStoredSession(sessionId: string): Promise<void> {
-    const session = this.getStoredSessions().find(
-      (entry) =>
-        entry.sessionId === sessionId &&
-        entry.agentId === this.acpClient.getAgentId()
-    );
-    if (!session) {
-      return;
-    }
-
+    const agentId = this.acpClient.getAgentId();
     try {
-      await this.workspaceState.update(
-        SESSION_HISTORY_KEY,
-        this.getStoredSessions().filter(
+      let deleted = false;
+      await updateStoredSessions(this.workspaceState, (history) => {
+        const updated = history.filter(
           (entry) =>
-            entry.sessionId !== session.sessionId ||
-            entry.agentId !== session.agentId
-        )
-      );
-      this.postMessage({ type: "sessionDeleted", sessionId });
+            entry.sessionId !== sessionId || entry.agentId !== agentId
+        );
+        deleted = updated.length !== history.length;
+        return updated;
+      });
+      if (deleted) {
+        this.postMessage({ type: "sessionDeleted", sessionId });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.postMessage({
@@ -1122,7 +1117,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const configuration = vscode.workspace.getConfiguration("vscode-acp");
-
     const sessionId = this.acpClient.getCurrentSessionId();
     if (!sessionId) {
       return;
@@ -1140,47 +1134,44 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       cwd: workspaceFolder?.uri.fsPath || process.cwd(),
       configurationResource: workspaceFolder?.uri.toString(),
     };
-    const cwd = sessionContext.cwd;
-    const history = this.getStoredSessions();
-    const existing = history.find(
-      (session) =>
-        session.sessionId === sessionId &&
-        session.agentId === this.acpClient.getAgentId()
-    );
+    const agentId = this.acpClient.getAgentId();
     const normalizedPreview = preview
       ?.replace(/\s+/g, " ")
       .trim()
       .slice(0, 120);
     const now = Date.now();
-    const entry: StoredSession = {
-      sessionId,
-      agentId: this.acpClient.getAgentId(),
-      configurationResource: sessionContext.configurationResource,
-      cwd,
-      ...(sessionContext.additionalDirectories?.length
-        ? {
-            additionalDirectories: [
-              ...sessionContext.additionalDirectories,
-            ],
-          }
-        : {}),
-      createdAt: existing?.createdAt ?? now,
-      lastUsedAt: now,
-      preview: normalizedPreview || existing?.preview || "",
-      messageCount: (existing?.messageCount ?? 0) + (preview ? 1 : 0),
-    };
-    const updatedHistory = [
-      entry,
-      ...history.filter(
+    await updateStoredSessions(this.workspaceState, (history) => {
+      const existing = history.find(
         (session) =>
-          session.sessionId !== sessionId ||
-          session.agentId !== this.acpClient.getAgentId()
-      ),
-    ]
-      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-      .slice(0, limit);
-
-    await this.workspaceState.update(SESSION_HISTORY_KEY, updatedHistory);
+          session.sessionId === sessionId && session.agentId === agentId
+      );
+      const entry: StoredSession = {
+        sessionId,
+        agentId,
+        configurationResource: sessionContext.configurationResource,
+        cwd: sessionContext.cwd,
+        ...(sessionContext.additionalDirectories?.length
+          ? {
+              additionalDirectories: [
+                ...sessionContext.additionalDirectories,
+              ],
+            }
+          : {}),
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+        preview: normalizedPreview || existing?.preview || "",
+        messageCount: (existing?.messageCount ?? 0) + (preview ? 1 : 0),
+      };
+      return [
+        entry,
+        ...history.filter(
+          (session) =>
+            session.sessionId !== sessionId || session.agentId !== agentId
+        ),
+      ]
+        .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+        .slice(0, limit);
+    });
   }
 
   private async loadStoredSession(session: StoredSession): Promise<void> {
@@ -1189,8 +1180,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public async openAgentSession(
     request: AgentSessionOpenRequest
-  ): Promise<void> {
-
+  ): Promise<boolean> {
+    let opened = false;
     await this.runSessionTransition(
       request.mode === "load"
         ? "Loading conversation history…"
@@ -1214,11 +1205,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
 
         if (!sameAgent) {
+          this.mcpSecretRedactor.clear();
           this.acpClient.setAgent(agent!);
           generation = ++this.conversationGeneration;
-          await this.globalState.update(SELECTED_AGENT_KEY, request.agentId);
+          void Promise.resolve(
+            this.globalState.update(SELECTED_AGENT_KEY, request.agentId)
+          ).catch(() => {
+            console.warn("[Chat] Failed to persist selected agent");
+          });
           this.hasSession = false;
           this.activeSessionContext = null;
+          this.clearPendingAttachments();
           this.postMessage({ type: "agentChanged", agentId: request.agentId });
           this.postMessage({
             type: "sessionMetadata",
@@ -1346,6 +1343,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           this.replayMessages = [];
           this.sendSessionMetadata();
+          opened = true;
         } catch (error) {
           if (!this.isCurrentConversation(generation)) {
             return;
@@ -1368,6 +1366,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
     );
+    return opened;
   }
 
   private async touchStoredSession(
@@ -1377,12 +1376,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const configuration = vscode.workspace.getConfiguration("vscode-acp");
-    const history = this.getStoredSessions();
-    const existing = history.find(
-      (entry) =>
-        entry.sessionId === session.sessionId &&
-        entry.agentId === session.agentId
-    );
     const configuredLimit = configuration.get<number>(
       "sessions.maxHistory",
       DEFAULT_SESSION_HISTORY_LIMIT
@@ -1391,24 +1384,28 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       ? Math.max(1, Math.min(200, Math.floor(configuredLimit)))
       : DEFAULT_SESSION_HISTORY_LIMIT;
     const now = Date.now();
-    const updated: StoredSession = {
-      sessionId: session.sessionId,
-      agentId: session.agentId,
-      cwd: session.cwd,
-      ...(session.configurationResource
-        ? { configurationResource: session.configurationResource }
-        : {}),
-      ...(session.additionalDirectories?.length
-        ? { additionalDirectories: [...session.additionalDirectories] }
-        : {}),
-      createdAt: existing?.createdAt ?? now,
-      lastUsedAt: now,
-      preview: session.preview ?? existing?.preview ?? "",
-      messageCount: existing?.messageCount ?? 0,
-    };
-    await this.workspaceState.update(
-      SESSION_HISTORY_KEY,
-      [
+    await updateStoredSessions(this.workspaceState, (history) => {
+      const existing = history.find(
+        (entry) =>
+          entry.sessionId === session.sessionId &&
+          entry.agentId === session.agentId
+      );
+      const updated: StoredSession = {
+        sessionId: session.sessionId,
+        agentId: session.agentId,
+        cwd: session.cwd,
+        ...(session.configurationResource
+          ? { configurationResource: session.configurationResource }
+          : {}),
+        ...(session.additionalDirectories?.length
+          ? { additionalDirectories: [...session.additionalDirectories] }
+          : {}),
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+        preview: session.preview ?? existing?.preview ?? "",
+        messageCount: existing?.messageCount ?? 0,
+      };
+      return [
         updated,
         ...history.filter(
           (entry) =>
@@ -1417,8 +1414,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ),
       ]
         .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
-        .slice(0, limit)
-    );
+        .slice(0, limit);
+    });
   }
   private findOrCreateReplayMessage(
     role: ReplayMessage["role"],

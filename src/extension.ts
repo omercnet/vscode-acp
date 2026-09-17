@@ -58,7 +58,7 @@ export async function activate(
     getAgentDiscoveryOptions,
     async (request) => {
       await vscode.commands.executeCommand("vscode-acp.chatView.focus");
-      await chatProvider?.openAgentSession(request);
+      return (await chatProvider?.openAgentSession(request)) ?? false;
     }
   );
 

@@ -3035,6 +3035,137 @@ suite("ChatViewProvider", () => {
         provider.dispose();
       }
     });
+
+    test("clears retained MCP secrets before opening another agent", async () => {
+      class SwitchingClient extends TestACPClient {
+        private currentAgentId = "opencode";
+
+        forceAgent(agentId: string): void {
+          this.currentAgentId = agentId;
+        }
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAgentId(): string {
+          return this.currentAgentId;
+        }
+
+        setAgent(config?: { id: string }): void {
+          if (config) {
+            this.currentAgentId = config.id;
+          }
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const client = new SwitchingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      client.forceAgent("opencode");
+      const redactor = Reflect.get(
+        provider,
+        "mcpSecretRedactor"
+      ) as McpSecretRedactor;
+      redactor.add(["old-agent-secret"]);
+
+      await provider.openAgentSession({
+        agentId: "claude-code",
+        sessionId: "new-agent-session",
+        cwd: process.cwd(),
+        mode: "resume",
+      });
+
+      assert.strictEqual(
+        redactor.redactError(new Error("old-agent-secret")).message,
+        "old-agent-secret"
+      );
+      provider.dispose();
+    });
+
+    test("opens another agent when selected-agent persistence fails", async () => {
+      class RejectingGlobalState extends TestMemento {
+        async update(key: string, value: unknown): Promise<void> {
+          if (key === "vscode-acp.selectedAgent") {
+            throw new Error("global storage unavailable");
+          }
+          await super.update(key, value);
+        }
+      }
+      class SwitchingClient extends TestACPClient {
+        private currentAgentId = "opencode";
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getAgentId(): string {
+          return this.currentAgentId;
+        }
+
+        setAgent(config?: { id: string }): void {
+          if (config) {
+            this.currentAgentId = config.id;
+          }
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const client = new SwitchingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        new RejectingGlobalState() as unknown as vscode.Memento,
+        new TestMemento() as unknown as vscode.Memento
+      );
+      client.setAgent({ id: "opencode" });
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+
+      const opened = await provider.openAgentSession({
+        agentId: "claude-code",
+        sessionId: "new-agent-session",
+        cwd: process.cwd(),
+        mode: "resume",
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.strictEqual(opened, true);
+      assert.strictEqual(client.getAgentId(), "claude-code");
+      assert.ok(messages.some((message) => message.type === "agentChanged"));
+      assert.ok(messages.some((message) => message.type === "chatCleared"));
+      provider.dispose();
+    });
   });
   suite("Client capability handlers", () => {
     test("reads the authorized file instead of a stale dirty buffer", async () => {

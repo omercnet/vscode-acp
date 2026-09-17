@@ -17,6 +17,8 @@ import {
   SESSION_HISTORY_KEY,
   readStoredSessions,
   normalizeAgentSessionPage,
+  reconcileAgentSessions,
+  updateStoredSessions,
   type StoredSession,
 } from "../sessions";
 
@@ -103,6 +105,16 @@ class TestProbe implements SessionProbe {
   ): () => void {
     this.listeners.add(callback);
     return () => this.listeners.delete(callback);
+  }
+
+  failConnection(): void {
+    this.state = "error";
+    this.emitState();
+  }
+
+  disconnect(): void {
+    this.state = "disconnected";
+    this.emitState();
   }
 
   private emitState(): void {
@@ -206,6 +218,7 @@ suite("Agent session tree", () => {
       discoveryOptions,
       async (request) => {
         opened.push(request);
+        return true;
       },
       () => probe
     );
@@ -265,7 +278,7 @@ suite("Agent session tree", () => {
     const provider = new AgentSessionTreeProvider(
       new TestMemento(),
       discoveryOptions,
-      async () => {},
+      async () => true,
       () => probe
     );
 
@@ -297,7 +310,7 @@ suite("Agent session tree", () => {
     const provider = new AgentSessionTreeProvider(
       workspaceState,
       discoveryOptions,
-      async () => {},
+      async () => true,
       () =>
         new TestProbe(LISTING_CAPABILITIES, [
           {
@@ -357,7 +370,15 @@ suite("Agent session tree", () => {
             },
           ],
         }),
-      /safe page limit/
+      /safe wire limit/
+    );
+    assert.throws(
+      () =>
+        normalizeAgentSessionPage({
+          sessions: [session("bounded-session")],
+          futureField: "x".repeat(1_100_000),
+        }),
+      /safe wire limit/
     );
 
     const pages = Array.from({ length: 6 }, (_, pageIndex) => ({
@@ -371,7 +392,7 @@ suite("Agent session tree", () => {
     const provider = new AgentSessionTreeProvider(
       new TestMemento(),
       discoveryOptions,
-      async () => {},
+      async () => true,
       () => new TestProbe(LISTING_CAPABILITIES, pages)
     );
 
@@ -424,7 +445,7 @@ suite("Agent session tree", () => {
     const provider = new AgentSessionTreeProvider(
       workspaceState,
       discoveryOptions,
-      async () => {},
+      async () => true,
       () => probe
     );
 
@@ -460,7 +481,7 @@ suite("Agent session tree", () => {
     const provider = new AgentSessionTreeProvider(
       workspaceState,
       discoveryOptions,
-      async () => {},
+      async () => true,
       () => probe
     );
 
@@ -479,6 +500,122 @@ suite("Agent session tree", () => {
     }
   });
 
+
+  test("keeps cached sessions visible when the probe later errors", async () => {
+    const probe = new TestProbe(LISTING_CAPABILITIES, [
+      {
+        sessions: [
+          {
+            sessionId: "cached-session",
+            cwd: "/workspace",
+            title: "Cached session",
+          },
+        ],
+        nextCursor: "next-page",
+      },
+    ]);
+    const provider = new AgentSessionTreeProvider(
+      new TestMemento(),
+      discoveryOptions,
+      async () => true,
+      () => probe
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      probe.failConnection();
+      assert.deepStrictEqual(
+        provider.getChildren(agent).map((node) =>
+          node.kind === "session"
+            ? node.session.sessionId
+            : node.kind === "state"
+              ? node.state
+              : node.agent.id
+        ),
+        ["cached-session", "error"]
+      );
+    } finally {
+      provider.dispose();
+    }
+  });
+
+
+  test("leaves authentication state when its probe disconnects", async () => {
+    const probe = new TestProbe(LISTING_CAPABILITIES, [
+      RequestError.authRequired(),
+    ]);
+    const provider = new AgentSessionTreeProvider(
+      new TestMemento(),
+      discoveryOptions,
+      async () => true,
+      () => probe
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      assert.strictEqual(
+        provider.getTreeItem(agent).description,
+        "Authentication required"
+      );
+      probe.disconnect();
+      assert.strictEqual(provider.getTreeItem(agent).description, "Disconnected");
+    } finally {
+      provider.dispose();
+    }
+  });
+  test("renders list-only sessions as inert tree items", async () => {
+    const workspaceState = new TestMemento();
+    await workspaceState.update(SESSION_HISTORY_KEY, [
+      {
+        ...storedSession("read-only-session"),
+        additionalDirectories: ["/saved-extra"],
+      },
+    ]);
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async () => true,
+      () =>
+        new TestProbe(
+          {
+            load: false,
+            list: true,
+            resume: false,
+            additionalDirectories: false,
+          },
+          [
+            {
+              sessions: [
+                {
+                  sessionId: "read-only-session",
+                  cwd: "/workspace",
+                  title: "[Open](command:malicious)",
+                },
+              ],
+            },
+          ]
+        )
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const children = provider.getChildren(agent);
+      assert.strictEqual(children.length, 1);
+      assert.strictEqual(children[0].kind, "session");
+      if (children[0].kind === "session") {
+        assert.deepStrictEqual(children[0].session.additionalDirectories, [
+          "/saved-extra",
+        ]);
+      }
+      const item = provider.getTreeItem(children[0]);
+      assert.strictEqual(item.command, undefined);
+      assert.strictEqual(item.contextValue, "vscode-acp.session.unsupported");
+      assert.strictEqual(typeof item.tooltip, "string");
+      assert.match(String(item.tooltip), /\[Open\]\(command:malicious\)/);
+    } finally {
+      provider.dispose();
+    }
+  });
   test("renders empty, unsupported, authentication, and error states", async () => {
     const cases: Array<{
       capabilities: ACPSessionCapabilities;
@@ -514,7 +651,7 @@ suite("Agent session tree", () => {
       const provider = new AgentSessionTreeProvider(
         new TestMemento(),
         discoveryOptions,
-        async () => {},
+        async () => true,
         () =>
           new TestProbe(
             entry.capabilities,
@@ -539,6 +676,7 @@ suite("Agent session tree", () => {
     const workspaceState = new TestMemento();
     const requests: AgentSessionOpenRequest[] = [];
     let fail = false;
+    let cancel = false;
     const provider = new AgentSessionTreeProvider(
       workspaceState,
       discoveryOptions,
@@ -547,6 +685,10 @@ suite("Agent session tree", () => {
         if (fail) {
           throw RequestError.resourceNotFound(request.sessionId);
         }
+        if (cancel) {
+          return false;
+        }
+        return true;
       },
       () =>
         new TestProbe(LISTING_CAPABILITIES, [
@@ -579,6 +721,354 @@ suite("Agent session tree", () => {
         provider.getTreeItem(node).description,
         "Stale session"
       );
+
+      cancel = true;
+      fail = false;
+      await provider.openSession(node, "resume");
+      let reopened = provider
+        .getChildren(agent)
+        .find(
+          (candidate): candidate is SessionNode =>
+            candidate.kind === "session" &&
+            candidate.session.sessionId === "listed-session"
+        );
+      assert.ok(reopened);
+      assert.strictEqual(reopened.stale, true);
+
+      cancel = false;
+      await provider.openSession(node, "resume");
+      reopened = provider
+        .getChildren(agent)
+        .find(
+          (candidate): candidate is SessionNode =>
+            candidate.kind === "session" &&
+            candidate.session.sessionId === "listed-session"
+        );
+      assert.ok(reopened);
+      assert.strictEqual(reopened.stale, false);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  test("serializes concurrent session history mutations", async () => {
+    let releaseFirstWrite!: () => void;
+    let markFirstWriteStarted!: () => void;
+    const firstWriteStarted = new Promise<void>((resolve) => {
+      markFirstWriteStarted = resolve;
+    });
+    const firstWriteGate = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    class DelayedMemento extends TestMemento {
+      private historyWrites = 0;
+
+      async update(key: string, value: unknown): Promise<void> {
+        if (key === SESSION_HISTORY_KEY && this.historyWrites++ === 0) {
+          markFirstWriteStarted();
+          await firstWriteGate;
+        }
+        await super.update(key, value);
+      }
+    }
+    const workspaceState = new DelayedMemento();
+    const first = storedSession("first");
+    const second = storedSession("second");
+
+    const firstUpdate = updateStoredSessions(workspaceState, (history) => [
+      first,
+      ...history,
+    ]);
+    await firstWriteStarted;
+    const secondUpdate = updateStoredSessions(workspaceState, (history) => [
+      second,
+      ...history,
+    ]);
+    releaseFirstWrite();
+    await Promise.all([firstUpdate, secondUpdate]);
+
+    assert.deepStrictEqual(
+      readStoredSessions(workspaceState).map((session) => session.sessionId),
+      ["second", "first"]
+    );
+  });
+
+  test("preserves newer workspace recency during agent reconciliation", () => {
+    const saved = {
+      ...storedSession("recent"),
+      lastUsedAt: 200,
+      additionalDirectories: ["/saved-extra"],
+    };
+    const reconciled = reconcileAgentSessions(
+      [saved],
+      "opencode",
+      [
+        {
+          sessionId: "recent",
+          cwd: "/workspace",
+          title: "Agent title",
+          updatedAt: new Date(100).toISOString(),
+        },
+      ],
+      50
+    );
+
+    assert.strictEqual(reconciled[0].lastUsedAt, 200);
+    assert.deepStrictEqual(reconciled[0].additionalDirectories, [
+      "/saved-extra",
+    ]);
+    const limited = reconcileAgentSessions(
+      [{ ...storedSession("known-recent", "other-agent"), lastUsedAt: 50 }],
+      "opencode",
+      [
+        {
+          sessionId: "unknown-recency",
+          cwd: "/workspace",
+          title: "Undated agent session",
+        },
+      ],
+      1
+    );
+    assert.strictEqual(limited[0].sessionId, "known-recent");
+    const explicitlyCleared = reconcileAgentSessions(
+      [saved],
+      "opencode",
+      [
+        {
+          sessionId: "recent",
+          cwd: "/workspace",
+          additionalDirectories: [],
+          title: "Agent title",
+        },
+      ],
+      50
+    );
+    assert.strictEqual(explicitlyCleared[0].additionalDirectories, undefined);
+  });
+
+  test("does not publish an obsolete load after refresh replaces its state", async () => {
+    let releaseList!: (value: unknown) => void;
+    let markListStarted!: () => void;
+    const listStarted = new Promise<void>((resolve) => {
+      markListStarted = resolve;
+    });
+    const listResult = new Promise<unknown>((resolve) => {
+      releaseList = resolve;
+    });
+    class DeferredProbe extends TestProbe {
+      async listSessions(params: {
+        cursor?: string | null;
+      }): Promise<unknown> {
+        this.requests.push(params);
+        markListStarted();
+        return listResult;
+      }
+    }
+    const probe = new DeferredProbe(LISTING_CAPABILITIES, []);
+    const provider = new AgentSessionTreeProvider(
+      new TestMemento(),
+      discoveryOptions,
+      async () => true,
+      () => probe
+    );
+    const agent = provider
+      .getChildren()
+      .find(
+        (node) => node.kind === "agent" && node.agent.id === "opencode"
+      );
+    assert.ok(agent);
+    const events: Array<AgentSessionTreeNode | undefined> = [];
+    const subscription = provider.onDidChangeTreeData((event) =>
+      events.push(event ?? undefined)
+    );
+    provider.getChildren(agent);
+    await listStarted;
+    provider.refresh("opencode");
+    const eventsAfterRefresh = events.length;
+
+    releaseList({
+      sessions: [
+        { sessionId: "obsolete", cwd: "/workspace", title: "Obsolete" },
+      ],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.strictEqual(events.length, eventsAfterRefresh);
+    subscription.dispose();
+    provider.dispose();
+  });
+
+  test("cancels queued reconciliation after refresh replaces its state", async () => {
+    let releaseWrite!: () => void;
+    let markWriteStarted!: () => void;
+    const writeStarted = new Promise<void>((resolve) => {
+      markWriteStarted = resolve;
+    });
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    class BlockingMemento extends TestMemento {
+      blockNextHistoryWrite = false;
+
+      async update(key: string, value: unknown): Promise<void> {
+        if (key === SESSION_HISTORY_KEY && this.blockNextHistoryWrite) {
+          this.blockNextHistoryWrite = false;
+          markWriteStarted();
+          await writeGate;
+        }
+        await super.update(key, value);
+      }
+    }
+    const workspaceState = new BlockingMemento();
+    await workspaceState.update(SESSION_HISTORY_KEY, [
+      storedSession("recoverable-local"),
+    ]);
+    workspaceState.blockNextHistoryWrite = true;
+    const blocker = updateStoredSessions(workspaceState, (history) => [
+      ...history,
+    ]);
+    await writeStarted;
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async () => true,
+      () =>
+        new TestProbe(LISTING_CAPABILITIES, [
+          {
+            sessions: [
+              {
+                sessionId: "obsolete-authoritative",
+                cwd: "/workspace",
+                title: "Obsolete",
+              },
+            ],
+          },
+        ])
+    );
+    const agent = provider
+      .getChildren()
+      .find(
+        (node) => node.kind === "agent" && node.agent.id === "opencode"
+      );
+    assert.ok(agent);
+    provider.getChildren(agent);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    provider.refresh("opencode");
+
+    releaseWrite();
+    await blocker;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepStrictEqual(
+      readStoredSessions(workspaceState).map((session) => session.sessionId),
+      ["recoverable-local"]
+    );
+    provider.dispose();
+  });
+
+  test("clones fallback sessions before updating transient tree recency", async () => {
+    const workspaceState = new TestMemento();
+    const local = storedSession("local-session");
+    await workspaceState.update(SESSION_HISTORY_KEY, [local]);
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async () => true,
+      () => new TestProbe(FALLBACK_CAPABILITIES, []),
+      () => false
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const node = provider
+        .getChildren(agent)
+        .find(
+          (candidate): candidate is SessionNode => candidate.kind === "session"
+        );
+      assert.ok(node);
+      await provider.openSession(node, "resume");
+
+      assert.strictEqual(local.lastUsedAt, 1);
+      assert.strictEqual(readStoredSessions(workspaceState)[0].lastUsedAt, 1);
+      assert.ok(node.session.lastUsedAt > 1);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+
+  test("refreshes fallback children after shared history mutations", async () => {
+    const workspaceState = new TestMemento();
+    await workspaceState.update(SESSION_HISTORY_KEY, [
+      storedSession("first-local"),
+    ]);
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async () => true,
+      () => new TestProbe(FALLBACK_CAPABILITIES, [])
+    );
+    const events: Array<AgentSessionTreeNode | undefined> = [];
+    const subscription = provider.onDidChangeTreeData((event) =>
+      events.push(event ?? undefined)
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const eventCount = events.length;
+      await updateStoredSessions(workspaceState, (history) => [
+        storedSession("second-local"),
+        ...history,
+      ]);
+
+      assert.ok(events.length > eventCount);
+      assert.deepStrictEqual(
+        provider.getChildren(agent).map((node) =>
+          node.kind === "session" ? node.session.sessionId : node.kind
+        ),
+        ["second-local", "first-local"]
+      );
+    } finally {
+      subscription.dispose();
+      provider.dispose();
+    }
+  });
+  test("keeps valid live sessions visible when reconciliation storage fails", async () => {
+    class FailingMemento extends TestMemento {
+      async update(key: string, value: unknown): Promise<void> {
+        if (key === SESSION_HISTORY_KEY) {
+          throw new Error("storage unavailable");
+        }
+        await super.update(key, value);
+      }
+    }
+    const provider = new AgentSessionTreeProvider(
+      new FailingMemento(),
+      discoveryOptions,
+      async () => true,
+      () =>
+        new TestProbe(LISTING_CAPABILITIES, [
+          {
+            sessions: [
+              {
+                sessionId: "live-session",
+                cwd: "/workspace",
+                title: "Live session",
+              },
+            ],
+          },
+        ])
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const children = provider.getChildren(agent);
+      assert.strictEqual(children.length, 1);
+      assert.strictEqual(children[0].kind, "session");
+      if (children[0].kind === "session") {
+        assert.strictEqual(children[0].session.sessionId, "live-session");
+      }
     } finally {
       provider.dispose();
     }
