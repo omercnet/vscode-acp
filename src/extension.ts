@@ -16,6 +16,51 @@ let sessionTreeProvider: AgentSessionTreeProvider | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
 const CHAT_VIEW_LOCATION_INITIALIZED = "vscode-acp.chatViewSecondarySidebarV1";
 
+type LifecycleCommandProvider = Pick<
+  ChatViewProvider,
+  "restartAgent" | "disconnectAgent"
+>;
+type CommandMessage = (message: string) => unknown;
+
+export function createRestartAgentCommand(
+  provider: LifecycleCommandProvider | undefined,
+  focusChat: () => PromiseLike<unknown>,
+  showInformation: CommandMessage,
+  showError: CommandMessage
+): () => Promise<void> {
+  return async () => {
+    const restarting = (provider?.restartAgent() ?? Promise.resolve()).then(
+      () => ({ status: "fulfilled" as const }),
+      (error: unknown) => ({ status: "rejected" as const, error })
+    );
+    try {
+      await focusChat();
+      const result = await restarting;
+      if (result.status === "rejected") {
+        throw result.error;
+      }
+      showInformation("ACP agent restarted");
+    } catch (error) {
+      showError(`Failed to restart agent: ${formatACPError(error)}`);
+    }
+  };
+}
+
+export function createDisconnectAgentCommand(
+  provider: LifecycleCommandProvider | undefined,
+  showInformation: CommandMessage,
+  showError: CommandMessage
+): () => Promise<void> {
+  return async () => {
+    try {
+      await provider?.disconnectAgent();
+      showInformation("ACP agent disconnected");
+    } catch (error) {
+      showError(`Failed to disconnect agent: ${formatACPError(error)}`);
+    }
+  };
+}
+
 export async function activate(
   context: vscode.ExtensionContext
 ): Promise<void> {
@@ -243,31 +288,28 @@ export async function activate(
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("vscode-acp.restartAgent", async () => {
-      await vscode.commands.executeCommand("vscode-acp.chatView.focus");
-      try {
-        await chatProvider?.restartAgent();
-        vscode.window.showInformationMessage("ACP agent restarted");
-      } catch (error) {
-        vscode.window.showErrorMessage(
-          `Failed to restart agent: ${formatACPError(error)}`
-        );
-      }
-    })
+    vscode.commands.registerCommand(
+      "vscode-acp.restartAgent",
+      createRestartAgentCommand(
+        chatProvider,
+        () => vscode.commands.executeCommand("vscode-acp.chatView.focus"),
+        (message) => vscode.window.showInformationMessage(message),
+        (message) => vscode.window.showErrorMessage(message)
+      )
+    )
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("vscode-acp.disconnectAgent", async () => {
-      try {
-        await chatProvider?.disconnectAgent();
-        vscode.window.showInformationMessage("ACP agent disconnected");
-      } catch (error) {
-        vscode.window.showErrorMessage(
-          `Failed to disconnect agent: ${formatACPError(error)}`
-        );
-      }
-    })
+    vscode.commands.registerCommand(
+      "vscode-acp.disconnectAgent",
+      createDisconnectAgentCommand(
+        chatProvider,
+        (message) => vscode.window.showInformationMessage(message),
+        (message) => vscode.window.showErrorMessage(message)
+      )
+    )
   );
+
 
   context.subscriptions.push({
     dispose: () => {

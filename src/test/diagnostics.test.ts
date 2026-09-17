@@ -2,6 +2,10 @@ import * as assert from "assert";
 import * as vscode from "vscode";
 import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
 import { ACPDiagnostics, type ACPDiagnosticsSink } from "../acp/diagnostics";
+import {
+  createDisconnectAgentCommand,
+  createRestartAgentCommand,
+} from "../extension";
 
 class TestSink implements ACPDiagnosticsSink {
   readonly lines: string[] = [];
@@ -382,6 +386,41 @@ suite("ACP diagnostics", () => {
       assert.strictEqual(response.outcome, "unmatched");
     });
   }
+
+  test("restart command registers intent before awaiting view focus", async () => {
+    const calls: string[] = [];
+    let releaseFocus!: () => void;
+    const focusGate = new Promise<void>((resolve) => {
+      releaseFocus = resolve;
+    });
+    const provider = {
+      async restartAgent(): Promise<void> {
+        calls.push("restart");
+      },
+      async disconnectAgent(): Promise<void> {
+        calls.push("disconnect");
+      },
+    };
+    const restartHandler = createRestartAgentCommand(
+      provider,
+      () => focusGate,
+      () => undefined,
+      () => undefined
+    );
+    const disconnectHandler = createDisconnectAgentCommand(
+      provider,
+      () => undefined,
+      () => undefined
+    );
+
+    const restarting = restartHandler();
+    const disconnecting = disconnectHandler();
+    const callsBeforeFocus = [...calls];
+    releaseFocus();
+    await Promise.all([restarting, disconnecting]);
+
+    assert.deepStrictEqual(callsBeforeFocus, ["restart", "disconnect"]);
+  });
 
   test("registers diagnostics and lifecycle commands", async () => {
     const extension = vscode.extensions.getExtension("omercnet.vscode-acp");
