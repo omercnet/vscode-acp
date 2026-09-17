@@ -2104,6 +2104,57 @@ suite("ChatViewProvider", () => {
       });
     }
 
+    test("disconnect invalidates an older queued new chat", async () => {
+      let markSessionStarted!: () => void;
+      let releaseSession!: () => void;
+      const sessionStarted = new Promise<void>((resolve) => {
+        markSessionStarted = resolve;
+      });
+      const sessionGate = new Promise<void>((resolve) => {
+        releaseSession = resolve;
+      });
+
+      class QueuedNewChatClient extends LifecycleClient {
+        public newSessionCalls = 0;
+
+        async newSession(): Promise<void> {
+          this.newSessionCalls++;
+          if (this.newSessionCalls === 1) {
+            markSessionStarted();
+            await sessionGate;
+          }
+          await super.newSession();
+        }
+
+        async disconnect(): Promise<void> {
+          await super.disconnect();
+          releaseSession();
+        }
+      }
+
+      const client = new QueuedNewChatClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        connect(): Promise<void>;
+        handleNewChat(): Promise<void>;
+        disconnectAgent(): Promise<void>;
+      };
+
+      const connecting = lifecycle.connect();
+      await sessionStarted;
+      const newChat = lifecycle.handleNewChat();
+      const disconnecting = lifecycle.disconnectAgent();
+      await Promise.all([connecting, newChat, disconnecting]);
+
+      assert.strictEqual(client.getState(), "disconnected");
+      assert.strictEqual(client.newSessionCalls, 1);
+      assert.ok(!client.calls.includes("connect"));
+    });
+
     test("disconnect reuses cleanup and revokes pending permissions", async () => {
       const client = new LifecycleClient();
       const provider = new ChatViewProvider(

@@ -2746,6 +2746,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     label: string,
     operation: () => Promise<void>
   ): Promise<void> {
+    const lifecycleGeneration = this.lifecycleCommandGeneration;
     const previousTransition = this.sessionTransition;
     const transition = (async () => {
       if (previousTransition) {
@@ -2754,6 +2755,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         } catch {
           // A new explicit transition can proceed from the restored client state.
         }
+      }
+      if (lifecycleGeneration !== this.lifecycleCommandGeneration) {
+        return;
       }
       await operation();
     })();
@@ -2904,6 +2908,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async ensureSession(): Promise<void> {
+    const lifecycleGeneration = this.lifecycleCommandGeneration;
     while (this.sessionTransition) {
       const transition = this.sessionTransition;
       try {
@@ -2913,6 +2918,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           throw error;
         }
       }
+    }
+    if (lifecycleGeneration !== this.lifecycleCommandGeneration) {
+      return;
     }
 
     if (this.hasSession || this.disposed) {
