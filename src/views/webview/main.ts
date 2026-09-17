@@ -1991,6 +1991,14 @@ export class WebviewController {
     this.updateInputControls();
   }
 
+  private configIdForFocusTarget(element: Element | null): string | undefined {
+    return element?.tagName === "SELECT" &&
+      element.classList.contains("session-config-select") &&
+      this.elements.configOptionsContainer.contains(element)
+      ? (element as HTMLSelectElement).dataset.configId
+      : undefined;
+  }
+
   private clearSessionOptions(): void {
     this.hasSessionConfigOptions = false;
     this.elements.configOptionsContainer.replaceChildren();
@@ -2003,13 +2011,16 @@ export class WebviewController {
   private renderSessionConfigOptions(
     configOptions: readonly SessionConfigOption[]
   ): void {
-    const activeElement = this.doc.activeElement;
-    const focusedConfigId =
-      activeElement?.tagName === "SELECT" &&
-      activeElement.classList.contains("session-config-select") &&
-      this.elements.configOptionsContainer.contains(activeElement)
-        ? (activeElement as HTMLSelectElement).dataset.configId
-        : undefined;
+    const focusedConfigId = this.configIdForFocusTarget(
+      this.doc.activeElement
+    );
+    const sessionPickerConfigId = this.configIdForFocusTarget(
+      this.sessionPickerPreviousFocus
+    );
+    const permissionConfigId = this.configIdForFocusTarget(
+      this.previouslyFocusedElement
+    );
+    const selectorsByConfigId = new Map<string, HTMLSelectElement>();
     this.clearSessionOptions();
     this.hasSessionConfigOptions = true;
 
@@ -2063,16 +2074,20 @@ export class WebviewController {
       select.style.display = "inline-block";
       updateSelectLabel(select, label);
       this.elements.configOptionsContainer.appendChild(select);
+      if (!selectorsByConfigId.has(configOption.id)) {
+        selectorsByConfigId.set(configOption.id, select);
+      }
+    }
+    if (sessionPickerConfigId !== undefined) {
+      this.sessionPickerPreviousFocus =
+        selectorsByConfigId.get(sessionPickerConfigId) ?? null;
+    }
+    if (permissionConfigId !== undefined) {
+      this.previouslyFocusedElement =
+        selectorsByConfigId.get(permissionConfigId) ?? null;
     }
     if (focusedConfigId !== undefined) {
-      for (const select of this.elements.configOptionsContainer.querySelectorAll<HTMLSelectElement>(
-        ".session-config-select"
-      )) {
-        if (select.dataset.configId === focusedConfigId) {
-          select.focus();
-          break;
-        }
-      }
+      selectorsByConfigId.get(focusedConfigId)?.focus();
     }
     this.updateInputControls(false);
   }

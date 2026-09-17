@@ -1216,9 +1216,11 @@ export class ACPClient {
         configOptions,
         commands: this.pendingCommandsBySession.get(sessionId) ?? null,
       };
-      this.sessionIdentityGeneration++;
-      this.configOptionMutationTail = Promise.resolve();
-      this.activeConfigMutations.clear();
+      if (replacedSessionId !== sessionId) {
+        this.sessionIdentityGeneration++;
+        this.configOptionMutationTail = Promise.resolve();
+        this.activeConfigMutations.clear();
+      }
       this.currentSessionId = sessionId;
       this.sessionMetadata = metadata;
       if (

@@ -3203,6 +3203,63 @@ suite("Webview", () => {
       assert.strictEqual(input.disabled, false);
     });
 
+    test("returns focus to a surviving config selector after history closes", () => {
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "fast",
+            options: [{ value: "fast", name: "Fast" }],
+          },
+        ],
+      });
+      const original = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(original);
+      original.focus();
+      controller.handleMessage({
+        type: "sessionHistory",
+        mode: "load",
+        sessions: [
+          {
+            sessionId: "session-1",
+            cwd: "/workspace/project",
+            createdAt: 1,
+            lastUsedAt: 2,
+            preview: "Restore this conversation",
+            messageCount: 2,
+          },
+        ],
+      });
+
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "accurate",
+            options: [{ value: "accurate", name: "Accurate" }],
+          },
+        ],
+      });
+      const replacement = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(replacement);
+      document
+        .querySelector<HTMLButtonElement>(".session-picker-close")
+        ?.click();
+
+      assert.notStrictEqual(replacement, original);
+      assert.strictEqual(document.activeElement, replacement);
+    });
+
     test("keeps Tab and Shift+Tab focus inside session history", () => {
       controller.handleMessage({
         type: "sessionHistory",
@@ -3483,6 +3540,50 @@ suite("Webview", () => {
 
       const modal = document.getElementById("permission-modal");
       assert.ok(!modal?.classList.contains("visible"));
+    });
+
+    test("returns focus to a surviving config selector after permission closes", () => {
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "fast",
+            options: [{ value: "fast", name: "Fast" }],
+          },
+        ],
+      });
+      const original = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(original);
+      original.focus();
+      controller.showPermissionModal("req-focus", "Test", "content", [
+        { id: "reject", kind: "reject_once" },
+      ]);
+
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "accurate",
+            options: [{ value: "accurate", name: "Accurate" }],
+          },
+        ],
+      });
+      const replacement = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(replacement);
+      controller.hidePermissionModal();
+
+      assert.notStrictEqual(replacement, original);
+      assert.strictEqual(document.activeElement, replacement);
     });
 
     test("clicking option sends permissionResponse message", () => {

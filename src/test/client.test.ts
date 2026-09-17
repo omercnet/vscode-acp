@@ -1078,6 +1078,41 @@ suite("ACPClient with Mock Server", () => {
         { sessionUpdate: "agent_message_chunk", text: "answer" },
       ]);
     });
+
+    test("reconciles a pending mutation across a same-session load", async () => {
+      demoMode = "same-session-load-pending-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (
+        mockProcesses[0].server.getConfigOptionRequests().length === 0
+      ) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await client.loadSession({
+        sessionId: active.sessionId,
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+      await mutation;
+
+      const clientState = client
+        .getSessionMetadata()
+        ?.configOptions?.map(({ id, currentValue }) => ({ id, currentValue }));
+      const agentState = mockProcesses[0].server
+        .getSessionConfigOptions(active.sessionId)
+        ?.map(({ id, currentValue }) => ({ id, currentValue }));
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.deepStrictEqual(clientState, [
+        { id: "interaction", currentValue: "review" },
+        { id: "model", currentValue: "accurate" },
+      ]);
+      assert.deepStrictEqual(clientState, agentState);
+    });
     test("passes the same MCP servers to session/new and session/load", async () => {
       demoMode = "load";
       await client.connect();

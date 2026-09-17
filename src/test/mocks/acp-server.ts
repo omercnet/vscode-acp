@@ -82,6 +82,7 @@ export type DemoMode =
   | "mcp-transports"
   | "load-failure"
   | "sessions"
+  | "same-session-load-pending-config"
   | "no-initialize"
   | "session-isolation"
   | "mode-update"
@@ -258,6 +259,7 @@ export class MockACPServer {
               loadSession:
                 this.demoMode === "load" ||
                 this.demoMode === "load-failure" ||
+                this.demoMode === "same-session-load-pending-config" ||
                 this.demoMode === "authentication-mcp" ||
                 this.demoMode === "sessions",
               ...(this.demoMode === "mcp-transports" ||
@@ -449,6 +451,7 @@ export class MockACPServer {
       this.demoMode === "overlapping-config" ||
       this.demoMode === "pre-response-config" ||
       this.demoMode === "post-response-config" ||
+      this.demoMode === "same-session-load-pending-config" ||
       this.demoMode === "replacement-failure-pending-config" ||
       this.demoMode === "replacement-failure-ordered-config" ||
       this.demoMode === "replacement-success-pending-config";
@@ -686,6 +689,30 @@ export class MockACPServer {
       messageId: "restored-agent",
       content: { type: "text", text: "answer" },
     });
+    const configOptions =
+      this.demoMode === "same-session-load-pending-config"
+        ? [
+            {
+              id: "interaction",
+              type: "select" as const,
+              name: "Interaction",
+              category: "mode",
+              currentValue: "build",
+              options: [
+                { value: "build", name: "Build" },
+                { value: "review", name: "Review" },
+              ],
+            },
+            {
+              id: "model",
+              type: "select" as const,
+              name: "Model",
+              category: "model",
+              currentValue: "fast",
+              options: [{ value: "fast", name: "Fast" }],
+            },
+          ]
+        : session.configOptions;
     this.sendResponse(id, {
       modes: {
         availableModes: [
@@ -694,7 +721,7 @@ export class MockACPServer {
         ],
         currentModeId: "code",
       },
-      configOptions: session.configOptions,
+      configOptions,
     } satisfies acp.LoadSessionResponse);
   }
   private handleListSessions(
@@ -786,6 +813,7 @@ export class MockACPServer {
         this.demoMode === "overlapping-config" ||
         this.demoMode === "pre-response-config" ||
         this.demoMode === "post-response-config" ||
+        this.demoMode === "same-session-load-pending-config" ||
         this.demoMode === "replacement-failure-pending-config" ||
         this.demoMode === "replacement-failure-ordered-config" ||
         this.demoMode === "replacement-success-pending-config") &&
@@ -832,6 +860,14 @@ export class MockACPServer {
       ) {
         setTimeout(
           () => this.sendResponse(id, { configOptions: session.configOptions }),
+          25
+        );
+        return;
+      }
+      if (this.demoMode === "same-session-load-pending-config") {
+        const responseConfigOptions = session.configOptions;
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: responseConfigOptions }),
           25
         );
         return;
