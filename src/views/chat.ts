@@ -79,10 +79,7 @@ import {
   updateStoredSessions,
   type StoredSession,
 } from "../sessions";
-import type {
-  AgentSessionOpenRequest,
-  SessionOpenMode,
-} from "./sessions";
+import type { AgentSessionOpenRequest, SessionOpenMode } from "./sessions";
 
 interface WebviewToolLocation {
   path: string;
@@ -1134,8 +1131,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let deleted = false;
       await updateStoredSessions(this.workspaceState, (history) => {
         const updated = history.filter(
-          (entry) =>
-            entry.sessionId !== sessionId || entry.agentId !== agentId
+          (entry) => entry.sessionId !== sessionId || entry.agentId !== agentId
         );
         deleted = updated.length !== history.length;
         return updated;
@@ -1196,9 +1192,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         cwd: sessionContext.cwd,
         ...(sessionContext.additionalDirectories?.length
           ? {
-              additionalDirectories: [
-                ...sessionContext.additionalDirectories,
-              ],
+              additionalDirectories: [...sessionContext.additionalDirectories],
             }
           : {}),
         createdAt: existing?.createdAt ?? now,
@@ -1240,7 +1234,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         const previousSessionContext = this.activeSessionContext;
         const hadSession = sameAgent && this.hasSession;
-        const hadRestoredModeModel = sameAgent && this.hasRestoredModeModel;
+        const hadRestoredLegacyMode = sameAgent && this.hasRestoredLegacyMode;
         let generation = ++this.conversationGeneration;
         this.expirePermissionRequests();
         await this.disposeTerminals();
@@ -1313,9 +1307,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ...(capabilities.additionalDirectories &&
             request.additionalDirectories?.length
               ? {
-                  additionalDirectories: [
-                    ...request.additionalDirectories,
-                  ],
+                  additionalDirectories: [...request.additionalDirectories],
                 }
               : {}),
           };
@@ -1348,13 +1340,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               : {}),
           };
           this.hasSession = true;
-          this.hasRestoredModeModel = false;
+          this.hasRestoredLegacyMode = false;
           await this.touchStoredSession({
             ...request,
             configurationResource:
               request.configurationResource ?? resource?.toString(),
-            additionalDirectories:
-              sessionRequest.additionalDirectories ?? [],
+            additionalDirectories: sessionRequest.additionalDirectories ?? [],
           }).catch(() => {
             console.warn("[Chat] Failed to update session metadata");
           });
@@ -1397,10 +1388,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.replayGeneration = null;
           this.replayMessages = [];
           this.hasSession = hadSession;
-          this.hasRestoredModeModel = hadRestoredModeModel;
-          this.activeSessionContext = sameAgent
-            ? previousSessionContext
-            : null;
+          this.hasRestoredLegacyMode = hadRestoredLegacyMode;
+          this.activeSessionContext = sameAgent ? previousSessionContext : null;
           this.postMessage({
             type: "replayFailed",
             text: formatACPError(redacted),

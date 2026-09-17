@@ -1684,6 +1684,35 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("applies a superseding notification in the response transport chunk", async () => {
+      demoMode = "same-chunk-post-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const configUpdateReceived = new Promise<void>((resolve) => {
+        client.setOnSessionUpdate((update) => {
+          if (update.update.sessionUpdate === "config_option_update") {
+            resolve();
+          }
+        });
+      });
+
+      await client.setSessionConfigOption("interaction", "review");
+      await configUpdateReceived;
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "latest" },
+        ]
+      );
+    });
+
     test("rejects values that the advertised option does not offer", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });

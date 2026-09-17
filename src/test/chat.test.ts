@@ -318,6 +318,12 @@ class TestACPClient implements MockACPClient {
 
   async setSessionConfigOption(configId: string, value: string): Promise<void> {
     this.configOptionCalls.push({ configId, value });
+    const option = this.sessionMetadata.configOptions?.find(
+      (candidate) => candidate.id === configId
+    );
+    if (option) {
+      option.currentValue = value;
+    }
   }
 
   getSessionMetadata(): SessionMetadata {
@@ -1066,6 +1072,17 @@ suite("ChatViewProvider", () => {
       await lifecycle.handleConfigOptionChange("interaction", "review");
       await lifecycle.handleConfigOptionChange("model", "accurate");
       await lifecycle.handleConfigOptionChange("thought", "high");
+
+      assert.deepStrictEqual(
+        acpClient.sessionMetadata.configOptions?.map(
+          ({ id, currentValue }) => ({ id, currentValue })
+        ),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+          { id: "thought", currentValue: "high" },
+        ]
+      );
 
       assert.strictEqual(
         memento.get<string>("vscode-acp.selectedMode"),

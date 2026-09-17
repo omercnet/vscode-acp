@@ -280,6 +280,65 @@ interface ActiveConfigMutation {
   supersedingConfigOptions?: SupportedSessionConfigOption[];
 }
 
+function preserveConfigResponseOrder(
+  stream: acp.Stream,
+  waitForResponseContinuation: () => Promise<void>
+): acp.Stream {
+  const configRequestIds = new Set<unknown>();
+  const writer = stream.writable.getWriter();
+  const writable = new WritableStream<acp.AnyMessage>({
+    async write(message) {
+      const candidate = message as Record<string, unknown>;
+      const isConfigRequest =
+        candidate.method === acp.methods.agent.session.setConfigOption &&
+        "id" in candidate;
+      if (isConfigRequest) {
+        configRequestIds.add(candidate.id);
+      }
+      try {
+        await writer.write(message);
+      } catch (error) {
+        if (isConfigRequest) {
+          configRequestIds.delete(candidate.id);
+        }
+        throw error;
+      }
+    },
+    async close() {
+      try {
+        await writer.close();
+      } finally {
+        writer.releaseLock();
+      }
+    },
+    async abort(reason) {
+      try {
+        await writer.abort(reason);
+      } finally {
+        writer.releaseLock();
+      }
+    },
+  });
+  const readable = stream.readable.pipeThrough(
+    new TransformStream<acp.AnyMessage, acp.AnyMessage>({
+      async transform(message, controller) {
+        const candidate = message as Record<string, unknown>;
+        const isConfigResponse =
+          !("method" in candidate) &&
+          "id" in candidate &&
+          configRequestIds.delete(candidate.id);
+        controller.enqueue(message);
+        if (isConfigResponse) {
+          // The SDK resolves a response promise asynchronously. Hold later
+          // messages until its continuation marks this response as observed.
+          await waitForResponseContinuation();
+        }
+      },
+    })
+  );
+  return { writable, readable };
+}
+
 export type ACPConnectionState =
   "disconnected" | "connecting" | "connected" | "error";
 
@@ -475,6 +534,7 @@ export class ACPClient {
   private promptCapabilities: acp.PromptCapabilities = {};
   private configOptionMutationTail: Promise<void> = Promise.resolve();
   private activeConfigMutations = new Set<ActiveConfigMutation>();
+  private configResponseContinuation: (() => void) | null = null;
   private activePrompt: {
     connection: acp.ClientConnection;
     sessionId: acp.SessionId;
@@ -527,6 +587,21 @@ export class ACPClient {
     ) {
       await this.sessionTransitionSettled;
     }
+  }
+
+  private waitForConfigResponseContinuation(): Promise<void> {
+    if (this.activeConfigMutations.size === 0) {
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.configResponseContinuation = resolve;
+    });
+  }
+
+  private releaseConfigResponseContinuation(): void {
+    const release = this.configResponseContinuation;
+    this.configResponseContinuation = null;
+    release?.();
   }
 
   setAgent(config: AgentConfig): void {
@@ -677,6 +752,7 @@ export class ACPClient {
     this.sessionTransitionSettled = Promise.resolve();
     this.loadingSessionId = null;
     this.configOptionMutationTail = Promise.resolve();
+    this.releaseConfigResponseContinuation();
     this.activeConfigMutations.clear();
     this.setState("connecting");
 
@@ -748,9 +824,12 @@ export class ACPClient {
         this.setState("disconnected");
       });
 
-      const stream = acp.ndJsonStream(
-        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-        Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
+      const stream = preserveConfigResponseOrder(
+        acp.ndJsonStream(
+          Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
+          Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
+        ),
+        () => this.waitForConfigResponseContinuation()
       );
 
       connection = acp
@@ -1090,6 +1169,7 @@ export class ACPClient {
       };
       this.sessionIdentityGeneration++;
       this.configOptionMutationTail = Promise.resolve();
+      this.releaseConfigResponseContinuation();
       this.activeConfigMutations.clear();
       this.currentSessionId = response.sessionId;
       this.sessionMetadata = metadata;
@@ -1263,6 +1343,7 @@ export class ACPClient {
       if (replacedSessionId !== sessionId) {
         this.sessionIdentityGeneration++;
         this.configOptionMutationTail = Promise.resolve();
+        this.releaseConfigResponseContinuation();
         this.activeConfigMutations.clear();
       }
       this.currentSessionId = sessionId;
@@ -1468,11 +1549,23 @@ export class ACPClient {
       };
       this.activeConfigMutations.add(mutation);
       try {
-        const response = await connection.agent.request(
-          acp.methods.agent.session.setConfigOption,
-          { sessionId, configId, value }
-        );
-        mutation.responseReceived = true;
+        const response = await connection.agent
+          .request(acp.methods.agent.session.setConfigOption, {
+            sessionId,
+            configId,
+            value,
+          })
+          .then(
+            (result) => {
+              mutation.responseReceived = true;
+              this.releaseConfigResponseContinuation();
+              return result;
+            },
+            (error) => {
+              this.releaseConfigResponseContinuation();
+              throw error;
+            }
+          );
         await this.waitForSessionTransition(
           connection,
           sessionIdentityGeneration
@@ -1597,6 +1690,7 @@ export class ACPClient {
     this.sessionIdentityGeneration++;
     this.sessionTransitionSettled = Promise.resolve();
     this.configOptionMutationTail = Promise.resolve();
+    this.releaseConfigResponseContinuation();
     this.activeConfigMutations.clear();
     this.canCloseSessions = false;
     this.supportsSessionLoading = false;

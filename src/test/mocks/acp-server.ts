@@ -74,6 +74,7 @@ export type DemoMode =
   | "overlapping-config"
   | "pre-response-config"
   | "post-response-config"
+  | "same-chunk-post-response-config"
   | "malformed-config"
   | "invalid-config"
   | "invalid-version"
@@ -451,6 +452,7 @@ export class MockACPServer {
       this.demoMode === "overlapping-config" ||
       this.demoMode === "pre-response-config" ||
       this.demoMode === "post-response-config" ||
+      this.demoMode === "same-chunk-post-response-config" ||
       this.demoMode === "same-session-load-pending-config" ||
       this.demoMode === "replacement-failure-pending-config" ||
       this.demoMode === "replacement-failure-ordered-config" ||
@@ -813,6 +815,7 @@ export class MockACPServer {
         this.demoMode === "overlapping-config" ||
         this.demoMode === "pre-response-config" ||
         this.demoMode === "post-response-config" ||
+        this.demoMode === "same-chunk-post-response-config" ||
         this.demoMode === "same-session-load-pending-config" ||
         this.demoMode === "replacement-failure-pending-config" ||
         this.demoMode === "replacement-failure-ordered-config" ||
@@ -838,6 +841,30 @@ export class MockACPServer {
           ],
         },
       ];
+      if (this.demoMode === "same-chunk-post-response-config") {
+        const responseConfigOptions = session.configOptions;
+        session.configOptions = [
+          { ...configOption, currentValue: value },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "latest",
+            options: [{ value: "latest", name: "Latest" }],
+          },
+        ];
+        this.sendResponseThenSessionUpdate(
+          id,
+          { configOptions: responseConfigOptions },
+          session.id,
+          {
+            sessionUpdate: "config_option_update",
+            configOptions: session.configOptions,
+          }
+        );
+        return;
+      }
       if (this.demoMode === "pre-response-config") {
         this.sendSessionUpdate(session.id, {
           sessionUpdate: "config_option_update",
@@ -1222,6 +1249,23 @@ export class MockACPServer {
   private sendResponse(id: number, result: unknown): void {
     const response = { jsonrpc: "2.0", id, result };
     this.stdout.push(JSON.stringify(response) + "\n");
+  }
+
+  private sendResponseThenSessionUpdate(
+    id: number,
+    result: unknown,
+    sessionId: string,
+    update: Record<string, unknown>
+  ): void {
+    const response = { jsonrpc: "2.0", id, result };
+    const notification = {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId, update },
+    };
+    this.stdout.push(
+      `${JSON.stringify(response)}\n${JSON.stringify(notification)}\n`
+    );
   }
 
   private sendError(id: number, code: number, message: string): void {
