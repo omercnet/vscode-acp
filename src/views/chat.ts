@@ -97,6 +97,7 @@ const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
 const SELECTED_THOUGHT_LEVEL_KEY = "vscode-acp.selectedThoughtLevel";
+const SELECTED_CONFIG_OPTIONS_KEY = "vscode-acp.selectedConfigOptions";
 
 type SessionContext = Pick<
   StoredSession,
@@ -104,6 +105,7 @@ type SessionContext = Pick<
 >;
 
 type PersistedSessionConfigCategory = "mode" | "model" | "thought_level";
+type PersistedSessionConfigValues = Record<string, string>;
 
 interface ReplayMessage {
   role: "user" | "assistant";
@@ -120,9 +122,6 @@ const PERSISTED_SESSION_CONFIG_KEYS: Record<
   model: SELECTED_MODEL_KEY,
   thought_level: SELECTED_THOUGHT_LEVEL_KEY,
 };
-
-const PERSISTED_SESSION_CONFIG_CATEGORIES: readonly PersistedSessionConfigCategory[] =
-  ["mode", "model", "thought_level"];
 
 function hasConfigValue(
   option: SupportedSessionConfigOption,
@@ -3122,6 +3121,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const persistedKey = this.getPersistedSessionConfigKey(configId);
     try {
       await this.acpClient.setSessionConfigOption(configId, value);
+      await this.updateSavedConfigOptionValue(configId, value);
       if (persistedKey) {
         await this.globalState.update(persistedKey, value);
       }
@@ -3661,28 +3661,76 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async restoreSavedConfigOptions(): Promise<void> {
     let restored = false;
-    for (const category of PERSISTED_SESSION_CONFIG_CATEGORIES) {
+    const restoredConfigIds = new Set<string>();
+    while (true) {
       const option = this.acpClient
         .getSessionMetadata()
-        ?.configOptions?.find((candidate) => candidate.category === category);
+        ?.configOptions?.find((candidate) => {
+          if (restoredConfigIds.has(candidate.id)) {
+            return false;
+          }
+          const savedValue = this.getSavedValueForConfigOption(candidate);
+          return (
+            savedValue !== null &&
+            savedValue !== candidate.currentValue &&
+            hasConfigValue(candidate, savedValue)
+          );
+        });
       if (!option) {
-        continue;
+        break;
       }
-      const persistedKey = PERSISTED_SESSION_CONFIG_KEYS[category];
-      const savedValue = this.globalState.get<string>(persistedKey);
-      if (!savedValue || savedValue === option.currentValue) {
-        continue;
-      }
-      if (!hasConfigValue(option, savedValue)) {
+      const savedValue = this.getSavedValueForConfigOption(option);
+      if (!savedValue) {
+        restoredConfigIds.add(option.id);
         continue;
       }
       await this.acpClient.setSessionConfigOption(option.id, savedValue);
+      restoredConfigIds.add(option.id);
       restored = true;
     }
     if (restored) {
       console.log("[Chat] Restored saved session config");
       this.sendSessionMetadata();
     }
+  }
+
+  private getSavedValueForConfigOption(
+    option: SupportedSessionConfigOption
+  ): string | null {
+    const savedById = this.getSavedConfigOptionValues()[option.id];
+    if (typeof savedById === "string" && savedById.length > 0) {
+      return savedById;
+    }
+    const persistedKey = this.getPersistedSessionConfigKeyForOption(option);
+    if (!persistedKey) {
+      return null;
+    }
+    const savedByCategory = this.globalState.get<string>(persistedKey);
+    return typeof savedByCategory === "string" && savedByCategory.length > 0
+      ? savedByCategory
+      : null;
+  }
+
+  private getSavedConfigOptionValues(): PersistedSessionConfigValues {
+    const saved = this.globalState.get<unknown>(SELECTED_CONFIG_OPTIONS_KEY);
+    if (typeof saved !== "object" || saved === null) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(saved as Record<string, unknown>).filter(
+        ([configId, value]) => configId.length > 0 && typeof value === "string"
+      )
+    ) as PersistedSessionConfigValues;
+  }
+
+  private async updateSavedConfigOptionValue(
+    configId: string,
+    value: string
+  ): Promise<void> {
+    await this.globalState.update(SELECTED_CONFIG_OPTIONS_KEY, {
+      ...this.getSavedConfigOptionValues(),
+      [configId]: value,
+    });
   }
 
   private postMessage(message: Record<string, unknown>): void {

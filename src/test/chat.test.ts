@@ -788,6 +788,56 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(acpClient.getSetModeCallCount(), 0);
     });
 
+    test("restores saved config selections by config id", async () => {
+      await memento.update("vscode-acp.selectedConfigOptions", {
+        model: "accurate",
+        modelSecondary: "balanced",
+      });
+      acpClient.sessionMetadata = {
+        modes: null,
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Primary model",
+            category: "model",
+            currentValue: "fast",
+            options: [
+              { value: "fast", name: "Fast" },
+              { value: "accurate", name: "Accurate" },
+            ],
+          },
+          {
+            id: "modelSecondary",
+            type: "select",
+            name: "Secondary model",
+            category: "model",
+            currentValue: "creative",
+            options: [
+              { value: "creative", name: "Creative" },
+              { value: "balanced", name: "Balanced" },
+            ],
+          },
+        ],
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        restoreSavedMode(): Promise<void>;
+      };
+
+      await lifecycle.restoreSavedMode();
+
+      assert.deepStrictEqual(acpClient.getConfigOptionCalls(), [
+        { configId: "model", value: "accurate" },
+        { configId: "modelSecondary", value: "balanced" },
+      ]);
+    });
+
     test("routes a config selection and publishes its returned full state", async () => {
       class CascadingClient extends TestACPClient {
         async setSessionConfigOption(
@@ -917,6 +967,14 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(
         memento.get<string>("vscode-acp.selectedThoughtLevel"),
         "high"
+      );
+      assert.deepStrictEqual(
+        memento.get<Record<string, string>>("vscode-acp.selectedConfigOptions"),
+        {
+          interaction: "review",
+          model: "accurate",
+          thought: "high",
+        }
       );
     });
 
