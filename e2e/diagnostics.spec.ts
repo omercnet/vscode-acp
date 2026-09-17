@@ -59,6 +59,9 @@ process.stdin.on("data", (chunk) => {
       send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: message.params.sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Reply ${PAYLOAD_SECRET}" } } } });
       send({ jsonrpc: "2.0", method: "future/${PAYLOAD_SECRET}", params: { body: "${PAYLOAD_SECRET}" } });
       send({ jsonrpc: "2.0", id: message.id, result: { stopReason: "end_turn", private: "${PAYLOAD_SECRET}" } });
+      if (process.env.VSCODE_ACP_EXIT_PARENT_AFTER_PROMPT === "1") {
+        setImmediate(() => process.exit(0));
+      }
     } else if (message.id !== undefined) {
       send({ jsonrpc: "2.0", id: message.id, result: {} });
     }
@@ -66,8 +69,11 @@ process.stdin.on("data", (chunk) => {
 });
 `;
 
-async function launchHost(): Promise<ElectronApplication> {
-  const userDataDir = join(DEMO_DIR, "user-data");
+async function launchHost(
+  userDataName = "user-data",
+  exitParentAfterPrompt = false
+): Promise<ElectronApplication> {
+  const userDataDir = join(DEMO_DIR, userDataName);
   const settingsDir = join(userDataDir, "User");
   await mkdir(settingsDir, { recursive: true });
   await writeFile(
@@ -108,6 +114,7 @@ async function launchHost(): Promise<ElectronApplication> {
       VSCODE_ACP_TEST_AGENT_COMMAND: AGENT_PATH,
       VSCODE_ACP_DIAGNOSTICS_LIFECYCLE: LIFECYCLE_PATH,
       VSCODE_SKIP_PRELAUNCH: "1",
+      VSCODE_ACP_EXIT_PARENT_AFTER_PROMPT: exitParentAfterPrompt ? "1" : "0",
     },
   });
 }
@@ -151,6 +158,10 @@ test.beforeAll(async () => {
   await mkdir(EXTENSIONS_DIR, { recursive: true });
 });
 
+
+test.beforeEach(async () => {
+  await writeFile(LIFECYCLE_PATH, "");
+});
 test.afterAll(async () => {
   await rm(DEMO_DIR, { recursive: true, force: true });
 });
@@ -228,6 +239,55 @@ test("shows redacted traffic and reuses restart and disconnect cleanup", async (
     await expect
       .poll(() =>
         startedProcessIds(activeStart).every(
+          (processId) => !processExists(processId)
+        )
+      )
+      .toBe(true);
+  } finally {
+    await closeVSCode(host);
+  }
+});
+
+test("cleans descendants after the agent parent exits", async () => {
+  const host = await launchHost("orphan-user-data", true);
+  try {
+    const window = await host.firstWindow();
+    await window.waitForLoadState("domcontentloaded");
+    await window.setViewportSize({ width: 1280, height: 800 });
+    await window.waitForTimeout(3000);
+    const activityItem = window.locator(
+      '.action-label[aria-label="VSCode ACP"]'
+    );
+    await expect(activityItem).toBeVisible({ timeout: 10000 });
+    await activityItem.click();
+    await window.waitForTimeout(2000);
+    const frame = window
+      .frameLocator("iframe.webview")
+      .first()
+      .frameLocator("#active-frame");
+    const input = frame.locator("#input");
+
+    await frame.locator("#connect-btn").click();
+    await expect(input).toBeEnabled({ timeout: 10000 });
+    await input.fill("exit parent after this prompt");
+    await input.press("Enter");
+    await expect(frame.getByText(`Reply ${PAYLOAD_SECRET}`)).toBeVisible();
+    const start = (await lifecycleEvents()).find((event) =>
+      event.startsWith("start:")
+    );
+    expect(start).toBeDefined();
+    await expect(frame.locator("#status-text")).toHaveText("Disconnected", {
+      timeout: 10000,
+    });
+
+    const disconnect = window.locator(
+      '.action-label[aria-label="Disconnect Agent"]'
+    );
+    await expect(disconnect).toBeVisible();
+    await disconnect.click();
+    await expect
+      .poll(() =>
+        startedProcessIds(start!).every(
           (processId) => !processExists(processId)
         )
       )

@@ -548,8 +548,11 @@ function waitForChildExit(child: ChildProcess): Promise<boolean> {
   });
 }
 
-function runTerminationCommand(command: string, args: string[]): Promise<void> {
-  return new Promise<void>((resolve) => {
+function runTerminationCommand(
+  command: string,
+  args: string[]
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
     let child: ChildProcess;
     try {
       child = nodeSpawn(command, args, {
@@ -558,24 +561,26 @@ function runTerminationCommand(command: string, args: string[]): Promise<void> {
         windowsHide: true,
       });
     } catch {
-      resolve();
+      resolve(false);
       return;
     }
     let settled = false;
-    const finish = () => {
+    const finish = (succeeded: boolean) => {
       if (settled) {
         return;
       }
       settled = true;
       clearTimeout(timeout);
-      resolve();
+      resolve(succeeded);
     };
     const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish();
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      finish(false);
     }, AGENT_TERMINATION_GRACE_MS);
-    child.once("error", finish);
-    child.once("close", finish);
+    child.once("error", () => finish(false));
+    child.once("close", (code) => finish(code === 0));
   });
 }
 
@@ -585,20 +590,51 @@ async function terminateAgentProcessTree(child: ChildProcess): Promise<void> {
     const windowsRoot =
       process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
     const taskkill = join(windowsRoot, "System32", "taskkill.exe");
-    await runTerminationCommand(taskkill, ["/pid", String(processId), "/T"]);
-    if (await waitForChildExit(child)) {
-      return;
+    if (!hasExited(child)) {
+      await runTerminationCommand(taskkill, ["/pid", String(processId), "/T"]);
+      if (await waitForChildExit(child)) {
+        return;
+      }
+      await runTerminationCommand(taskkill, [
+        "/pid",
+        String(processId),
+        "/T",
+        "/F",
+      ]);
+      if (await waitForChildExit(child)) {
+        return;
+      }
     }
-    await runTerminationCommand(taskkill, [
-      "/pid",
-      String(processId),
-      "/T",
-      "/F",
+
+    const powershell = join(
+      windowsRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe"
+    );
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      `$root=[uint32]${processId}`,
+      "$all=Get-CimInstance Win32_Process",
+      "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
+      "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
+      "$queue.Enqueue($root)",
+      "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
+      "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+      "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
+    ].join(";");
+    const terminated = await runTerminationCommand(powershell, [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      script,
     ]);
-    if (await waitForChildExit(child)) {
-      return;
+    if (!terminated || (!hasExited(child) && !(await waitForChildExit(child)))) {
+      throw new Error("Failed to terminate ACP agent process tree");
     }
-    throw new Error("Failed to terminate ACP agent process tree");
+    return;
   }
 
   if (processId && processGroupExists(processId)) {
@@ -644,6 +680,8 @@ export interface ACPClientOptions {
 
 export class ACPClient {
   private process: ChildProcess | null = null;
+  private ownedProcessTree: ChildProcess | null = null;
+  private ownedProcessCleanup: Promise<void> | null = null;
   private connection: acp.ClientConnection | null = null;
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
@@ -925,6 +963,8 @@ export class ACPClient {
         );
       }
       this.process = child;
+      this.ownedProcessTree = child;
+      this.ownedProcessCleanup = null;
 
       child.stderr?.on("data", (data: Buffer) => {
         if (this.process !== child) {
@@ -947,7 +987,8 @@ export class ACPClient {
 
       child.on("exit", (code) => {
         console.log("[ACP] Process exited with code:", code);
-        if (this.process !== child) {
+        const exitedChild = child;
+        if (!exitedChild || this.process !== exitedChild) {
           return;
         }
         connection?.close();
@@ -955,6 +996,10 @@ export class ACPClient {
           this.connection = null;
         }
         this.process = null;
+        const processCleanup = this.cleanupOwnedProcessTree(exitedChild);
+        void processCleanup.catch(() => {
+          console.error("[ACP] Failed to terminate exited agent process tree");
+        });
         this.agentInfo = null;
         this.currentSessionId = null;
         this.sessionMetadata = null;
@@ -1153,11 +1198,13 @@ export class ACPClient {
       if (this.connection === connection) {
         this.connection = null;
       }
-      let processCleanup: Promise<void> | null = null;
       if (this.process === child) {
         this.process = null;
-        processCleanup = child ? this.queueProcessTermination(child) : null;
       }
+      const processCleanup =
+        child && this.ownedProcessTree === child
+          ? this.cleanupOwnedProcessTree(child)
+          : null;
       if (processCleanup) {
         await processCleanup;
       }
@@ -1833,7 +1880,7 @@ export class ACPClient {
     ++this.sessionRequestGeneration;
     this.connection?.close();
     this.connection = null;
-    const child = this.process;
+    const child = this.ownedProcessTree ?? this.process;
     this.process = null;
     this.currentSessionId = null;
     this.agentInfo = null;
@@ -1858,13 +1905,45 @@ export class ACPClient {
     this.activePrompt = null;
     this.authenticationMethods = [];
     this.setState("disconnected");
-    return child ? this.queueProcessTermination(child) : this.processTermination;
+    return child
+      ? this.cleanupOwnedProcessTree(child)
+      : (this.ownedProcessCleanup ?? this.processTermination);
   }
 
   dispose(): void {
     void this.disconnect().catch(() => {
       console.error("[ACP] Failed to terminate agent process tree");
     });
+  }
+
+  private cleanupOwnedProcessTree(child: ChildProcess): Promise<void> {
+    if (this.ownedProcessTree !== child) {
+      return this.processTermination;
+    }
+    if (this.ownedProcessCleanup) {
+      return this.ownedProcessCleanup;
+    }
+    const cleanup = this.queueProcessTermination(child);
+    let tracked!: Promise<void>;
+    tracked = cleanup.then(
+      () => {
+        if (this.ownedProcessTree === child) {
+          this.ownedProcessTree = null;
+        }
+        if (this.ownedProcessCleanup === tracked) {
+          this.ownedProcessCleanup = null;
+        }
+      },
+      (error) => {
+        if (this.ownedProcessCleanup === tracked) {
+          this.ownedProcessCleanup = null;
+        }
+        throw error;
+      }
+    );
+    tracked.catch(() => undefined);
+    this.ownedProcessCleanup = tracked;
+    return tracked;
   }
 
   private queueProcessTermination(child: ChildProcess): Promise<void> {

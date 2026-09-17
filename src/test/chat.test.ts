@@ -2208,6 +2208,45 @@ suite("ChatViewProvider", () => {
         { type: "sessionTransition", active: false }
       );
     });
+
+    test("queued disconnect cancels replacement startup", async () => {
+      const client = new LifecycleClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      let releaseCleanup!: () => void;
+      let markCleanupStarted!: () => void;
+      const cleanupStarted = new Promise<void>((resolve) => {
+        markCleanupStarted = resolve;
+      });
+      const cleanupGate = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      });
+      let cleanupCalls = 0;
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          cleanupCalls++;
+          markCleanupStarted();
+          await cleanupGate;
+        },
+      });
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async (cwd: string) => ({ cwd, mcpServers: [] }),
+      });
+
+      const restarting = provider.restartAgent();
+      await cleanupStarted;
+      const disconnecting = provider.disconnectAgent();
+      releaseCleanup();
+      await Promise.all([restarting, disconnecting]);
+
+      assert.strictEqual(client.getState(), "disconnected");
+      assert.ok(cleanupCalls >= 1);
+      assert.ok(!client.calls.includes("connect"));
+      assert.ok(!client.calls.includes("newSession"));
+    });
   });
 
   suite("authentication", () => {

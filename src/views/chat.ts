@@ -592,6 +592,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private connectionStart: Promise<void> | null = null;
   private sessionStart: Promise<void> | null = null;
   private sessionTransition: Promise<void> | null = null;
+  private lifecycleCommandGeneration = 0;
   private sessionTransitionLabel: string | null = null;
   private sessionTransitionInputPaused = false;
   private activeSessionContext: SessionContext | null = null;
@@ -1018,6 +1019,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async disconnectAgent(): Promise<void> {
+    ++this.lifecycleCommandGeneration;
     const cleanup = this.disconnectCurrentAgent();
     void cleanup.catch(() => undefined);
     await this.runSessionTransition("Disconnecting agent…", async () => {
@@ -1026,16 +1028,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async restartAgent(): Promise<void> {
+    const commandGeneration = ++this.lifecycleCommandGeneration;
     const cleanup = this.disconnectCurrentAgent();
     void cleanup.catch(() => undefined);
     this.clearPendingAttachments();
     this.postMessage({ type: "chatCleared" });
     await this.runSessionTransition("Restarting agent…", async () => {
       await cleanup;
+      if (commandGeneration !== this.lifecycleCommandGeneration) {
+        return;
+      }
       const generation = this.conversationGeneration;
       try {
         await this.startWorkspaceSession(generation);
       } catch (error) {
+        if (commandGeneration !== this.lifecycleCommandGeneration) {
+          return;
+        }
         throw this.mcpSecretRedactor.redactError(error);
       }
     });

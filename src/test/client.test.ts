@@ -1806,6 +1806,23 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getState(), "disconnected");
     });
 
+    test("retains process-tree ownership after the parent exits", async () => {
+      await client.connect();
+      const previousProcess = mockProcesses[0];
+      const signals: Array<NodeJS.Signals | number | undefined> = [];
+      previousProcess.kill = (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        setImmediate(() => previousProcess.emit("exit", 0));
+        return true;
+      };
+
+      previousProcess.emit("exit", 0);
+      await client.disconnect();
+
+      assert.deepStrictEqual(signals, ["SIGTERM"]);
+      assert.strictEqual(client.getState(), "disconnected");
+    });
+
     test("does not let a disposed connection attempt tear down its replacement", async () => {
       demoMode = "no-initialize";
       const firstConnect = client.connect();
