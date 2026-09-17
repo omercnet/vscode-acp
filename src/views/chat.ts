@@ -3662,20 +3662,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async restoreSavedConfigOptions(): Promise<void> {
     let restored = false;
     const restoredConfigIds = new Set<string>();
+    let configOptions =
+      this.acpClient.getSessionMetadata()?.configOptions ?? null;
     while (true) {
-      const option = this.acpClient
-        .getSessionMetadata()
-        ?.configOptions?.find((candidate) => {
-          if (restoredConfigIds.has(candidate.id)) {
-            return false;
-          }
-          const savedValue = this.getSavedValueForConfigOption(candidate);
-          return (
-            savedValue !== null &&
-            savedValue !== candidate.currentValue &&
-            hasConfigValue(candidate, savedValue)
-          );
-        });
+      const option = configOptions?.find((candidate) => {
+        if (restoredConfigIds.has(candidate.id)) {
+          return false;
+        }
+        const savedValue = this.getSavedValueForConfigOption(candidate);
+        return (
+          savedValue !== null &&
+          savedValue !== candidate.currentValue &&
+          hasConfigValue(candidate, savedValue)
+        );
+      });
       if (!option) {
         break;
       }
@@ -3685,6 +3685,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         continue;
       }
       await this.acpClient.setSessionConfigOption(option.id, savedValue);
+      configOptions =
+        this.acpClient.getSessionMetadata()?.configOptions ?? null;
       restoredConfigIds.add(option.id);
       restored = true;
     }

@@ -838,6 +838,45 @@ suite("ChatViewProvider", () => {
       ]);
     });
 
+    test("prefers saved config-id values over category fallbacks", async () => {
+      await memento.update("vscode-acp.selectedConfigOptions", {
+        model: "accurate",
+      });
+      await memento.update("vscode-acp.selectedModel", "slow");
+      acpClient.sessionMetadata = {
+        modes: null,
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "fast",
+            options: [
+              { value: "fast", name: "Fast" },
+              { value: "accurate", name: "Accurate" },
+              { value: "slow", name: "Slow" },
+            ],
+          },
+        ],
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        restoreSavedMode(): Promise<void>;
+      };
+
+      await lifecycle.restoreSavedMode();
+
+      assert.deepStrictEqual(acpClient.getConfigOptionCalls(), [
+        { configId: "model", value: "accurate" },
+      ]);
+    });
+
     test("routes a config selection and publishes its returned full state", async () => {
       class CascadingClient extends TestACPClient {
         async setSessionConfigOption(
