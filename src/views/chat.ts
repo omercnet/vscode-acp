@@ -3151,9 +3151,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const persistedKey = this.getPersistedSessionConfigKey(configId);
     try {
       await this.acpClient.setSessionConfigOption(configId, value);
-      await this.updateSavedConfigOptionValue(configId, value);
-      if (persistedKey) {
-        await this.globalState.update(persistedKey, value);
+      const configOptions = this.acpClient.getSessionMetadata()?.configOptions;
+      if (configOptions) {
+        await this.persistSavedConfigOptions(configOptions);
+      } else {
+        await this.updateSavedConfigOptionValue(configId, value);
+        if (persistedKey) {
+          await this.globalState.update(persistedKey, value);
+        }
       }
       this.sendSessionMetadata();
     } catch (error) {
@@ -3704,8 +3709,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async restoreSavedConfigOptions(): Promise<void> {
     let restored = false;
-    const restoredConfigIds = new Set<string>();
-    for (const saved of this.getSavedConfigOptionValues()) {
+    const savedConfigOptions = this.getSavedConfigOptionValues();
+    const restoredConfigIds = new Set(
+      savedConfigOptions.map((entry) => entry.configId)
+    );
+    for (const saved of savedConfigOptions) {
       const option = this.acpClient
         .getSessionMetadata()
         ?.configOptions?.find((candidate) => candidate.id === saved.configId);
@@ -3747,6 +3755,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (restored) {
       console.log("[Chat] Restored saved session config");
       this.sendSessionMetadata();
+    }
+  }
+
+  private async persistSavedConfigOptions(
+    configOptions: readonly SupportedSessionConfigOption[]
+  ): Promise<void> {
+    await this.globalState.update(
+      SELECTED_CONFIG_OPTIONS_KEY,
+      configOptions.map(({ id, currentValue }) => ({
+        configId: id,
+        value: currentValue,
+      }))
+    );
+    for (const category of PERSISTED_SESSION_CONFIG_CATEGORIES) {
+      const option = configOptions.find(
+        (candidate) => candidate.category === category
+      );
+      await this.globalState.update(
+        PERSISTED_SESSION_CONFIG_KEYS[category],
+        option?.currentValue
+      );
     }
   }
 
