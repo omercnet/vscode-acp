@@ -8,6 +8,7 @@ import {
   describeACPError,
   formatACPError,
   isAgentAuthMethod,
+  type SupportedSessionConfigOption,
 } from "../acp/client";
 import { getConfiguredSession, McpSecretRedactor } from "../acp/mcp";
 import {
@@ -94,17 +95,44 @@ export const DIRTY_EDITOR_WRITE_CONFLICT =
 
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
+const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
+const SELECTED_THOUGHT_LEVEL_KEY = "vscode-acp.selectedThoughtLevel";
 
 type SessionContext = Pick<
   StoredSession,
   "cwd" | "configurationResource" | "additionalDirectories"
 >;
 
+type PersistedSessionConfigCategory = "mode" | "model" | "thought_level";
+
 interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
   text: string;
   attachments: FileAttachment[];
+}
+
+const PERSISTED_SESSION_CONFIG_KEYS: Record<
+  PersistedSessionConfigCategory,
+  string
+> = {
+  mode: SELECTED_MODE_KEY,
+  model: SELECTED_MODEL_KEY,
+  thought_level: SELECTED_THOUGHT_LEVEL_KEY,
+};
+
+const PERSISTED_SESSION_CONFIG_CATEGORIES: readonly PersistedSessionConfigCategory[] =
+  ["mode", "model", "thought_level"];
+
+function hasConfigValue(
+  option: SupportedSessionConfigOption,
+  value: string
+): boolean {
+  return option.options.some((candidate) =>
+    "value" in candidate
+      ? candidate.value === value
+      : candidate.options.some((grouped) => grouped.value === value)
+  );
 }
 
 interface EditorSelectionContext {
@@ -3091,8 +3119,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     configId: string,
     value: string
   ): Promise<void> {
+    const persistedKey = this.getPersistedSessionConfigKey(configId);
     try {
       await this.acpClient.setSessionConfigOption(configId, value);
+      if (persistedKey) {
+        await this.globalState.update(persistedKey, value);
+      }
       this.sendSessionMetadata();
     } catch (error) {
       this.postACPError("Failed to set session option", error);
@@ -3582,7 +3614,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async restoreSavedMode(): Promise<void> {
     const metadata = this.acpClient.getSessionMetadata();
-    if (metadata?.configOptions !== null) {
+    const configOptions = metadata?.configOptions;
+    if (configOptions !== null && configOptions !== undefined) {
+      await this.restoreSavedConfigOptions();
       return;
     }
     const availableModes = Array.isArray(metadata?.modes?.availableModes)
@@ -3599,6 +3633,56 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.acpClient.setMode(savedModeId);
     console.log("[Chat] Restored saved mode");
     this.sendSessionMetadata();
+  }
+
+  private getPersistedSessionConfigKey(configId: string): string | null {
+    const option = this.acpClient
+      .getSessionMetadata()
+      ?.configOptions?.find((candidate) => candidate.id === configId);
+    if (!option) {
+      return null;
+    }
+    return this.getPersistedSessionConfigKeyForOption(option);
+  }
+
+  private getPersistedSessionConfigKeyForOption(option: {
+    category?: string | null;
+  }): string | null {
+    const category = option.category;
+    if (
+      category !== "mode" &&
+      category !== "model" &&
+      category !== "thought_level"
+    ) {
+      return null;
+    }
+    return PERSISTED_SESSION_CONFIG_KEYS[category];
+  }
+
+  private async restoreSavedConfigOptions(): Promise<void> {
+    let restored = false;
+    for (const category of PERSISTED_SESSION_CONFIG_CATEGORIES) {
+      const option = this.acpClient
+        .getSessionMetadata()
+        ?.configOptions?.find((candidate) => candidate.category === category);
+      if (!option) {
+        continue;
+      }
+      const persistedKey = PERSISTED_SESSION_CONFIG_KEYS[category];
+      const savedValue = this.globalState.get<string>(persistedKey);
+      if (!savedValue || savedValue === option.currentValue) {
+        continue;
+      }
+      if (!hasConfigValue(option, savedValue)) {
+        continue;
+      }
+      await this.acpClient.setSessionConfigOption(option.id, savedValue);
+      restored = true;
+    }
+    if (restored) {
+      console.log("[Chat] Restored saved session config");
+      this.sendSessionMetadata();
+    }
   }
 
   private postMessage(message: Record<string, unknown>): void {

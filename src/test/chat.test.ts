@@ -718,6 +718,76 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(acpClient.getSetModeCallCount(), 0);
     });
 
+    test("restores saved config selections for supported categories", async () => {
+      await memento.update("vscode-acp.selectedMode", "review");
+      await memento.update("vscode-acp.selectedModel", "accurate");
+      await memento.update("vscode-acp.selectedThoughtLevel", "high");
+      acpClient.sessionMetadata = {
+        modes: null,
+        configOptions: [
+          {
+            id: "interaction",
+            type: "select",
+            name: "Interaction",
+            category: "mode",
+            currentValue: "build",
+            options: [
+              { value: "build", name: "Build" },
+              { value: "review", name: "Review" },
+            ],
+          },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "fast",
+            options: [
+              {
+                group: "speed",
+                name: "Speed",
+                options: [{ value: "fast", name: "Fast" }],
+              },
+              {
+                group: "quality",
+                name: "Quality",
+                options: [{ value: "accurate", name: "Accurate" }],
+              },
+            ],
+          },
+          {
+            id: "thought",
+            type: "select",
+            name: "Thought level",
+            category: "thought_level",
+            currentValue: "medium",
+            options: [
+              { value: "medium", name: "Medium" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ],
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        restoreSavedMode(): Promise<void>;
+      };
+
+      await lifecycle.restoreSavedMode();
+
+      assert.deepStrictEqual(acpClient.getConfigOptionCalls(), [
+        { configId: "interaction", value: "review" },
+        { configId: "model", value: "accurate" },
+        { configId: "thought", value: "high" },
+      ]);
+      assert.strictEqual(acpClient.getSetModeCallCount(), 0);
+    });
+
     test("routes a config selection and publishes its returned full state", async () => {
       class CascadingClient extends TestACPClient {
         async setSessionConfigOption(
@@ -778,6 +848,76 @@ suite("ChatViewProvider", () => {
         commands: null,
         promptCapabilities: {},
       });
+    });
+
+    test("persists successful config changes for supported categories", async () => {
+      acpClient.sessionMetadata = {
+        modes: null,
+        configOptions: [
+          {
+            id: "interaction",
+            type: "select",
+            name: "Interaction",
+            category: "mode",
+            currentValue: "build",
+            options: [
+              { value: "build", name: "Build" },
+              { value: "review", name: "Review" },
+            ],
+          },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "fast",
+            options: [
+              { value: "fast", name: "Fast" },
+              { value: "accurate", name: "Accurate" },
+            ],
+          },
+          {
+            id: "thought",
+            type: "select",
+            name: "Thought level",
+            category: "thought_level",
+            currentValue: "medium",
+            options: [
+              { value: "medium", name: "Medium" },
+              { value: "high", name: "High" },
+            ],
+          },
+        ],
+        commands: null,
+      };
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const lifecycle = provider as unknown as {
+        handleConfigOptionChange(
+          configId: string,
+          value: string
+        ): Promise<void>;
+      };
+
+      await lifecycle.handleConfigOptionChange("interaction", "review");
+      await lifecycle.handleConfigOptionChange("model", "accurate");
+      await lifecycle.handleConfigOptionChange("thought", "high");
+
+      assert.strictEqual(
+        memento.get<string>("vscode-acp.selectedMode"),
+        "review"
+      );
+      assert.strictEqual(
+        memento.get<string>("vscode-acp.selectedModel"),
+        "accurate"
+      );
+      assert.strictEqual(
+        memento.get<string>("vscode-acp.selectedThoughtLevel"),
+        "high"
+      );
     });
 
     test("persists successful legacy mode changes", async () => {
