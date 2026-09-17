@@ -548,14 +548,32 @@ function waitForChildExit(child: ChildProcess): Promise<boolean> {
   });
 }
 
-function runTerminationCommand(
+interface TerminationScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+const DEFAULT_TERMINATION_SCHEDULER: TerminationScheduler = {
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+export function runBoundedTerminationCommand(
   command: string,
-  args: string[]
+  args: string[],
+  options: {
+    spawn?: SpawnFunction;
+    timeoutMs?: number;
+    scheduler?: TerminationScheduler;
+  } = {}
 ): Promise<boolean> {
+  const spawnCommand = options.spawn ?? (nodeSpawn as SpawnFunction);
+  const scheduler = options.scheduler ?? DEFAULT_TERMINATION_SCHEDULER;
+  const timeoutMs = options.timeoutMs ?? AGENT_TERMINATION_GRACE_MS;
   return new Promise<boolean>((resolve) => {
     let child: ChildProcess;
     try {
-      child = nodeSpawn(command, args, {
+      child = spawnCommand(command, args, {
         shell: false,
         stdio: "ignore",
         windowsHide: true,
@@ -565,75 +583,101 @@ function runTerminationCommand(
       return;
     }
     let settled = false;
+    let timeout: unknown;
     const finish = (succeeded: boolean) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
+      scheduler.cancel(timeout);
       resolve(succeeded);
     };
-    const timeout = setTimeout(() => {
+    timeout = scheduler.schedule(() => {
       try {
         child.kill("SIGKILL");
       } catch {}
       finish(false);
-    }, AGENT_TERMINATION_GRACE_MS);
+    }, timeoutMs);
     child.once("error", () => finish(false));
     child.once("close", (code) => finish(code === 0));
   });
 }
 
-async function terminateAgentProcessTree(child: ChildProcess): Promise<void> {
-  const processId = child.pid;
-  if (process.platform === "win32" && processId) {
-    const windowsRoot =
-      process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
-    const taskkill = join(windowsRoot, "System32", "taskkill.exe");
-    if (!hasExited(child)) {
-      await runTerminationCommand(taskkill, ["/pid", String(processId), "/T"]);
-      if (await waitForChildExit(child)) {
-        return;
-      }
-      await runTerminationCommand(taskkill, [
+interface WindowsTerminationOptions {
+  windowsRoot?: string;
+  runCommand?: (command: string, args: string[]) => Promise<boolean>;
+  waitForExit?: (child: ChildProcess) => Promise<boolean>;
+}
+
+export async function terminateWindowsProcessTree(
+  child: ChildProcess,
+  processId: number,
+  options: WindowsTerminationOptions = {}
+): Promise<void> {
+  const windowsRoot =
+    options.windowsRoot ??
+    process.env.SystemRoot ??
+    process.env.WINDIR ??
+    "C:\\Windows";
+  const runCommand = options.runCommand ?? runBoundedTerminationCommand;
+  const waitForExit = options.waitForExit ?? waitForChildExit;
+  const taskkill = join(windowsRoot, "System32", "taskkill.exe");
+  if (!hasExited(child)) {
+    const graceful = await runCommand(taskkill, [
+      "/pid",
+      String(processId),
+      "/T",
+    ]);
+    if (graceful && (await waitForExit(child))) {
+      return;
+    }
+    if (graceful) {
+      const forced = await runCommand(taskkill, [
         "/pid",
         String(processId),
         "/T",
         "/F",
       ]);
-      if (await waitForChildExit(child)) {
+      if (forced && (await waitForExit(child))) {
         return;
       }
     }
+  }
 
-    const powershell = join(
-      windowsRoot,
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe"
-    );
-    const script = [
-      "$ErrorActionPreference='Stop'",
-      `$root=[uint32]${processId}`,
-      "$all=Get-CimInstance Win32_Process",
-      "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
-      "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
-      "$queue.Enqueue($root)",
-      "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
-      "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
-      "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
-    ].join(";");
-    const terminated = await runTerminationCommand(powershell, [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      script,
-    ]);
-    if (!terminated || (!hasExited(child) && !(await waitForChildExit(child)))) {
-      throw new Error("Failed to terminate ACP agent process tree");
-    }
+  const powershell = join(
+    windowsRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    `$root=[uint32]${processId}`,
+    "$all=Get-CimInstance Win32_Process",
+    "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
+    "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
+    "$queue.Enqueue($root)",
+    "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
+    "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
+    "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
+  ].join(";");
+  const terminated = await runCommand(powershell, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    script,
+  ]);
+  if (!terminated || (!hasExited(child) && !(await waitForExit(child)))) {
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+}
+
+async function terminateAgentProcessTree(child: ChildProcess): Promise<void> {
+  const processId = child.pid;
+  if (process.platform === "win32" && processId) {
+    await terminateWindowsProcessTree(child, processId);
     return;
   }
 
@@ -910,9 +954,6 @@ export class ACPClient {
       );
     }
 
-    const availableFileSystemCapabilities = this.fileSystemCapabilitiesHandler
-      ? await this.fileSystemCapabilitiesHandler()
-      : { readTextFile: true, writeTextFile: true };
 
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
@@ -942,6 +983,12 @@ export class ACPClient {
 
     try {
       await this.processTermination;
+      if (attemptGeneration !== this.connectionGeneration) {
+        throw new Error("Connection attempt was disposed");
+      }
+      const availableFileSystemCapabilities = this.fileSystemCapabilitiesHandler
+        ? await this.fileSystemCapabilitiesHandler()
+        : { readTextFile: true, writeTextFile: true };
       if (attemptGeneration !== this.connectionGeneration) {
         throw new Error("Connection attempt was disposed");
       }

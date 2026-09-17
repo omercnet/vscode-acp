@@ -5,6 +5,8 @@ import {
   describeACPError,
   formatACPError,
   isAgentAuthMethod,
+  runBoundedTerminationCommand,
+  terminateWindowsProcessTree,
   type SpawnFunction,
 } from "../acp/client";
 import { getAgent } from "../acp/agents";
@@ -87,6 +89,58 @@ suite("ACPClient", () => {
       assert.strictEqual(client.getCurrentSessionId(), null);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
+  });
+});
+
+suite("Agent process termination helpers", () => {
+  test("bounds and escalates a stalled termination helper", async () => {
+    const commandProcess =
+      createMockProcess() as unknown as ChildProcess;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    commandProcess.kill = (signal?: NodeJS.Signals | number) => {
+      signals.push(signal);
+      return true;
+    };
+    let triggerTimeout!: () => void;
+    const cancelled: unknown[] = [];
+    const running = runBoundedTerminationCommand("taskkill", [], {
+      spawn: () => commandProcess,
+      timeoutMs: 1,
+      scheduler: {
+        schedule(callback) {
+          triggerTimeout = callback;
+          return "termination-timeout";
+        },
+        cancel(handle) {
+          cancelled.push(handle);
+        },
+      },
+    });
+
+    triggerTimeout();
+
+    assert.strictEqual(await running, false);
+    assert.deepStrictEqual(signals, ["SIGKILL"]);
+    assert.deepStrictEqual(cancelled, ["termination-timeout"]);
+  });
+
+  test("runs orphan fallback when taskkill fails", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    const commands: Array<{ command: string; args: string[] }> = [];
+
+    await terminateWindowsProcessTree(parent, 42, {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (command, args) => {
+        commands.push({ command, args });
+        return command.endsWith("powershell.exe");
+      },
+      waitForExit: async () => true,
+    });
+
+    assert.strictEqual(commands.length, 2);
+    assert.ok(commands[0].command.endsWith("taskkill.exe"));
+    assert.ok(commands[1].command.endsWith("powershell.exe"));
+    assert.ok(commands[1].args.includes("-NonInteractive"));
   });
 });
 
@@ -408,6 +462,31 @@ suite("ACPClient with Mock Server", () => {
         assert.ok(!error.message.includes("private-user"));
         return true;
       });
+    });
+
+    test("disconnect invalidates capability discovery before spawn", async () => {
+      let markDiscoveryStarted!: () => void;
+      let releaseDiscovery!: () => void;
+      const discoveryStarted = new Promise<void>((resolve) => {
+        markDiscoveryStarted = resolve;
+      });
+      const discoveryGate = new Promise<void>((resolve) => {
+        releaseDiscovery = resolve;
+      });
+      client.setFileSystemCapabilities(async () => {
+        markDiscoveryStarted();
+        await discoveryGate;
+        return { readTextFile: true, writeTextFile: true };
+      });
+
+      const connecting = client.connect();
+      await discoveryStarted;
+      await client.disconnect();
+      releaseDiscovery();
+
+      await assert.rejects(connecting, /Connection attempt was disposed/);
+      assert.strictEqual(mockProcesses.length, 0);
+      assert.strictEqual(client.getState(), "disconnected");
     });
 
     test("should notify multiple state change listeners", async () => {

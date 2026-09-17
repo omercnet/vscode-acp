@@ -5439,6 +5439,32 @@ suite("ChatViewProvider", () => {
       }
     });
 
+    test("fails closed when Windows termination helpers stall", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const cleanup = provider as unknown as {
+        terminateWindowsProcessTree(processId: number): Promise<boolean>;
+        processExists(processId: number): boolean;
+        runTerminationCommand(command: string, args: string[]): Promise<boolean>;
+        waitForProcessExit(processId: number): Promise<boolean>;
+      };
+      const commands: string[] = [];
+      cleanup.processExists = () => true;
+      cleanup.runTerminationCommand = async (command) => {
+        commands.push(command);
+        return false;
+      };
+      cleanup.waitForProcessExit = async () => true;
+
+      assert.strictEqual(await cleanup.terminateWindowsProcessTree(42), false);
+      assert.strictEqual(commands.length, 2);
+      assert.ok(commands[0].endsWith("taskkill.exe"));
+      assert.ok(commands[1].endsWith("powershell.exe"));
+    });
+
     test("quotes Windows batch launches and refuses unsafe or oversized ones", () => {
       assert.strictEqual(
         buildWindowsBatchCommandLine("C:\\Program Files\\run.cmd", [

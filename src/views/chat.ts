@@ -9,6 +9,7 @@ import {
   formatACPError,
   isAgentAuthMethod,
   type SupportedSessionConfigOption,
+  runBoundedTerminationCommand,
 } from "../acp/client";
 import { getConfiguredSession, McpSecretRedactor } from "../acp/mcp";
 import {
@@ -2058,21 +2059,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     command: string,
     args: string[]
   ): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
-      let child: ChildProcess;
-      try {
-        child = spawn(command, args, {
-          shell: false,
-          stdio: "ignore",
-          windowsHide: true,
-        });
-      } catch {
-        resolve(false);
-        return;
-      }
-      child.once("error", () => resolve(false));
-      child.once("close", (code) => resolve(code === 0));
-    });
+    return runBoundedTerminationCommand(command, args);
   }
 
   private processExists(processId: number): boolean {
@@ -2123,16 +2110,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const windowsRoot =
       process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
     const taskkill = join(windowsRoot, "System32", "taskkill.exe");
-    // taskkill reports an error for a leader that already exited, so the tree
-    // is judged by whether the processes are gone, never by the exit code.
     if (this.processExists(processId)) {
-      await this.runTerminationCommand(taskkill, [
+      const taskkillCompleted = await this.runTerminationCommand(taskkill, [
         "/pid",
         String(processId),
         "/T",
         "/F",
       ]);
-      if (await this.waitForProcessExit(processId)) {
+      if (taskkillCompleted && (await this.waitForProcessExit(processId))) {
         return true;
       }
     }
@@ -2158,14 +2143,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       "$ids | Sort-Object -Descending | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }",
       "Stop-Process -Id $root -Force -ErrorAction SilentlyContinue",
     ].join(";");
-    await this.runTerminationCommand(powershell, [
+    const fallbackCompleted = await this.runTerminationCommand(powershell, [
       "-NoLogo",
       "-NoProfile",
       "-NonInteractive",
       "-Command",
       script,
     ]);
-    return this.waitForProcessExit(processId);
+    return fallbackCompleted && this.waitForProcessExit(processId);
   }
 
   private async terminateTerminalProcess(
