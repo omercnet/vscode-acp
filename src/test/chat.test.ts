@@ -1008,12 +1008,14 @@ suite("ChatViewProvider", () => {
         "high"
       );
       assert.deepStrictEqual(
-        memento.get<Record<string, string>>("vscode-acp.selectedConfigOptions"),
-        {
-          interaction: "review",
-          model: "accurate",
-          thought: "high",
-        }
+        memento.get<ReadonlyArray<{ configId: string; value: string }>>(
+          "vscode-acp.selectedConfigOptions"
+        ),
+        [
+          { configId: "interaction", value: "review" },
+          { configId: "model", value: "accurate" },
+          { configId: "thought", value: "high" },
+        ]
       );
     });
 
