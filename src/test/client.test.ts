@@ -7,6 +7,7 @@ import {
   isAgentAuthMethod,
   runBoundedTerminationCommand,
   terminateWindowsProcessTree,
+  type WindowsProcessIdentity,
   type SpawnFunction,
 } from "../acp/client";
 import { getAgent } from "../acp/agents";
@@ -92,6 +93,16 @@ suite("ACPClient", () => {
   });
 });
 
+function windowsProcessIdentity(processId: number): WindowsProcessIdentity {
+  const now = Date.now();
+  return {
+    processId,
+    createdNotBeforeMs: now - 1000,
+    createdNotAfterMs: now + 1000,
+    ownershipCutoffMs: now + 1000,
+  };
+}
+
 suite("Agent process termination helpers", () => {
   test("bounds and escalates a stalled termination helper", async () => {
     const commandProcess = createMockProcess() as unknown as ChildProcess;
@@ -123,44 +134,44 @@ suite("Agent process termination helpers", () => {
     assert.deepStrictEqual(cancelled, ["termination-timeout"]);
   });
 
-  test("runs orphan fallback when taskkill fails", async () => {
+  test("uses identity-validated PowerShell cleanup", async () => {
     const parent = createMockProcess() as unknown as ChildProcess;
     const commands: Array<{ command: string; args: string[] }> = [];
 
-    await terminateWindowsProcessTree(parent, 42, {
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
       windowsRoot: "C:\\Windows",
       runCommand: async (command, args) => {
         commands.push({ command, args });
-        return command.endsWith("powershell.exe");
+        return true;
       },
       waitForExit: async () => true,
     });
 
-    assert.strictEqual(commands.length, 3);
-    assert.ok(commands[0].command.endsWith("taskkill.exe"));
-    assert.ok(!commands[0].args.includes("/F"));
-    assert.ok(commands[1].command.endsWith("taskkill.exe"));
-    assert.ok(commands[1].args.includes("/F"));
-    assert.ok(commands[2].command.endsWith("powershell.exe"));
-    assert.ok(commands[2].args.includes("-NonInteractive"));
+    assert.strictEqual(commands.length, 1);
+    assert.ok(commands[0].command.endsWith("powershell.exe"));
+    assert.ok(commands[0].args.includes("-NonInteractive"));
+    const script = commands[0].args.at(-1) ?? "";
+    assert.ok(script.includes("delta>10"));
+    assert.ok(script.includes("$rootCreated -ge $notBefore"));
   });
 
-  test("forces taskkill when graceful taskkill fails", async () => {
+  test("does not issue a stale taskkill after the parent exits", async () => {
     const parent = createMockProcess() as unknown as ChildProcess;
-    const commands: string[][] = [];
+    const commands: Array<{ command: string; args: string[] }> = [];
 
-    await terminateWindowsProcessTree(parent, 42, {
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
       windowsRoot: "C:\\Windows",
-      runCommand: async (_command, args) => {
-        commands.push(args);
-        return args.includes("/F");
+      runCommand: async (command, args) => {
+        commands.push({ command, args });
+        Object.defineProperty(parent, "exitCode", { value: 0 });
+        return true;
       },
       waitForExit: async () => true,
     });
 
-    assert.strictEqual(commands.length, 2);
-    assert.ok(!commands[0].includes("/F"));
-    assert.ok(commands[1].includes("/F"));
+    assert.strictEqual(commands.length, 1);
+    assert.ok(commands[0].command.endsWith("powershell.exe"));
+    assert.ok(!commands[0].args.includes("/F"));
   });
 
   test("does not terminate a reused root pid after parent exit", async () => {
@@ -168,7 +179,7 @@ suite("Agent process termination helpers", () => {
     Object.defineProperty(parent, "exitCode", { value: 0 });
     let script = "";
 
-    await terminateWindowsProcessTree(parent, 42, {
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
       windowsRoot: "C:\\Windows",
       runCommand: async (_command, args) => {
         script = args.at(-1) ?? "";
@@ -178,6 +189,9 @@ suite("Agent process termination helpers", () => {
     });
 
     assert.ok(!script.includes("Stop-OwnedProcess $root"));
+    assert.ok(script.includes("$cutoff=$ownershipCutoff"));
+    assert.ok(script.includes("$created -lt $cutoff"));
+    assert.ok(script.includes("delta>10"));
   });
 
   test("treats an already-exited Windows root as successful", async function () {
@@ -187,7 +201,10 @@ suite("Agent process termination helpers", () => {
     const parent = createMockProcess() as unknown as ChildProcess;
     Object.defineProperty(parent, "exitCode", { value: 0 });
 
-    await terminateWindowsProcessTree(parent, 2_000_000_000);
+    await terminateWindowsProcessTree(
+      parent,
+      windowsProcessIdentity(2_000_000_000)
+    );
   });
 });
 

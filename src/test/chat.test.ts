@@ -1,5 +1,6 @@
 import * as assert from "assert";
 import { EventEmitter } from "events";
+import type { ChildProcess } from "child_process";
 import * as vscode from "vscode";
 import { JSDOM } from "jsdom";
 import fsPromises, {
@@ -4513,6 +4514,16 @@ suite("ChatViewProvider", () => {
         assert.strictEqual(document.getText(), userContent);
         assert.strictEqual(document.isDirty, true);
 
+        const restore = new vscode.WorkspaceEdit();
+        restore.replace(
+          uri,
+          new vscode.Range(
+            document.positionAt(0),
+            document.positionAt(document.getText().length)
+          ),
+          savedContent
+        );
+        await vscode.workspace.applyEdit(restore);
         assert.strictEqual(await document.save(), true);
         assert.strictEqual(document.isDirty, false);
 
@@ -5665,27 +5676,79 @@ suite("ChatViewProvider", () => {
         acpClient as unknown as ACPClient,
         memento as unknown as vscode.Memento
       );
+      const proc = new EventEmitter() as unknown as ChildProcess;
+      Object.defineProperty(proc, "exitCode", { value: null });
+      Object.defineProperty(proc, "signalCode", { value: null });
       const cleanup = provider as unknown as {
-        terminateWindowsProcessTree(processId: number): Promise<boolean>;
-        processExists(processId: number): boolean;
+        terminateWindowsProcessTree(terminal: unknown): Promise<boolean>;
         runTerminationCommand(
           command: string,
           args: string[]
         ): Promise<boolean>;
-        waitForProcessExit(processId: number): Promise<boolean>;
       };
       const commands: string[] = [];
-      cleanup.processExists = () => true;
       cleanup.runTerminationCommand = async (command) => {
         commands.push(command);
         return false;
       };
-      cleanup.waitForProcessExit = async () => true;
 
-      assert.strictEqual(await cleanup.terminateWindowsProcessTree(42), false);
-      assert.strictEqual(commands.length, 2);
-      assert.ok(commands[0].endsWith("taskkill.exe"));
-      assert.ok(commands[1].endsWith("powershell.exe"));
+      assert.strictEqual(
+        await cleanup.terminateWindowsProcessTree({
+          proc,
+          exitCode: null,
+          windowsProcessIdentity: {
+            processId: 42,
+            createdNotBeforeMs: 100,
+            createdNotAfterMs: 200,
+            ownershipCutoffMs: 200,
+          },
+        }),
+        false
+      );
+      assert.strictEqual(commands.length, 1);
+      assert.ok(commands[0].endsWith("powershell.exe"));
+    });
+
+    test("completed Windows terminal cleanup never targets a reused root", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const proc = new EventEmitter() as unknown as ChildProcess;
+      Object.defineProperty(proc, "exitCode", { value: 0 });
+      Object.defineProperty(proc, "signalCode", { value: null });
+      let script = "";
+      const cleanup = provider as unknown as {
+        terminateWindowsProcessTree(terminal: unknown): Promise<boolean>;
+        runTerminationCommand(
+          command: string,
+          args: string[]
+        ): Promise<boolean>;
+      };
+      cleanup.runTerminationCommand = async (_command, args) => {
+        script = args.at(-1) ?? "";
+        return true;
+      };
+
+      assert.strictEqual(
+        await cleanup.terminateWindowsProcessTree({
+          proc,
+          exitCode: 0,
+          windowsProcessIdentity: {
+            processId: 42,
+            createdNotBeforeMs: 100,
+            createdNotAfterMs: 200,
+            ownershipCutoffMs: 1000,
+          },
+        }),
+        true
+      );
+      assert.ok(!script.includes("Stop-OwnedProcess $root"));
+      assert.ok(script.includes("$cutoff=$ownershipCutoff"));
+      assert.ok(script.includes("$ownershipCutoff=[long]1000"));
+      assert.ok(script.includes("$created -lt $cutoff"));
+      assert.ok(script.includes("delta>10"));
     });
 
     test("quotes Windows batch launches and refuses unsafe or oversized ones", () => {

@@ -5,12 +5,14 @@ import { realpath, stat } from "fs/promises";
 import { isAbsolute, join, parse, relative, resolve } from "path";
 import {
   ACPClient,
-  buildWindowsOrphanTerminationScript,
+  createWindowsProcessIdentity,
   describeACPError,
   formatACPError,
   isAgentAuthMethod,
-  type SupportedSessionConfigOption,
   runBoundedTerminationCommand,
+  terminateWindowsProcessTree as terminateWindowsOwnedProcessTree,
+  type SupportedSessionConfigOption,
+  type WindowsProcessIdentity,
 } from "../acp/client";
 import { getConfiguredSession, McpSecretRedactor } from "../acp/mcp";
 import {
@@ -212,6 +214,7 @@ interface ManagedTerminal {
   terminal?: vscode.Terminal;
   proc: ChildProcess | null;
   processId: number | null;
+  windowsProcessIdentity: WindowsProcessIdentity | null;
   output: string;
   outputByteLimit: number | null;
   truncated: boolean;
@@ -1850,6 +1853,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         generation: this.terminalGeneration,
         proc: null,
         processId: null,
+        windowsProcessIdentity: null,
         output: "",
         outputByteLimit: launch.outputByteLimit,
         truncated: false,
@@ -1917,6 +1921,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       let proc: ChildProcess;
+      const processCreatedNotBeforeMs = Date.now();
       try {
         proc = spawn(currentLaunch.command, currentLaunch.args, {
           cwd: currentLaunch.cwd,
@@ -1939,6 +1944,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       managedTerminal.proc = proc;
       managedTerminal.processId = proc.pid ?? null;
+      managedTerminal.windowsProcessIdentity = createWindowsProcessIdentity(
+        proc.pid,
+        processCreatedNotBeforeMs,
+        Date.now()
+      );
 
       proc.stdout?.on("data", (data: Buffer) => {
         const text = data.toString();
@@ -1953,6 +1963,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
 
       proc.on("close", (code: number | null, signal: string | null) => {
+        if (managedTerminal.windowsProcessIdentity) {
+          managedTerminal.windowsProcessIdentity.ownershipCutoffMs = Date.now();
+        }
         managedTerminal.exitCode = code;
         managedTerminal.signal = signal;
         managedTerminal.exitResolve();
@@ -2065,24 +2078,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return runBoundedTerminationCommand(command, args);
   }
 
-  private processExists(processId: number): boolean {
+  private async terminateWindowsProcessTree(
+    terminal: ManagedTerminal
+  ): Promise<boolean> {
+    if (!terminal.proc || !terminal.windowsProcessIdentity) {
+      return terminal.exitCode !== null;
+    }
     try {
-      process.kill(processId, 0);
+      await terminateWindowsOwnedProcessTree(
+        terminal.proc,
+        terminal.windowsProcessIdentity,
+        {
+          runCommand: (command, args) =>
+            this.runTerminationCommand(command, args),
+        }
+      );
       return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    } catch {
+      return false;
     }
-  }
-
-  private async waitForProcessExit(processId: number): Promise<boolean> {
-    const deadline = Date.now() + TERMINAL_TERMINATION_GRACE_MS;
-    while (this.processExists(processId)) {
-      if (Date.now() >= deadline) {
-        return false;
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
-    return true;
   }
 
   private processGroupExists(processGroupId: number): boolean {
@@ -2107,45 +2121,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return true;
   }
 
-  private async terminateWindowsProcessTree(
-    processId: number
-  ): Promise<boolean> {
-    const windowsRoot =
-      process.env.SystemRoot ?? process.env.WINDIR ?? "C:\\Windows";
-    const taskkill = join(windowsRoot, "System32", "taskkill.exe");
-    if (this.processExists(processId)) {
-      const taskkillCompleted = await this.runTerminationCommand(taskkill, [
-        "/pid",
-        String(processId),
-        "/T",
-        "/F",
-      ]);
-      if (taskkillCompleted && (await this.waitForProcessExit(processId))) {
-        return true;
-      }
-    }
-
-    // taskkill cannot traverse from a parent that already exited. Windows
-    // preserves ParentProcessId, so a fixed PowerShell program can still find
-    // and stop the orphaned descendants without accepting shell input.
-    const powershell = join(
-      windowsRoot,
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe"
-    );
-    const script = buildWindowsOrphanTerminationScript(processId);
-    const fallbackCompleted = await this.runTerminationCommand(powershell, [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      script,
-    ]);
-    return fallbackCompleted && this.waitForProcessExit(processId);
-  }
-
   private async performTerminalTermination(
     terminal: ManagedTerminal
   ): Promise<boolean> {
@@ -2157,7 +2132,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     if (process.platform === "win32") {
-      const terminated = await this.terminateWindowsProcessTree(processId);
+      const terminated = await this.terminateWindowsProcessTree(terminal);
       if (terminated) {
         terminal.signal = "SIGKILL";
       }
