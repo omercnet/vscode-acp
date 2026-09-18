@@ -153,6 +153,17 @@ suite("Agent process termination helpers", () => {
     const script = commands[0].args.at(-1) ?? "";
     assert.ok(script.includes("delta>10"));
     assert.ok(script.includes("$rootCreated -ge $notBefore"));
+    const rootTermination = script.indexOf(
+      "[AcpOwnedProcess]::TerminateIfCreated($root"
+    );
+    const processSnapshot = script.indexOf(
+      "$all=@(Get-CimInstance Win32_Process"
+    );
+    assert.ok(rootTermination >= 0 && rootTermination < processSnapshot);
+    assert.ok(script.includes("$pass -lt 64"));
+    assert.ok(script.includes("$parentCutoffs.TryGetValue"));
+    assert.ok(script.includes("if($owned.Count -eq 0){exit 0}"));
+    assert.ok(script.includes("Descendant process identity changed"));
     const initialExitCheck = script.indexOf(
       "uint state=WaitForSingleObject(handle,0)"
     );
@@ -184,6 +195,28 @@ suite("Agent process termination helpers", () => {
     assert.ok(!commands[0].args.includes("/F"));
   });
 
+  test("fails closed when descendant identity validation fails", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+
+    await assert.rejects(
+      () =>
+        terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
+          windowsRoot: "C:\\Windows",
+          runCommand: async (_command, args) => {
+            assert.ok(
+              (args.at(-1) ?? "").includes(
+                "Descendant process identity changed"
+              )
+            );
+            return false;
+          },
+          waitForExit: async () =>
+            assert.fail("failed identity validation must not await the root"),
+        }),
+      /Failed to terminate ACP agent process tree/
+    );
+  });
+
   test("does not terminate a reused root pid after parent exit", async () => {
     const parent = createMockProcess() as unknown as ChildProcess;
     Object.defineProperty(parent, "exitCode", { value: 0 });
@@ -200,7 +233,7 @@ suite("Agent process termination helpers", () => {
 
     assert.ok(!script.includes("Stop-OwnedProcess $root"));
     assert.ok(script.includes("$cutoff=$ownershipCutoff"));
-    assert.ok(script.includes("$created -lt $cutoff"));
+    assert.ok(script.includes("$created -lt $parentCutoff"));
     assert.ok(script.includes("delta>10"));
   });
 

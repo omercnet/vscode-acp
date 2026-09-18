@@ -5747,7 +5747,7 @@ suite("ChatViewProvider", () => {
       assert.ok(!script.includes("Stop-OwnedProcess $root"));
       assert.ok(script.includes("$cutoff=$ownershipCutoff"));
       assert.ok(script.includes("$ownershipCutoff=[long]1000"));
-      assert.ok(script.includes("$created -lt $cutoff"));
+      assert.ok(script.includes("$created -lt $parentCutoff"));
       assert.ok(script.includes("delta>10"));
     });
 
