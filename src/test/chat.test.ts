@@ -2592,6 +2592,136 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(saved.cwd, session.cwd);
       assert.strictEqual(saved.configurationResource, remoteResource);
     });
+
+    test("uses workspace configuration for a ..-prefixed descendant", async () => {
+      class ResumingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      assert.ok(workspaceFolder);
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ResumingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        new TestMemento() as unknown as vscode.Memento
+      );
+      let configuredResource: string | undefined;
+      Object.defineProperty(provider, "getSessionParameters", {
+        value: async (cwd: string, resource?: vscode.Uri) => {
+          configuredResource = resource?.toString();
+          return { cwd, mcpServers: [] };
+        },
+      });
+
+      try {
+        const opened = await provider.openAgentSession({
+          agentId: "test-agent",
+          sessionId: "dot-prefixed-descendant",
+          cwd: join(workspaceFolder.uri.fsPath, "..cache"),
+          mode: "resume",
+        });
+
+        assert.strictEqual(opened, true);
+        assert.strictEqual(configuredResource, workspaceFolder.uri.toString());
+      } finally {
+        provider.dispose();
+      }
+    });
+
+    test("preserves omitted directories through opening and later saves", async () => {
+      class ResumingClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: false,
+            list: true,
+            resume: true,
+            additionalDirectories: false,
+          };
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      const workspaceState = new TestMemento();
+      const savedSession = {
+        sessionId: "saved-directories",
+        agentId: "test-agent",
+        cwd: process.cwd(),
+        additionalDirectories: ["/saved-extra"],
+        createdAt: 1,
+        lastUsedAt: 1,
+        preview: "Stored conversation",
+        messageCount: 1,
+      };
+      await workspaceState.update("vscode-acp.sessionHistory", [savedSession]);
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new ResumingClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      const sessionProvider = provider as unknown as {
+        saveCurrentSession(preview?: string): Promise<void>;
+      };
+
+      try {
+        await provider.openAgentSession({
+          agentId: savedSession.agentId,
+          sessionId: savedSession.sessionId,
+          cwd: savedSession.cwd,
+          preview: savedSession.preview,
+          mode: "resume",
+        });
+        assert.deepStrictEqual(
+          readStoredSessions(workspaceState)[0]?.additionalDirectories,
+          ["/saved-extra"]
+        );
+
+        await sessionProvider.saveCurrentSession("Continued conversation");
+        assert.deepStrictEqual(
+          readStoredSessions(workspaceState)[0]?.additionalDirectories,
+          ["/saved-extra"]
+        );
+
+        await provider.openAgentSession({
+          agentId: savedSession.agentId,
+          sessionId: savedSession.sessionId,
+          cwd: savedSession.cwd,
+          additionalDirectories: [],
+          preview: savedSession.preview,
+          mode: "resume",
+        });
+        assert.strictEqual(
+          readStoredSessions(workspaceState)[0]?.additionalDirectories,
+          undefined
+        );
+      } finally {
+        provider.dispose();
+      }
+    });
+
     test("persists active session metadata in workspace state", async () => {
       const workspaceState = new TestMemento();
       const provider = new ChatViewProvider(

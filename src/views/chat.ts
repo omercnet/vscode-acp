@@ -1185,15 +1185,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         (session) =>
           session.sessionId === sessionId && session.agentId === agentId
       );
+      const additionalDirectories =
+        sessionContext.additionalDirectories !== undefined
+          ? sessionContext.additionalDirectories
+          : existing?.additionalDirectories;
       const entry: StoredSession = {
         sessionId,
         agentId,
         configurationResource: sessionContext.configurationResource,
         cwd: sessionContext.cwd,
-        ...(sessionContext.additionalDirectories?.length
-          ? {
-              additionalDirectories: [...sessionContext.additionalDirectories],
-            }
+        ...(additionalDirectories?.length
+          ? { additionalDirectories: [...additionalDirectories] }
           : {}),
         createdAt: existing?.createdAt ?? now,
         lastUsedAt: now,
@@ -1286,13 +1288,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           }
           const resource = request.configurationResource
             ? vscode.Uri.parse(request.configurationResource)
-            : (vscode.workspace.workspaceFolders ?? []).find((folder) => {
-                const fromRoot = relative(folder.uri.fsPath, request.cwd);
-                return (
-                  fromRoot === "" ||
-                  (!fromRoot.startsWith("..") && !isAbsolute(fromRoot))
-                );
-              })?.uri;
+            : (vscode.workspace.workspaceFolders ?? []).find((folder) =>
+                isPathWithin(folder.uri.fsPath, request.cwd)
+              )?.uri;
           const parameters = await this.getSessionParameters(
             request.cwd,
             resource,
@@ -1331,11 +1329,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             cwd: request.cwd,
             configurationResource:
               request.configurationResource ?? resource?.toString(),
-            ...(sessionRequest.additionalDirectories?.length
+            ...(request.additionalDirectories !== undefined
               ? {
-                  additionalDirectories: [
-                    ...sessionRequest.additionalDirectories,
-                  ],
+                  additionalDirectories: [...request.additionalDirectories],
                 }
               : {}),
           };
@@ -1345,7 +1341,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ...request,
             configurationResource:
               request.configurationResource ?? resource?.toString(),
-            additionalDirectories: sessionRequest.additionalDirectories ?? [],
           }).catch(() => {
             console.warn("[Chat] Failed to update session metadata");
           });
@@ -1423,6 +1418,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           entry.sessionId === session.sessionId &&
           entry.agentId === session.agentId
       );
+      const additionalDirectories =
+        session.additionalDirectories !== undefined
+          ? session.additionalDirectories
+          : existing?.additionalDirectories;
       const updated: StoredSession = {
         sessionId: session.sessionId,
         agentId: session.agentId,
@@ -1430,8 +1429,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         ...(session.configurationResource
           ? { configurationResource: session.configurationResource }
           : {}),
-        ...(session.additionalDirectories?.length
-          ? { additionalDirectories: [...session.additionalDirectories] }
+        ...(additionalDirectories?.length
+          ? { additionalDirectories: [...additionalDirectories] }
           : {}),
         createdAt: existing?.createdAt ?? now,
         lastUsedAt: now,
