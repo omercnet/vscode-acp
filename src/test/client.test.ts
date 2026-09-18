@@ -94,8 +94,7 @@ suite("ACPClient", () => {
 
 suite("Agent process termination helpers", () => {
   test("bounds and escalates a stalled termination helper", async () => {
-    const commandProcess =
-      createMockProcess() as unknown as ChildProcess;
+    const commandProcess = createMockProcess() as unknown as ChildProcess;
     const signals: Array<NodeJS.Signals | number | undefined> = [];
     commandProcess.kill = (signal?: NodeJS.Signals | number) => {
       signals.push(signal);
@@ -137,10 +136,48 @@ suite("Agent process termination helpers", () => {
       waitForExit: async () => true,
     });
 
-    assert.strictEqual(commands.length, 2);
+    assert.strictEqual(commands.length, 3);
     assert.ok(commands[0].command.endsWith("taskkill.exe"));
-    assert.ok(commands[1].command.endsWith("powershell.exe"));
-    assert.ok(commands[1].args.includes("-NonInteractive"));
+    assert.ok(!commands[0].args.includes("/F"));
+    assert.ok(commands[1].command.endsWith("taskkill.exe"));
+    assert.ok(commands[1].args.includes("/F"));
+    assert.ok(commands[2].command.endsWith("powershell.exe"));
+    assert.ok(commands[2].args.includes("-NonInteractive"));
+  });
+
+  test("forces taskkill when graceful taskkill fails", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    const commands: string[][] = [];
+
+    await terminateWindowsProcessTree(parent, 42, {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (_command, args) => {
+        commands.push(args);
+        return args.includes("/F");
+      },
+      waitForExit: async () => true,
+    });
+
+    assert.strictEqual(commands.length, 2);
+    assert.ok(!commands[0].includes("/F"));
+    assert.ok(commands[1].includes("/F"));
+  });
+
+  test("does not terminate a reused root pid after parent exit", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    Object.defineProperty(parent, "exitCode", { value: 0 });
+    let script = "";
+
+    await terminateWindowsProcessTree(parent, 42, {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (_command, args) => {
+        script = args.at(-1) ?? "";
+        return true;
+      },
+      waitForExit: async () => assert.fail("exited parent must not be awaited"),
+    });
+
+    assert.ok(!script.includes("Stop-OwnedProcess $root"));
   });
 
   test("treats an already-exited Windows root as successful", async function () {
@@ -152,7 +189,6 @@ suite("Agent process termination helpers", () => {
 
     await terminateWindowsProcessTree(parent, 2_000_000_000);
   });
-
 });
 
 suite("ACP error presentation", () => {
@@ -1281,10 +1317,10 @@ suite("ACPClient with Mock Server", () => {
         second.sessions.map((session) => session.sessionId),
         ["listed-session-2"]
       );
-      assert.deepStrictEqual(
-        mockProcesses[0].server.getListSessionRequests(),
-        [{}, { cursor: "page-2" }]
-      );
+      assert.deepStrictEqual(mockProcesses[0].server.getListSessionRequests(), [
+        {},
+        { cursor: "page-2" },
+      ]);
     });
 
     test("resumes with the selected directories and MCP snapshot", async () => {

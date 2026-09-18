@@ -497,6 +497,7 @@ export type SpawnFunction = (
 ) => ChildProcess;
 
 const AGENT_TERMINATION_GRACE_MS = 1000;
+const WINDOWS_TERMINATION_COMMAND_TIMEOUT_MS = 15_000;
 
 function hasExited(child: ChildProcess): boolean {
   return (
@@ -569,7 +570,7 @@ export function runBoundedTerminationCommand(
 ): Promise<boolean> {
   const spawnCommand = options.spawn ?? (nodeSpawn as SpawnFunction);
   const scheduler = options.scheduler ?? DEFAULT_TERMINATION_SCHEDULER;
-  const timeoutMs = options.timeoutMs ?? AGENT_TERMINATION_GRACE_MS;
+  const timeoutMs = options.timeoutMs ?? WINDOWS_TERMINATION_COMMAND_TIMEOUT_MS;
   return new Promise<boolean>((resolve) => {
     let child: ChildProcess;
     try {
@@ -610,7 +611,8 @@ interface WindowsTerminationOptions {
 }
 
 export function buildWindowsOrphanTerminationScript(
-  processId: number
+  processId: number,
+  terminateRoot = true
 ): string {
   if (!Number.isSafeInteger(processId) || processId <= 0) {
     throw new Error("Invalid ACP agent process id");
@@ -618,14 +620,13 @@ export function buildWindowsOrphanTerminationScript(
   return [
     "$ErrorActionPreference='Stop'",
     `$root=[uint32]${processId}`,
-    "$all=Get-CimInstance Win32_Process",
     "$queue=New-Object 'System.Collections.Generic.Queue[uint32]'",
     "$ids=New-Object 'System.Collections.Generic.List[uint32]'",
     "$queue.Enqueue($root)",
-    "while($queue.Count -gt 0){$parent=$queue.Dequeue();foreach($p in $all){if($p.ParentProcessId -eq $parent){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}}",
+    'while($queue.Count -gt 0){$parent=$queue.Dequeue();$children=Get-CimInstance Win32_Process -Filter "ParentProcessId=$parent" -Property ProcessId;foreach($p in $children){$ids.Add($p.ProcessId);$queue.Enqueue($p.ProcessId)}}',
     "function Stop-OwnedProcess([uint32]$id){try{Stop-Process -Id $id -Force -ErrorAction Stop}catch{if($null -ne (Get-Process -Id $id -ErrorAction SilentlyContinue)){throw}}}",
     "$ids | Sort-Object -Descending | ForEach-Object { Stop-OwnedProcess $_ }",
-    "Stop-OwnedProcess $root",
+    ...(terminateRoot ? ["Stop-OwnedProcess $root"] : []),
     "exit 0",
   ].join(";");
 }
@@ -652,16 +653,14 @@ export async function terminateWindowsProcessTree(
     if (graceful && (await waitForExit(child))) {
       return;
     }
-    if (graceful) {
-      const forced = await runCommand(taskkill, [
-        "/pid",
-        String(processId),
-        "/T",
-        "/F",
-      ]);
-      if (forced && (await waitForExit(child))) {
-        return;
-      }
+    const forced = await runCommand(taskkill, [
+      "/pid",
+      String(processId),
+      "/T",
+      "/F",
+    ]);
+    if (forced && (await waitForExit(child))) {
+      return;
     }
   }
 
@@ -672,7 +671,10 @@ export async function terminateWindowsProcessTree(
     "v1.0",
     "powershell.exe"
   );
-  const script = buildWindowsOrphanTerminationScript(processId);
+  const script = buildWindowsOrphanTerminationScript(
+    processId,
+    !hasExited(child)
+  );
   const terminated = await runCommand(powershell, [
     "-NoLogo",
     "-NoProfile",
@@ -965,7 +967,6 @@ export class ACPClient {
       );
     }
 
-
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
@@ -1083,9 +1084,8 @@ export class ACPClient {
         Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
       );
       const diagnosticsStream = this.diagnostics?.wrap(transport) ?? transport;
-      const stream = preserveConfigResponseOrder(
-        diagnosticsStream,
-        () => this.waitForConfigResponseContinuation()
+      const stream = preserveConfigResponseOrder(diagnosticsStream, () =>
+        this.waitForConfigResponseContinuation()
       );
 
       connection = acp
