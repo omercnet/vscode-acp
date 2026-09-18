@@ -2001,10 +2001,7 @@ suite("ChatViewProvider", () => {
         class BlockedClient extends TestACPClient {
           public disconnectCalled = false;
           private connectionState:
-            | "disconnected"
-            | "connecting"
-            | "connected"
-            | "error" =
+            "disconnected" | "connecting" | "connected" | "error" =
             blockedOperation === "initialize" ? "disconnected" : "connected";
 
           getState(): "disconnected" | "connecting" | "connected" | "error" {
@@ -2155,6 +2152,54 @@ suite("ChatViewProvider", () => {
       assert.ok(!client.calls.includes("connect"));
     });
 
+    test("delayed new-chat echo cannot override a later disconnect", async () => {
+      const client = new LifecycleClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      let releaseCleanup!: () => void;
+      let markCleanupStarted!: () => void;
+      const cleanupStarted = new Promise<void>((resolve) => {
+        markCleanupStarted = resolve;
+      });
+      const cleanupGate = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      });
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          markCleanupStarted();
+          await cleanupGate;
+        },
+      });
+      const lifecycle = provider as unknown as {
+        handleNewChat(lifecycleGeneration?: number): Promise<void>;
+      };
+
+      provider.newChat();
+      const trigger = messages.find(
+        (message) => message.type === "triggerNewChat"
+      );
+      const lifecycleGeneration = trigger?.lifecycleGeneration;
+      if (typeof lifecycleGeneration !== "number") {
+        assert.fail("triggerNewChat must carry its lifecycle generation");
+      }
+      const disconnecting = provider.disconnectAgent();
+      await cleanupStarted;
+      const delayedNewChat = lifecycle.handleNewChat(lifecycleGeneration);
+      releaseCleanup();
+      await Promise.all([disconnecting, delayedNewChat]);
+
+      assert.strictEqual(client.getState(), "disconnected");
+      assert.ok(!client.calls.includes("connect"));
+      assert.ok(!client.calls.includes("newSession"));
+    });
+
     test("disconnect reuses cleanup and revokes pending permissions", async () => {
       const client = new LifecycleClient();
       const provider = new ChatViewProvider(
@@ -2258,6 +2303,142 @@ suite("ChatViewProvider", () => {
         messages.filter((entry) => entry.type === "sessionTransition").at(-1),
         { type: "sessionTransition", active: false }
       );
+    });
+
+    test("failed terminal cleanup blocks restart and retries on disconnect", async () => {
+      const client = new LifecycleClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      let terminationSucceeds = false;
+      let terminationAttempts = 0;
+      let disposeCalls = 0;
+      const terminal = {
+        id: "retry-terminal",
+        sessionId: "test-session",
+        generation: 0,
+        terminal: { dispose: () => disposeCalls++ },
+        proc: null,
+        processId: 2_000_000_000,
+        output: "",
+        outputByteLimit: null,
+        truncated: false,
+        exitCode: null,
+        signal: null,
+        exitPromise: Promise.resolve(),
+        exitResolve: () => undefined,
+        waitAbortPromise: Promise.resolve(),
+        waitAbortResolve: () => undefined,
+        waitPending: false,
+        closing: false,
+        terminationPromise: null,
+      };
+      const lifecycle = provider as unknown as {
+        terminals: Map<string, unknown>;
+        retiringTerminals: Set<unknown>;
+        performTerminalTermination(terminal: unknown): Promise<boolean>;
+      };
+      lifecycle.terminals.set(terminal.id, terminal);
+      lifecycle.performTerminalTermination = async () => {
+        terminationAttempts++;
+        return terminationSucceeds;
+      };
+
+      await assert.rejects(
+        () => provider.restartAgent(),
+        /Failed to terminate ACP terminal process tree/
+      );
+      assert.strictEqual(client.getState(), "disconnected");
+      assert.ok(!client.calls.includes("connect"));
+      assert.ok(!client.calls.includes("newSession"));
+      assert.strictEqual(lifecycle.retiringTerminals.has(terminal), true);
+      assert.strictEqual(terminationAttempts, 1);
+      assert.strictEqual(terminal.terminationPromise, null);
+
+      terminationSucceeds = true;
+      await provider.disconnectAgent();
+
+      assert.strictEqual(terminationAttempts, 2);
+      assert.strictEqual(lifecycle.retiringTerminals.has(terminal), false);
+      assert.strictEqual(disposeCalls, 1);
+    });
+
+    test("provider disposal observes terminal cleanup rejection", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LifecycleClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      let reported = 0;
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          throw new Error("terminal cleanup failed");
+        },
+      });
+      Object.defineProperty(provider, "postACPError", {
+        value: () => {
+          reported++;
+          return new Error("terminal cleanup failed");
+        },
+      });
+
+      provider.dispose();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      assert.strictEqual(reported, 1);
+    });
+
+    test("agent switch failure preserves active-session redaction", async () => {
+      class SwitchingClient extends LifecycleClient {
+        public setAgentCalls = 0;
+
+        setAgent(): void {
+          this.setAgentCalls++;
+        }
+      }
+      const client = new SwitchingClient();
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      client.setAgentCalls = 0;
+      const secret = "aborted-switch-secret";
+      const redactor = Reflect.get(
+        provider,
+        "mcpSecretRedactor"
+      ) as McpSecretRedactor;
+      redactor.add([secret]);
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "getConfiguredAgent", {
+        value: () => ({ id: "replacement" }),
+      });
+      Object.defineProperty(provider, "disposeTerminals", {
+        value: async () => {
+          throw new Error("terminal cleanup failed");
+        },
+      });
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const lifecycle = provider as unknown as {
+        handleAgentChange(agentId: string): Promise<void>;
+        postACPError(context: string, error: unknown): Error;
+      };
+
+      await lifecycle.handleAgentChange("replacement");
+      lifecycle.postACPError("Session failed", new Error(secret));
+
+      assert.strictEqual(client.setAgentCalls, 0);
+      assert.strictEqual(
+        redactor.redactError(new Error(secret)).message,
+        "[redacted]"
+      );
+      assert.ok(!JSON.stringify(messages).includes(secret));
+      assert.match(JSON.stringify(messages), /\[redacted\]/);
     });
 
     test("queued disconnect cancels replacement startup", async () => {
@@ -3607,7 +3788,6 @@ suite("ChatViewProvider", () => {
           return true;
         }
 
-
         async loadSession(params: LoadSessionRequest): Promise<void> {
           const sessionId = params.sessionId;
           this.currentSessionId = sessionId;
@@ -3684,7 +3864,6 @@ suite("ChatViewProvider", () => {
         supportsSessionLoad(): boolean {
           return true;
         }
-
 
         async sendMessage(): Promise<{ stopReason: string }> {
           markPromptStarted();
@@ -3896,10 +4075,10 @@ suite("ChatViewProvider", () => {
           terminalCleanupCalls++;
         },
       });
-      const grants = Reflect.get(
-        provider,
-        "terminalPermissionGrants"
-      ) as Map<string, unknown>;
+      const grants = Reflect.get(provider, "terminalPermissionGrants") as Map<
+        string,
+        unknown
+      >;
       grants.set("old-grant", {});
       const descriptor = Object.getOwnPropertyDescriptor(
         vscode.window,
@@ -3926,10 +4105,9 @@ suite("ChatViewProvider", () => {
           client.resumeRequests[1],
           "authentication retry must reuse the exact configuration snapshot"
         );
-        assert.deepStrictEqual(
-          client.resumeRequests[1].additionalDirectories,
-          ["/shared"]
-        );
+        assert.deepStrictEqual(client.resumeRequests[1].additionalDirectories, [
+          "/shared",
+        ]);
         assert.deepStrictEqual(client.authenticationRequests, [
           { methodId: "browser", generation: 1 },
         ]);
@@ -4009,9 +4187,7 @@ suite("ChatViewProvider", () => {
       releaseHistoryWrite();
       await opening;
       assert.ok(!messages.some((message) => message.type === "chatCleared"));
-      assert.ok(
-        !messages.some((message) => message.type === "replayComplete")
-      );
+      assert.ok(!messages.some((message) => message.type === "replayComplete"));
       const lifecycle = provider as unknown as { hasSession: boolean };
       assert.strictEqual(lifecycle.hasSession, false);
       provider.dispose();
@@ -5499,7 +5675,10 @@ suite("ChatViewProvider", () => {
       const cleanup = provider as unknown as {
         terminateWindowsProcessTree(processId: number): Promise<boolean>;
         processExists(processId: number): boolean;
-        runTerminationCommand(command: string, args: string[]): Promise<boolean>;
+        runTerminationCommand(
+          command: string,
+          args: string[]
+        ): Promise<boolean>;
         waitForProcessExit(processId: number): Promise<boolean>;
       };
       const commands: string[] = [];

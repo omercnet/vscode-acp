@@ -197,6 +197,7 @@ interface WebviewMessage {
   sessionId?: string;
   optionId?: string;
   cancelled?: boolean;
+  lifecycleGeneration?: number;
   attachmentIds?: string[];
   attachmentId?: string;
   attachmentCount?: number;
@@ -778,7 +779,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "selectAgent":
           if (message.agentId) {
-            this.handleAgentChange(message.agentId);
+            await this.handleAgentChange(message.agentId);
           }
           break;
         case "selectMode":
@@ -803,7 +804,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleConnect();
           break;
         case "newChat":
-          await this.handleNewChat();
+          await this.handleNewChat(message.lifecycleGeneration);
           break;
         case "clearChat":
           this.handleClearChat();
@@ -874,7 +875,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public newChat(): void {
-    this.postMessage({ type: "triggerNewChat" });
+    const lifecycleGeneration = ++this.lifecycleCommandGeneration;
+    this.postMessage({ type: "triggerNewChat", lifecycleGeneration });
   }
 
   public clearChat(): void {
@@ -2144,6 +2146,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return fallbackCompleted && this.waitForProcessExit(processId);
   }
 
+  private async performTerminalTermination(
+    terminal: ManagedTerminal
+  ): Promise<boolean> {
+    const processId = terminal.processId ?? terminal.proc?.pid ?? null;
+    if (!processId) {
+      terminal.exitCode = terminal.exitCode ?? 1;
+      terminal.exitResolve();
+      return true;
+    }
+
+    if (process.platform === "win32") {
+      const terminated = await this.terminateWindowsProcessTree(processId);
+      if (terminated) {
+        terminal.signal = "SIGKILL";
+      }
+      return terminated;
+    }
+
+    if (!this.processGroupExists(processId)) {
+      return true;
+    }
+    try {
+      process.kill(-processId, "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        return false;
+      }
+    }
+    terminal.signal = "SIGTERM";
+    if (await this.waitForProcessGroupExit(processId)) {
+      return true;
+    }
+
+    try {
+      process.kill(-processId, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        return false;
+      }
+    }
+    terminal.signal = "SIGKILL";
+    return this.waitForProcessGroupExit(processId);
+  }
+
   private async terminateTerminalProcess(
     terminal: ManagedTerminal
   ): Promise<boolean> {
@@ -2153,48 +2199,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     terminal.closing = true;
     terminal.waitAbortResolve();
-    terminal.terminationPromise = (async () => {
-      const processId = terminal.processId ?? terminal.proc?.pid ?? null;
-      if (!processId) {
-        terminal.exitCode = terminal.exitCode ?? 1;
-        terminal.exitResolve();
-        return true;
+    const termination = this.performTerminalTermination(terminal);
+    terminal.terminationPromise = termination;
+    try {
+      const terminated = await termination;
+      if (!terminated && terminal.terminationPromise === termination) {
+        terminal.terminationPromise = null;
       }
-
-      if (process.platform === "win32") {
-        const terminated = await this.terminateWindowsProcessTree(processId);
-        if (terminated) {
-          terminal.signal = "SIGKILL";
-        }
-        return terminated;
+      return terminated;
+    } catch (error) {
+      if (terminal.terminationPromise === termination) {
+        terminal.terminationPromise = null;
       }
-
-      if (!this.processGroupExists(processId)) {
-        return true;
-      }
-      try {
-        process.kill(-processId, "SIGTERM");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-          return false;
-        }
-      }
-      terminal.signal = "SIGTERM";
-      if (await this.waitForProcessGroupExit(processId)) {
-        return true;
-      }
-
-      try {
-        process.kill(-processId, "SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-          return false;
-        }
-      }
-      terminal.signal = "SIGKILL";
-      return this.waitForProcessGroupExit(processId);
-    })();
-    return terminal.terminationPromise;
+      throw error;
+    }
   }
 
   private async handleKillTerminalCommand(
@@ -2522,10 +2540,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.activeSessionContext = null;
     this.stderrBuffer = "";
     this.clearPendingAttachments();
+    const previousCleanup = this.terminalCleanup.catch(() => undefined);
     const cleanup = this.disposeTerminals();
-    this.terminalCleanup = Promise.all([this.terminalCleanup, cleanup]).then(
+    this.terminalCleanup = Promise.all([previousCleanup, cleanup]).then(
       () => undefined
     );
+    void this.terminalCleanup.catch(() => undefined);
     this.expirePermissionRequests();
     if (interruptedReplay) {
       this.postMessage({
@@ -2548,24 +2568,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async disposeTerminals(): Promise<void> {
     this.terminalGeneration++;
-    const terminals = Array.from(this.terminals.values());
+    const terminals = new Set<ManagedTerminal>([
+      ...this.retiringTerminals,
+      ...this.terminals.values(),
+    ]);
     this.terminals.clear();
     for (const terminal of terminals) {
       terminal.closing = true;
       this.retiringTerminals.add(terminal);
     }
-    await Promise.all(
-      terminals.map(async (terminal) => {
+    const results = await Promise.all(
+      Array.from(terminals, async (terminal) => {
         const terminated = await this.terminateTerminalProcess(terminal);
         if (!terminated) {
-          return;
+          return false;
         }
         try {
           terminal.terminal?.dispose();
         } catch {}
         this.retiringTerminals.delete(terminal);
+        return true;
       })
     );
+    if (results.some((terminated) => !terminated)) {
+      throw new Error("Failed to terminate ACP terminal process tree.");
+    }
   }
 
   public dispose(): void {
@@ -2574,7 +2601,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     this.disposed = true;
     this.conversationGeneration++;
-    void this.disposeTerminals();
+    void this.disposeTerminals().catch((error) => {
+      this.postACPError("Failed to terminate ACP terminals", error);
+    });
     this.mcpSecretRedactor.clear();
     this.activeSessionContext = null;
     this.clearPendingAttachments();
@@ -3119,31 +3148,37 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private handleAgentChange(agentId: string): void {
+  private async handleAgentChange(agentId: string): Promise<void> {
     const agent = this.getConfiguredAgent(agentId);
-    if (agent) {
-      this.conversationGeneration++;
-      this.mcpSecretRedactor.clear();
-      this.expirePermissionRequests();
-      void this.disposeTerminals();
-      this.acpClient.setAgent(agent);
-      this.isReplaying = false;
-      this.replayGeneration = null;
-      this.replayMessages = [];
-      this.expirePermissionRequests();
-      this.globalState.update(SELECTED_AGENT_KEY, agentId);
-      this.hasSession = false;
-      this.hasRestoredLegacyMode = false;
-      this.activeSessionContext = null;
-      this.clearPendingAttachments();
-      this.postMessage({ type: "agentChanged", agentId });
-      this.postMessage({
-        type: "sessionMetadata",
-        modes: null,
-        models: null,
-        configOptions: null,
-      });
+    if (!agent) {
+      return;
     }
+    this.conversationGeneration++;
+    this.expirePermissionRequests();
+    try {
+      await this.disposeTerminals();
+    } catch (error) {
+      this.postACPError("Failed to terminate ACP terminals", error);
+      return;
+    }
+    this.acpClient.setAgent(agent);
+    this.mcpSecretRedactor.clear();
+    this.isReplaying = false;
+    this.replayGeneration = null;
+    this.replayMessages = [];
+    this.expirePermissionRequests();
+    void this.globalState.update(SELECTED_AGENT_KEY, agentId);
+    this.hasSession = false;
+    this.hasRestoredLegacyMode = false;
+    this.activeSessionContext = null;
+    this.clearPendingAttachments();
+    this.postMessage({ type: "agentChanged", agentId });
+    this.postMessage({
+      type: "sessionMetadata",
+      modes: null,
+      models: null,
+      configOptions: null,
+    });
   }
 
   private async handleModeChange(modeId: string): Promise<void> {
@@ -3205,7 +3240,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleNewChat(): Promise<void> {
+  private async handleNewChat(lifecycleGeneration?: number): Promise<void> {
+    const intentGeneration =
+      lifecycleGeneration ?? ++this.lifecycleCommandGeneration;
+    if (intentGeneration !== this.lifecycleCommandGeneration) {
+      this.settleSessionLock();
+      return;
+    }
     this.streamingText = "";
 
     if (!this.acpClient.isConnected() && !this.sessionTransition) {

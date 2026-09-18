@@ -1043,6 +1043,19 @@ suite("Webview", () => {
         assert.strictEqual(elements.messagesEl.children.length, 0);
       });
 
+      test("echoes the original new-chat lifecycle generation", () => {
+        mockVsCode._clearMessages();
+
+        controller.handleMessage({
+          type: "triggerNewChat",
+          lifecycleGeneration: 42,
+        });
+
+        assert.deepStrictEqual(mockVsCode._getMessages(), [
+          { type: "newChat", lifecycleGeneration: 42 },
+        ]);
+      });
+
       test("handles toolCallStart", () => {
         controller.handleMessage({
           type: "toolCallStart",
