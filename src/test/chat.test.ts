@@ -22,6 +22,11 @@ import {
   ChatViewProvider,
   DIRTY_EDITOR_WRITE_CONFLICT,
 } from "../views/chat";
+import {
+  AgentSessionTreeProvider,
+  type SessionOpenMode,
+  type SessionProbe,
+} from "../views/sessions";
 import { McpSecretRedactor } from "../acp/mcp";
 import { RequestError } from "@agentclientprotocol/sdk";
 import type {
@@ -30,6 +35,7 @@ import type {
   ACPSessionCapabilities,
   SessionMetadata,
 } from "../acp/client";
+import type { AgentDiscoveryOptions } from "../acp/agents";
 import {
   openTrustedWorkspaceFile,
   workspaceFileCapabilities,
@@ -48,7 +54,7 @@ import type {
   SessionNotification,
 } from "@agentclientprotocol/sdk";
 import * as attachmentHelpers from "../attachments";
-import { readStoredSessions } from "../sessions";
+import { SESSION_HISTORY_KEY, readStoredSessions } from "../sessions";
 import type { FileAttachment } from "../shared/attachments";
 import {
   getElements,
@@ -2543,6 +2549,206 @@ suite("ChatViewProvider", () => {
   });
 
   suite("Session history", () => {
+    async function assertMovedSessionDropsSavedDirectories(
+      mode: SessionOpenMode,
+      failOpeningPersistence: boolean
+    ): Promise<void> {
+      class PersistenceState extends TestMemento {
+        rejectNextHistoryUpdate = false;
+
+        async update(key: string, value: unknown): Promise<void> {
+          if (key === SESSION_HISTORY_KEY && this.rejectNextHistoryUpdate) {
+            this.rejectNextHistoryUpdate = false;
+            throw new Error("opening persistence failed");
+          }
+          await super.update(key, value);
+        }
+      }
+
+      class RestoringClient extends TestACPClient {
+        readonly restorationRequests: Array<
+          LoadSessionRequest | ResumeSessionRequest
+        > = [];
+
+        getAgentId(): string {
+          return "opencode";
+        }
+
+        isConnected(): boolean {
+          return true;
+        }
+
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: true,
+            list: true,
+            resume: true,
+            additionalDirectories: true,
+          };
+        }
+
+        async loadSession(params: LoadSessionRequest): Promise<void> {
+          this.restorationRequests.push(params);
+          this.currentSessionId = params.sessionId;
+        }
+
+        async resumeSession(params: ResumeSessionRequest): Promise<void> {
+          this.restorationRequests.push(params);
+          this.currentSessionId = params.sessionId;
+        }
+      }
+
+      class TreeProbe implements SessionProbe {
+        constructor(private readonly list: boolean) {}
+
+        async connect(): Promise<void> {}
+        dispose(): void {}
+        getState(): ACPConnectionState {
+          return "connected";
+        }
+        getSessionCapabilities(): ACPSessionCapabilities {
+          return {
+            load: true,
+            list: this.list,
+            resume: true,
+            additionalDirectories: true,
+          };
+        }
+        getAuthenticationMethods(): readonly AuthMethod[] {
+          return [];
+        }
+        getConnectionGeneration(): number {
+          return 1;
+        }
+        async authenticate(): Promise<void> {}
+        async listSessions(): Promise<unknown> {
+          return {
+            sessions: [
+              {
+                sessionId: "moved-session",
+                cwd: "/moved-workspace",
+                title: "Moved session",
+              },
+            ],
+            nextCursor: "next-page",
+          };
+        }
+        setFileSystemCapabilities(): void {}
+        setOnStateChange(): () => void {
+          return () => {};
+        }
+      }
+
+      const workspaceState = new PersistenceState();
+      await workspaceState.update(SESSION_HISTORY_KEY, [
+        {
+          sessionId: "moved-session",
+          agentId: "opencode",
+          cwd: "/workspace",
+          additionalDirectories: ["/saved-extra"],
+          createdAt: 1,
+          lastUsedAt: 1,
+          preview: "Moved session",
+          messageCount: 1,
+        },
+      ]);
+      workspaceState.rejectNextHistoryUpdate = failOpeningPersistence;
+      const client = new RestoringClient();
+      const chatProvider = new ChatViewProvider(
+        mockExtensionUri,
+        client as unknown as ACPClient,
+        memento as unknown as vscode.Memento,
+        workspaceState as unknown as vscode.Memento
+      );
+      Object.defineProperty(chatProvider, "getSessionParameters", {
+        value: async (cwd: string) => ({ cwd, mcpServers: [] }),
+      });
+      const options: AgentDiscoveryOptions = {
+        agentPaths: { opencode: "/test/bin/opencode" },
+        platform: "linux",
+        env: { PATH: "" },
+        fileSystem: {
+          isFile: (path) => path === "/test/bin/opencode",
+          isExecutable: (path) => path === "/test/bin/opencode",
+          readText: () => undefined,
+          realpath: (path) => path,
+        },
+      };
+      const expand = async (provider: AgentSessionTreeProvider) => {
+        const agent = provider
+          .getChildren()
+          .find(
+            (node) => node.kind === "agent" && node.agent.id === "opencode"
+          );
+        assert.ok(agent);
+        provider.getChildren(agent);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        return agent;
+      };
+      const listingProvider = new AgentSessionTreeProvider(
+        workspaceState as unknown as vscode.Memento,
+        () => options,
+        (request) => chatProvider.openAgentSession(request),
+        () => new TreeProbe(true)
+      );
+      let historyProvider: AgentSessionTreeProvider | undefined;
+
+      try {
+        const listingAgent = await expand(listingProvider);
+        const listedSession = listingProvider
+          .getChildren(listingAgent)
+          .find((node) => node.kind === "session");
+        assert.ok(listedSession && listedSession.kind === "session");
+        assert.strictEqual(listedSession.session.cwd, "/moved-workspace");
+        assert.strictEqual(listedSession.session.additionalDirectories, undefined);
+
+        await listingProvider.openSession(listedSession, mode);
+        const persistence = chatProvider as unknown as {
+          saveCurrentSession(preview?: string): Promise<void>;
+        };
+        await persistence.saveCurrentSession("Continued after moving");
+
+        historyProvider = new AgentSessionTreeProvider(
+          workspaceState as unknown as vscode.Memento,
+          () => options,
+          (request) => chatProvider.openAgentSession(request),
+          () => new TreeProbe(false)
+        );
+        const historyAgent = await expand(historyProvider);
+        const historySession = historyProvider
+          .getChildren(historyAgent)
+          .find((node) => node.kind === "session");
+        assert.ok(historySession && historySession.kind === "session");
+
+        await historyProvider.openSession(historySession, mode);
+
+        assert.strictEqual(client.restorationRequests.length, 2);
+        assert.deepStrictEqual(
+          client.restorationRequests.map(
+            (request) => request.additionalDirectories
+          ),
+          [undefined, undefined]
+        );
+        const [saved] = readStoredSessions(
+          workspaceState as unknown as vscode.Memento
+        );
+        assert.strictEqual(saved.cwd, "/moved-workspace");
+        assert.strictEqual(saved.additionalDirectories, undefined);
+      } finally {
+        historyProvider?.dispose();
+        listingProvider.dispose();
+        chatProvider.dispose();
+      }
+    }
+
+    test("does not inherit moved-session directories when loading", async () => {
+      await assertMovedSessionDropsSavedDirectories("load", true);
+    });
+
+    test("does not inherit moved-session directories when resuming", async () => {
+      await assertMovedSessionDropsSavedDirectories("resume", false);
+    });
+
     test("preserves the loaded session MCP resource when saving", async () => {
       class LoadingClient extends TestACPClient {
         isConnected(): boolean {

@@ -1188,7 +1188,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const additionalDirectories =
         sessionContext.additionalDirectories !== undefined
           ? sessionContext.additionalDirectories
-          : existing?.additionalDirectories;
+          : existing?.cwd === sessionContext.cwd
+            ? existing.additionalDirectories
+            : undefined;
       const entry: StoredSession = {
         sessionId,
         agentId,
@@ -1421,7 +1423,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       const additionalDirectories =
         session.additionalDirectories !== undefined
           ? session.additionalDirectories
-          : existing?.additionalDirectories;
+          : existing?.cwd === session.cwd
+            ? existing.additionalDirectories
+            : undefined;
       const updated: StoredSession = {
         sessionId: session.sessionId,
         agentId: session.agentId,
