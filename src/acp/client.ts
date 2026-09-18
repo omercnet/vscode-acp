@@ -675,8 +675,9 @@ export function buildWindowsOrphanTerminationScript(
     'if(handle==IntPtr.Zero){int error=Marshal.GetLastWin32Error();if(error==87)return false;throw new InvalidOperationException("OpenProcess failed: "+error);}',
     'try{FILETIME creation,exit,kernel,user;if(!GetProcessTimes(handle,out creation,out exit,out kernel,out user))throw new InvalidOperationException("GetProcessTimes failed: "+Marshal.GetLastWin32Error());',
     "long actual=((long)creation.High<<32)|creation.Low;long delta=actual>=expected?actual-expected:expected-actual;if(delta>10)return false;",
-    'if(!TerminateProcess(handle,1))throw new InvalidOperationException("TerminateProcess failed: "+Marshal.GetLastWin32Error());',
-    'uint wait=WaitForSingleObject(handle,1000);if(wait!=0)throw new InvalidOperationException("Process did not exit: "+wait);return true;}',
+    'uint state=WaitForSingleObject(handle,0);if(state==0)return true;if(state!=258)throw new InvalidOperationException("Process wait failed: "+state);',
+    'if(!TerminateProcess(handle,1)){state=WaitForSingleObject(handle,0);if(state==0)return true;throw new InvalidOperationException("TerminateProcess failed: "+Marshal.GetLastWin32Error());}',
+    'state=WaitForSingleObject(handle,1000);if(state!=0)throw new InvalidOperationException("Process did not exit: "+state);return true;}',
     "finally{CloseHandle(handle);}}}",
   ].join("");
   return [

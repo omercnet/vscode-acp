@@ -153,6 +153,16 @@ suite("Agent process termination helpers", () => {
     const script = commands[0].args.at(-1) ?? "";
     assert.ok(script.includes("delta>10"));
     assert.ok(script.includes("$rootCreated -ge $notBefore"));
+    const initialExitCheck = script.indexOf(
+      "uint state=WaitForSingleObject(handle,0)"
+    );
+    const termination = script.indexOf("if(!TerminateProcess(handle,1))");
+    const racedExitCheck = script.indexOf(
+      "state=WaitForSingleObject(handle,0)",
+      termination + 1
+    );
+    assert.ok(initialExitCheck >= 0 && initialExitCheck < termination);
+    assert.ok(racedExitCheck > termination);
   });
 
   test("does not issue a stale taskkill after the parent exits", async () => {
