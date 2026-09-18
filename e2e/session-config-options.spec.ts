@@ -236,14 +236,20 @@ test("renders grouped options, applies cascades, and clears replacements", async
       "accurate"
     );
     expect(
-      await frame.locator('[data-config-id="interaction"]').evaluate(
-        (element) => element === document.activeElement
-      )
+      await frame
+        .locator('[data-config-id="interaction"]')
+        .evaluate((element) => element === document.activeElement)
     ).toBe(true);
 
     await runCommand(window, "ACP: New Chat");
     await expect(configSelectors).toHaveCount(0);
-    await expect(configSelectors).toHaveCount(3, { timeout: 10000 });
+    await expect(configSelectors).toHaveCount(2, { timeout: 10000 });
+    await expect(frame.locator('[data-config-id="interaction"]')).toHaveValue(
+      "review"
+    );
+    await expect(frame.locator('[data-config-id="model"]')).toHaveValue(
+      "accurate"
+    );
   } finally {
     await closeVSCode(host);
   }
