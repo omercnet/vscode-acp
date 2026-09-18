@@ -262,6 +262,64 @@ suite("Agent session tree", () => {
     }
   });
 
+  test("opens an explicit directory clear from a partial listing", async () => {
+    const workspaceState = new TestMemento();
+    await workspaceState.update(SESSION_HISTORY_KEY, [
+      {
+        ...storedSession("explicit-clear"),
+        additionalDirectories: ["/saved-extra"],
+      },
+    ]);
+    const opened: AgentSessionOpenRequest[] = [];
+    const provider = new AgentSessionTreeProvider(
+      workspaceState,
+      discoveryOptions,
+      async (request) => {
+        opened.push(request);
+        return true;
+      },
+      () =>
+        new TestProbe(LISTING_CAPABILITIES, [
+          {
+            sessions: [
+              {
+                sessionId: "explicit-clear",
+                cwd: "/workspace",
+                additionalDirectories: [],
+                title: "Explicit clear",
+              },
+            ],
+            nextCursor: "next-page",
+          },
+        ])
+    );
+
+    try {
+      const agent = await expandOpenCode(provider);
+      const children = provider.getChildren(agent);
+      assert.deepStrictEqual(
+        children.map((node) =>
+          node.kind === "state" ? node.state : node.kind
+        ),
+        ["session", "load-more"]
+      );
+      const session = children.find(
+        (node): node is SessionNode => node.kind === "session"
+      );
+      assert.ok(session);
+      assert.deepStrictEqual(
+        readStoredSessions(workspaceState)[0]?.additionalDirectories,
+        ["/saved-extra"]
+      );
+
+      await provider.openSession(session, "resume");
+
+      assert.deepStrictEqual(opened[0]?.additionalDirectories, []);
+    } finally {
+      provider.dispose();
+    }
+  });
+
   test("keeps Load More actionable after an empty intermediate page", async () => {
     const probe = new TestProbe(LISTING_CAPABILITIES, [
       { sessions: [], nextCursor: "next-page" },
@@ -378,6 +436,21 @@ suite("Agent session tree", () => {
           sessions: [session("bounded-session")],
           futureField: "x".repeat(1_100_000),
         }),
+      /safe wire limit/
+    );
+    const escapeHeavyPayload = {
+      sessions: Array.from({ length: 200 }, (_, index) => ({
+        sessionId: `escape-heavy-${index}`,
+        cwd: "/workspace",
+        title: "\\".repeat(4096),
+      })),
+    };
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(escapeHeavyPayload), "utf8") >
+        1_048_576
+    );
+    assert.throws(
+      () => normalizeAgentSessionPage(escapeHeavyPayload),
       /safe wire limit/
     );
 
@@ -843,7 +916,7 @@ suite("Agent session tree", () => {
       ],
       50
     );
-    assert.strictEqual(explicitlyCleared[0].additionalDirectories, undefined);
+    assert.deepStrictEqual(explicitlyCleared[0].additionalDirectories, []);
   });
 
   test("does not publish an obsolete load after refresh replaces its state", async () => {

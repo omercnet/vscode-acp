@@ -124,6 +124,15 @@ function assertBoundedSessionPagePayload(value: unknown): void {
     }
   };
   visit(value, 0);
+  const serialized = JSON.stringify(value);
+  if (
+    serialized === undefined ||
+    Buffer.byteLength(serialized, "utf8") > MAX_AGENT_SESSION_PAGE_WIRE_BYTES
+  ) {
+    throw new SessionDiscoveryLimitError(
+      "Agent session listing exceeded the safe wire limit. Reduce the agent's stored sessions, then retry."
+    );
+  }
 }
 
 export function normalizeAgentSessionPage(value: unknown): AgentSessionPage {
@@ -341,7 +350,7 @@ export function mergeAgentOwnedSession(
     ...(saved?.configurationResource && sameCwd
       ? { configurationResource: saved.configurationResource }
       : {}),
-    ...(additionalDirectories?.length
+    ...(additionalDirectories !== undefined
       ? { additionalDirectories: [...additionalDirectories] }
       : {}),
     createdAt: saved?.createdAt ?? listedTime,
