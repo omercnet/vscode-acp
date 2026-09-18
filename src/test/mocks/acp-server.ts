@@ -70,6 +70,12 @@ export type DemoMode =
   | "capabilities"
   | "rich-attachments"
   | "deferred-config"
+  | "cascading-config"
+  | "overlapping-config"
+  | "pre-response-config"
+  | "post-response-config"
+  | "same-chunk-post-response-config"
+  | "malformed-config"
   | "invalid-config"
   | "invalid-version"
   | "late-permission"
@@ -77,11 +83,15 @@ export type DemoMode =
   | "mcp-transports"
   | "load-failure"
   | "sessions"
+  | "same-session-load-pending-config"
   | "no-initialize"
   | "session-isolation"
   | "mode-update"
   | "permission"
   | "replacement-failure"
+  | "replacement-failure-pending-config"
+  | "replacement-failure-ordered-config"
+  | "replacement-success-pending-config"
   | "session-close"
   | "session-close-hangs"
   | "plan"
@@ -121,6 +131,7 @@ export class MockACPServer {
   private loadSessionRequests: acp.LoadSessionRequest[] = [];
   private listSessionRequests: acp.ListSessionsRequest[] = [];
   private resumeSessionRequests: acp.ResumeSessionRequest[] = [];
+  private configOptionRequests: acp.SetSessionConfigOptionRequest[] = [];
 
   getInitializeRequest(): acp.InitializeRequest | null {
     return this.initializeRequest;
@@ -135,6 +146,14 @@ export class MockACPServer {
   }
   getNewSessionRequests(): readonly acp.NewSessionRequest[] {
     return this.newSessionRequests;
+  }
+  getSessionConfigOptions(
+    sessionId: acp.SessionId
+  ): readonly acp.SessionConfigOption[] | undefined {
+    return this.sessions.get(sessionId)?.configOptions;
+  }
+  getConfigOptionRequests(): readonly acp.SetSessionConfigOptionRequest[] {
+    return this.configOptionRequests;
   }
 
   getLoadSessionRequests(): readonly acp.LoadSessionRequest[] {
@@ -241,6 +260,7 @@ export class MockACPServer {
               loadSession:
                 this.demoMode === "load" ||
                 this.demoMode === "load-failure" ||
+                this.demoMode === "same-session-load-pending-config" ||
                 this.demoMode === "authentication-mcp" ||
                 this.demoMode === "sessions",
               ...(this.demoMode === "mcp-transports" ||
@@ -387,8 +407,20 @@ export class MockACPServer {
       return;
     }
     let previousSession: MockSession | undefined;
-    if (this.demoMode === "replacement-failure" && this.sessionCounter === 1) {
-      this.sendError(id, -32000, "Replacement session failed");
+    if (
+      (this.demoMode === "replacement-failure" ||
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-failure-ordered-config") &&
+      this.sessionCounter === 1
+    ) {
+      if (this.demoMode === "replacement-failure-ordered-config") {
+        setTimeout(
+          () => this.sendError(id, -32000, "Replacement session failed"),
+          40
+        );
+      } else {
+        this.sendError(id, -32000, "Replacement session failed");
+      }
       return;
     }
     for (const session of this.sessions.values()) {
@@ -415,6 +447,16 @@ export class MockACPServer {
     const sessionId = `mock-session-${++this.sessionCounter}`;
     const cwd = typeof params?.cwd === "string" ? params.cwd : process.cwd();
     const isolatedModel = `session-${this.sessionCounter}-model`;
+    const usesCascadingConfig =
+      this.demoMode === "cascading-config" ||
+      this.demoMode === "overlapping-config" ||
+      this.demoMode === "pre-response-config" ||
+      this.demoMode === "post-response-config" ||
+      this.demoMode === "same-chunk-post-response-config" ||
+      this.demoMode === "same-session-load-pending-config" ||
+      this.demoMode === "replacement-failure-pending-config" ||
+      this.demoMode === "replacement-failure-ordered-config" ||
+      this.demoMode === "replacement-success-pending-config";
     const configOptions: acp.SessionConfigOption[] =
       this.demoMode === "deferred-config"
         ? [
@@ -436,30 +478,74 @@ export class MockACPServer {
               ],
             },
           ]
-        : [
-            {
-              id: "model",
-              type: "select",
-              name: "Model",
-              category: "model",
-              currentValue:
-                this.demoMode === "invalid-config"
-                  ? "missing-model"
-                  : this.demoMode === "session-isolation"
-                    ? isolatedModel
-                    : "claude-3-sonnet",
-              options:
-                this.demoMode === "session-isolation"
-                  ? [{ value: isolatedModel, name: isolatedModel }]
-                  : [
-                      {
-                        value: "claude-3-sonnet",
-                        name: "Claude 3 Sonnet",
-                      },
-                      { value: "claude-3-opus", name: "Claude 3 Opus" },
-                    ],
-            },
-          ];
+        : usesCascadingConfig
+          ? [
+              {
+                id: "interaction",
+                type: "select",
+                name: "Interaction",
+                category: "mode",
+                currentValue: "build",
+                options: [
+                  { value: "build", name: "Build" },
+                  { value: "review", name: "Review" },
+                ],
+              },
+              {
+                id: "model",
+                type: "select",
+                name: "Model",
+                category: "model",
+                currentValue: "fast",
+                options: [
+                  {
+                    group: "speed",
+                    name: "Fast models",
+                    options: [{ value: "fast", name: "Fast" }],
+                  },
+                  {
+                    group: "quality",
+                    name: "Quality models",
+                    options: [{ value: "accurate", name: "Accurate" }],
+                  },
+                ],
+              },
+              {
+                id: "thought",
+                type: "select",
+                name: "Thought level",
+                category: "thought_level",
+                currentValue: "medium",
+                options: [
+                  { value: "low", name: "Low" },
+                  { value: "medium", name: "Medium" },
+                ],
+              },
+            ]
+          : [
+              {
+                id: "model",
+                type: "select",
+                name: "Model",
+                category: "model",
+                currentValue:
+                  this.demoMode === "invalid-config"
+                    ? "missing-model"
+                    : this.demoMode === "session-isolation"
+                      ? isolatedModel
+                      : "claude-3-sonnet",
+                options:
+                  this.demoMode === "session-isolation"
+                    ? [{ value: isolatedModel, name: isolatedModel }]
+                    : [
+                        {
+                          value: "claude-3-sonnet",
+                          name: "Claude 3 Sonnet",
+                        },
+                        { value: "claude-3-opus", name: "Claude 3 Opus" },
+                      ],
+              },
+            ];
 
     this.sessions.set(sessionId, {
       id: sessionId,
@@ -500,6 +586,26 @@ export class MockACPServer {
         sessionUpdate: "config_option_update",
         configOptions,
       });
+    }
+
+    if (this.demoMode === "malformed-config") {
+      this.sendResponse(id, {
+        sessionId,
+        modes: {
+          availableModes: [{ id: "code", name: "Code" }],
+          currentModeId: "code",
+        },
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "broken",
+            options: null,
+          },
+        ],
+      });
+      return;
     }
 
     const response: acp.NewSessionResponse = {
@@ -585,6 +691,30 @@ export class MockACPServer {
       messageId: "restored-agent",
       content: { type: "text", text: "answer" },
     });
+    const configOptions =
+      this.demoMode === "same-session-load-pending-config"
+        ? [
+            {
+              id: "interaction",
+              type: "select" as const,
+              name: "Interaction",
+              category: "mode",
+              currentValue: "build",
+              options: [
+                { value: "build", name: "Build" },
+                { value: "review", name: "Review" },
+              ],
+            },
+            {
+              id: "model",
+              type: "select" as const,
+              name: "Model",
+              category: "model",
+              currentValue: "fast",
+              options: [{ value: "fast", name: "Fast" }],
+            },
+          ]
+        : session.configOptions;
     this.sendResponse(id, {
       modes: {
         availableModes: [
@@ -593,7 +723,7 @@ export class MockACPServer {
         ],
         currentModeId: "code",
       },
-      configOptions: session.configOptions,
+      configOptions,
     } satisfies acp.LoadSessionResponse);
   }
   private handleListSessions(
@@ -656,20 +786,174 @@ export class MockACPServer {
     const value = typeof params?.value === "string" ? params.value : null;
     const session = sessionId ? this.sessions.get(sessionId) : undefined;
     const configOption = session?.configOptions.find(
-      (option) => option.id === configId && option.type === "select"
+      (
+        option
+      ): option is Extract<acp.SessionConfigOption, { type: "select" }> =>
+        option.id === configId && option.type === "select"
+    );
+    const valueAvailable = configOption?.options.some((entry) =>
+      "value" in entry
+        ? entry.value === value
+        : entry.options.some((option) => option.value === value)
     );
 
-    if (!session || !configOption || !value) {
+    if (
+      !session ||
+      sessionId === null ||
+      !configOption ||
+      configId === null ||
+      value === null ||
+      !valueAvailable
+    ) {
       this.sendError(id, -32602, "Invalid session configuration option");
       return;
     }
 
-    configOption.currentValue = value;
+    this.configOptionRequests.push({ sessionId, configId, value });
+    const cascades =
+      (this.demoMode === "cascading-config" ||
+        this.demoMode === "overlapping-config" ||
+        this.demoMode === "pre-response-config" ||
+        this.demoMode === "post-response-config" ||
+        this.demoMode === "same-chunk-post-response-config" ||
+        this.demoMode === "same-session-load-pending-config" ||
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-failure-ordered-config" ||
+        this.demoMode === "replacement-success-pending-config") &&
+      configId === "interaction" &&
+      value === "review";
+    if (cascades) {
+      const previousConfigOptions = session.configOptions;
+      session.configOptions = [
+        { ...configOption, currentValue: value },
+        {
+          id: "model",
+          type: "select",
+          name: "Model",
+          category: "model",
+          currentValue: "accurate",
+          options: [
+            {
+              group: "quality",
+              name: "Quality models",
+              options: [{ value: "accurate", name: "Accurate" }],
+            },
+          ],
+        },
+      ];
+      if (this.demoMode === "same-chunk-post-response-config") {
+        const responseConfigOptions = session.configOptions;
+        session.configOptions = [
+          { ...configOption, currentValue: value },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "latest",
+            options: [{ value: "latest", name: "Latest" }],
+          },
+        ];
+        this.sendResponseThenSessionUpdate(
+          id,
+          { configOptions: responseConfigOptions },
+          session.id,
+          {
+            sessionUpdate: "config_option_update",
+            configOptions: session.configOptions,
+          }
+        );
+        return;
+      }
+      if (this.demoMode === "pre-response-config") {
+        this.sendSessionUpdate(session.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: previousConfigOptions.map((option) =>
+            option.id === configId
+              ? { ...configOption, currentValue: value }
+              : option
+          ),
+        });
+      }
+      if (this.demoMode === "overlapping-config") {
+        setImmediate(() =>
+          this.sendResponse(id, { configOptions: session.configOptions })
+        );
+        return;
+      }
+      if (
+        this.demoMode === "replacement-failure-pending-config" ||
+        this.demoMode === "replacement-success-pending-config"
+      ) {
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: session.configOptions }),
+          25
+        );
+        return;
+      }
+      if (this.demoMode === "same-session-load-pending-config") {
+        const responseConfigOptions = session.configOptions;
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: responseConfigOptions }),
+          25
+        );
+        return;
+      }
+      if (this.demoMode === "replacement-failure-ordered-config") {
+        const responseConfigOptions = session.configOptions;
+        setTimeout(
+          () => this.sendResponse(id, { configOptions: responseConfigOptions }),
+          10
+        );
+        setTimeout(() => {
+          session.configOptions = [
+            { ...configOption, currentValue: value },
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              category: "model",
+              currentValue: "latest",
+              options: [{ value: "latest", name: "Latest" }],
+            },
+          ];
+          this.sendSessionUpdate(session.id, {
+            sessionUpdate: "config_option_update",
+            configOptions: session.configOptions,
+          });
+        }, 20);
+        return;
+      }
+    } else {
+      configOption.currentValue = value;
+    }
     this.sendResponse(id, { configOptions: session.configOptions });
-    this.sendSessionUpdate(session.id, {
-      sessionUpdate: "config_option_update",
-      configOptions: session.configOptions,
-    });
+    if (this.demoMode === "post-response-config") {
+      setImmediate(() => {
+        session.configOptions = [
+          { ...configOption, currentValue: value },
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            category: "model",
+            currentValue: "latest",
+            options: [{ value: "latest", name: "Latest" }],
+          },
+        ];
+        this.sendSessionUpdate(session.id, {
+          sessionUpdate: "config_option_update",
+          configOptions: session.configOptions,
+        });
+      });
+      return;
+    }
+    if (!cascades) {
+      this.sendSessionUpdate(session.id, {
+        sessionUpdate: "config_option_update",
+        configOptions: session.configOptions,
+      });
+    }
   }
 
   private async handlePrompt(
@@ -965,6 +1249,23 @@ export class MockACPServer {
   private sendResponse(id: number, result: unknown): void {
     const response = { jsonrpc: "2.0", id, result };
     this.stdout.push(JSON.stringify(response) + "\n");
+  }
+
+  private sendResponseThenSessionUpdate(
+    id: number,
+    result: unknown,
+    sessionId: string,
+    update: Record<string, unknown>
+  ): void {
+    const response = { jsonrpc: "2.0", id, result };
+    const notification = {
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId, update },
+    };
+    this.stdout.push(
+      `${JSON.stringify(response)}\n${JSON.stringify(notification)}\n`
+    );
   }
 
   private sendError(id: number, code: number, message: string): void {

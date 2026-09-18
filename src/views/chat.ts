@@ -8,6 +8,7 @@ import {
   describeACPError,
   formatACPError,
   isAgentAuthMethod,
+  type SupportedSessionConfigOption,
 } from "../acp/client";
 import { getConfiguredSession, McpSecretRedactor } from "../acp/mcp";
 import {
@@ -78,10 +79,7 @@ import {
   updateStoredSessions,
   type StoredSession,
 } from "../sessions";
-import type {
-  AgentSessionOpenRequest,
-  SessionOpenMode,
-} from "./sessions";
+import type { AgentSessionOpenRequest, SessionOpenMode } from "./sessions";
 
 interface WebviewToolLocation {
   path: string;
@@ -95,17 +93,48 @@ export const DIRTY_EDITOR_WRITE_CONFLICT =
 const SELECTED_AGENT_KEY = "vscode-acp.selectedAgent";
 const SELECTED_MODE_KEY = "vscode-acp.selectedMode";
 const SELECTED_MODEL_KEY = "vscode-acp.selectedModel";
+const SELECTED_THOUGHT_LEVEL_KEY = "vscode-acp.selectedThoughtLevel";
+const SELECTED_CONFIG_OPTIONS_KEY = "vscode-acp.selectedConfigOptions";
 
 type SessionContext = Pick<
   StoredSession,
   "cwd" | "configurationResource" | "additionalDirectories"
 >;
 
+type PersistedSessionConfigCategory = "mode" | "model" | "thought_level";
+interface PersistedSessionConfigValue {
+  configId: string;
+  value: string;
+}
+
 interface ReplayMessage {
   role: "user" | "assistant";
   messageId: string | null;
   text: string;
   attachments: FileAttachment[];
+}
+
+const PERSISTED_SESSION_CONFIG_KEYS: Record<
+  PersistedSessionConfigCategory,
+  string
+> = {
+  mode: SELECTED_MODE_KEY,
+  model: SELECTED_MODEL_KEY,
+  thought_level: SELECTED_THOUGHT_LEVEL_KEY,
+};
+
+const PERSISTED_SESSION_CONFIG_CATEGORIES: readonly PersistedSessionConfigCategory[] =
+  ["mode", "model", "thought_level"];
+
+function hasConfigValue(
+  option: SupportedSessionConfigOption,
+  value: string
+): boolean {
+  return option.options.some((candidate) =>
+    "value" in candidate
+      ? candidate.value === value
+      : candidate.options.some((grouped) => grouped.value === value)
+  );
 }
 
 interface EditorSelectionContext {
@@ -141,6 +170,7 @@ interface WebviewMessage {
     | "selectAgent"
     | "selectMode"
     | "selectModel"
+    | "selectConfigOption"
     | "connect"
     | "newChat"
     | "clearChat"
@@ -159,6 +189,8 @@ interface WebviewMessage {
   agentId?: string;
   modeId?: string;
   modelId?: string;
+  configId?: string;
+  value?: string;
   requestId?: string;
   sessionId?: string;
   optionId?: string;
@@ -554,7 +586,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private globalState: vscode.Memento;
   private workspaceState: vscode.Memento;
   private streamingText = "";
-  private hasRestoredModeModel = false;
+  private hasRestoredLegacyMode = false;
   private isReplaying = false;
   private replayMessages: ReplayMessage[] = [];
   private connectionStart: Promise<void> | null = null;
@@ -653,6 +685,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.connectionStart = null;
         this.sessionStart = null;
         this.activeSessionContext = null;
+        this.hasRestoredLegacyMode = false;
         this.clearPendingAttachments();
         // A dropped agent leaves its child processes running and its terminal
         // handles reachable if the next session reuses the same id, so the
@@ -773,6 +806,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         case "selectModel":
           if (message.modelId) {
             await this.handleModelChange(message.modelId);
+          }
+          break;
+        case "selectConfigOption":
+          if (message.configId !== undefined && message.value !== undefined) {
+            await this.handleConfigOptionChange(
+              message.configId,
+              message.value
+            );
           }
           break;
         case "connect":
@@ -1090,8 +1131,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       let deleted = false;
       await updateStoredSessions(this.workspaceState, (history) => {
         const updated = history.filter(
-          (entry) =>
-            entry.sessionId !== sessionId || entry.agentId !== agentId
+          (entry) => entry.sessionId !== sessionId || entry.agentId !== agentId
         );
         deleted = updated.length !== history.length;
         return updated;
@@ -1152,9 +1192,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         cwd: sessionContext.cwd,
         ...(sessionContext.additionalDirectories?.length
           ? {
-              additionalDirectories: [
-                ...sessionContext.additionalDirectories,
-              ],
+              additionalDirectories: [...sessionContext.additionalDirectories],
             }
           : {}),
         createdAt: existing?.createdAt ?? now,
@@ -1196,7 +1234,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         const previousSessionContext = this.activeSessionContext;
         const hadSession = sameAgent && this.hasSession;
-        const hadRestoredModeModel = sameAgent && this.hasRestoredModeModel;
+        const hadRestoredLegacyMode = sameAgent && this.hasRestoredLegacyMode;
         let generation = ++this.conversationGeneration;
         this.expirePermissionRequests();
         await this.disposeTerminals();
@@ -1269,9 +1307,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             ...(capabilities.additionalDirectories &&
             request.additionalDirectories?.length
               ? {
-                  additionalDirectories: [
-                    ...request.additionalDirectories,
-                  ],
+                  additionalDirectories: [...request.additionalDirectories],
                 }
               : {}),
           };
@@ -1304,13 +1340,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               : {}),
           };
           this.hasSession = true;
-          this.hasRestoredModeModel = false;
+          this.hasRestoredLegacyMode = false;
           await this.touchStoredSession({
             ...request,
             configurationResource:
               request.configurationResource ?? resource?.toString(),
-            additionalDirectories:
-              sessionRequest.additionalDirectories ?? [],
+            additionalDirectories: sessionRequest.additionalDirectories ?? [],
           }).catch(() => {
             console.warn("[Chat] Failed to update session metadata");
           });
@@ -1353,10 +1388,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.replayGeneration = null;
           this.replayMessages = [];
           this.hasSession = hadSession;
-          this.hasRestoredModeModel = hadRestoredModeModel;
-          this.activeSessionContext = sameAgent
-            ? previousSessionContext
-            : null;
+          this.hasRestoredLegacyMode = hadRestoredLegacyMode;
+          this.activeSessionContext = sameAgent ? previousSessionContext : null;
           this.postMessage({
             type: "replayFailed",
             text: formatACPError(redacted),
@@ -3059,14 +3092,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.expirePermissionRequests();
       this.globalState.update(SELECTED_AGENT_KEY, agentId);
       this.hasSession = false;
+      this.hasRestoredLegacyMode = false;
       this.activeSessionContext = null;
       this.clearPendingAttachments();
       this.postMessage({ type: "agentChanged", agentId });
-      this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      this.postMessage({
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        configOptions: null,
+      });
     }
   }
 
   private async handleModeChange(modeId: string): Promise<void> {
+    if (this.acpClient.getSessionMetadata()?.configOptions != null) {
+      return;
+    }
     try {
       await this.acpClient.setMode(modeId);
       await this.globalState.update(SELECTED_MODE_KEY, modeId);
@@ -3078,12 +3120,38 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleModelChange(modelId: string): Promise<void> {
+    if (this.acpClient.getSessionMetadata()?.configOptions != null) {
+      return;
+    }
     try {
       await this.acpClient.setModel(modelId);
       await this.globalState.update(SELECTED_MODEL_KEY, modelId);
       this.sendSessionMetadata();
     } catch (error) {
       this.postACPError("Failed to set model", error);
+      this.sendSessionMetadata();
+    }
+  }
+
+  private async handleConfigOptionChange(
+    configId: string,
+    value: string
+  ): Promise<void> {
+    const persistedKey = this.getPersistedSessionConfigKey(configId);
+    try {
+      await this.acpClient.setSessionConfigOption(configId, value);
+      const configOptions = this.acpClient.getSessionMetadata()?.configOptions;
+      if (configOptions) {
+        await this.persistSavedConfigOptions(configOptions);
+      } else {
+        await this.updateSavedConfigOptionValue(configId, value);
+        if (persistedKey) {
+          await this.globalState.update(persistedKey, value);
+        }
+      }
+      this.sendSessionMetadata();
+    } catch (error) {
+      this.postACPError("Failed to set session option", error);
       this.sendSessionMetadata();
     }
   }
@@ -3110,11 +3178,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.replayGeneration = null;
       this.replayMessages = [];
       this.hasSession = false;
-      this.hasRestoredModeModel = false;
+      this.hasRestoredLegacyMode = false;
       this.activeSessionContext = null;
       this.clearPendingAttachments();
       this.postMessage({ type: "chatCleared" });
-      this.postMessage({ type: "sessionMetadata", modes: null, models: null });
+      this.postMessage({
+        type: "sessionMetadata",
+        modes: null,
+        models: null,
+        configOptions: null,
+      });
       this.settleSessionLock();
       return;
     }
@@ -3122,7 +3195,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.runSessionTransition("Starting a new session…", async () => {
       const previousSessionContext = this.activeSessionContext;
       const hadSession = this.hasSession;
-      const hadRestoredModeModel = this.hasRestoredModeModel;
+      const hadRestoredModeModel = this.hasRestoredLegacyMode;
       const generation = ++this.conversationGeneration;
       this.expirePermissionRequests();
       await this.disposeTerminals();
@@ -3160,7 +3233,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           cwd: workingDir,
           configurationResource: workspaceFolder?.uri.toString(),
         };
-        this.hasRestoredModeModel = false;
+        this.hasRestoredLegacyMode = false;
         this.clearPendingAttachments();
         this.postMessage({ type: "chatCleared" });
         this.sendSessionMetadata();
@@ -3170,7 +3243,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         const redacted = this.mcpSecretRedactor.redactError(error);
         this.hasSession = hadSession;
-        this.hasRestoredModeModel = hadRestoredModeModel;
+        this.hasRestoredLegacyMode = hadRestoredModeModel;
         this.activeSessionContext = previousSessionContext;
         this.postACPError("Failed to create new session", redacted);
         this.sendSessionMetadata();
@@ -3546,55 +3619,190 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private sendSessionMetadata(): void {
     const metadata = this.acpClient.getSessionMetadata();
+    const configOptions = metadata?.configOptions ?? null;
     this.postMessage({
       type: "sessionMetadata",
       modes: metadata?.modes ?? null,
-      models: metadata?.models ?? null,
+      models: configOptions === null ? (metadata?.models ?? null) : null,
+      configOptions,
       commands: metadata?.commands ?? null,
       promptCapabilities: this.acpClient.getPromptCapabilities(),
     });
 
-    if (!this.hasRestoredModeModel && this.hasSession) {
-      this.hasRestoredModeModel = true;
-      this.restoreSavedModeAndModel().catch((error) =>
+    if (!this.hasRestoredLegacyMode && this.hasSession) {
+      this.hasRestoredLegacyMode = true;
+      this.restoreSavedMode().catch((error) =>
         this.postACPError("Failed to restore saved mode/model", error)
       );
     }
   }
 
-  private async restoreSavedModeAndModel(): Promise<void> {
+  private async restoreSavedMode(): Promise<void> {
     const metadata = this.acpClient.getSessionMetadata();
+    const configOptions = metadata?.configOptions;
+    if (configOptions !== null && configOptions !== undefined) {
+      await this.restoreSavedConfigOptions();
+      return;
+    }
     const availableModes = Array.isArray(metadata?.modes?.availableModes)
       ? metadata.modes.availableModes
       : [];
     const availableModels = Array.isArray(metadata?.models?.availableModels)
       ? metadata.models.availableModels
       : [];
-
     const savedModeId = this.globalState.get<string>(SELECTED_MODE_KEY);
     const savedModelId = this.globalState.get<string>(SELECTED_MODEL_KEY);
-
-    let modeRestored = false;
-    let modelRestored = false;
+    let restored = false;
 
     if (savedModeId && availableModes.some((mode) => mode.id === savedModeId)) {
       await this.acpClient.setMode(savedModeId);
       console.log("[Chat] Restored saved mode");
-      modeRestored = true;
+      restored = true;
     }
-
     if (
       savedModelId &&
       availableModels.some((model) => model.modelId === savedModelId)
     ) {
       await this.acpClient.setModel(savedModelId);
       console.log("[Chat] Restored saved model");
-      modelRestored = true;
+      restored = true;
     }
-
-    if (modeRestored || modelRestored) {
+    if (restored) {
       this.sendSessionMetadata();
     }
+  }
+
+  private getPersistedSessionConfigKey(configId: string): string | null {
+    const option = this.acpClient
+      .getSessionMetadata()
+      ?.configOptions?.find((candidate) => candidate.id === configId);
+    if (!option) {
+      return null;
+    }
+    return this.getPersistedSessionConfigKeyForOption(option);
+  }
+
+  private getPersistedSessionConfigKeyForOption(option: {
+    category?: string | null;
+  }): string | null {
+    const category = option.category;
+    if (
+      category !== "mode" &&
+      category !== "model" &&
+      category !== "thought_level"
+    ) {
+      return null;
+    }
+    return PERSISTED_SESSION_CONFIG_KEYS[category];
+  }
+
+  private async restoreSavedConfigOptions(): Promise<void> {
+    let restored = false;
+    const savedConfigOptions = this.getSavedConfigOptionValues();
+    const restoredConfigIds = new Set(
+      savedConfigOptions.map((entry) => entry.configId)
+    );
+    for (const saved of savedConfigOptions) {
+      const option = this.acpClient
+        .getSessionMetadata()
+        ?.configOptions?.find((candidate) => candidate.id === saved.configId);
+      if (
+        !option ||
+        saved.value === option.currentValue ||
+        !hasConfigValue(option, saved.value)
+      ) {
+        continue;
+      }
+      await this.acpClient.setSessionConfigOption(option.id, saved.value);
+      restoredConfigIds.add(option.id);
+      restored = true;
+    }
+    for (const category of PERSISTED_SESSION_CONFIG_CATEGORIES) {
+      const persistedKey = PERSISTED_SESSION_CONFIG_KEYS[category];
+      const savedValue = this.globalState.get<string>(persistedKey);
+      if (!savedValue) {
+        continue;
+      }
+      while (true) {
+        const option = this.acpClient
+          .getSessionMetadata()
+          ?.configOptions?.find(
+            (candidate) =>
+              candidate.category === category &&
+              !restoredConfigIds.has(candidate.id) &&
+              candidate.currentValue !== savedValue &&
+              hasConfigValue(candidate, savedValue)
+          );
+        if (!option) {
+          break;
+        }
+        await this.acpClient.setSessionConfigOption(option.id, savedValue);
+        restoredConfigIds.add(option.id);
+        restored = true;
+      }
+    }
+    if (restored) {
+      console.log("[Chat] Restored saved session config");
+      this.sendSessionMetadata();
+    }
+  }
+
+  private async persistSavedConfigOptions(
+    configOptions: readonly SupportedSessionConfigOption[]
+  ): Promise<void> {
+    await this.globalState.update(
+      SELECTED_CONFIG_OPTIONS_KEY,
+      configOptions.map(({ id, currentValue }) => ({
+        configId: id,
+        value: currentValue,
+      }))
+    );
+    for (const category of PERSISTED_SESSION_CONFIG_CATEGORIES) {
+      const option = configOptions.find(
+        (candidate) => candidate.category === category
+      );
+      await this.globalState.update(
+        PERSISTED_SESSION_CONFIG_KEYS[category],
+        option?.currentValue
+      );
+    }
+  }
+
+  private getSavedConfigOptionValues(): readonly PersistedSessionConfigValue[] {
+    const saved = this.globalState.get<unknown>(SELECTED_CONFIG_OPTIONS_KEY);
+    if (Array.isArray(saved)) {
+      return saved.filter(
+        (entry): entry is PersistedSessionConfigValue =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof entry.configId === "string" &&
+          entry.configId.length > 0 &&
+          typeof entry.value === "string"
+      );
+    }
+    if (typeof saved !== "object" || saved === null) {
+      return [];
+    }
+    return Object.entries(saved as Record<string, unknown>)
+      .filter(
+        ([configId, value]) => configId.length > 0 && typeof value === "string"
+      )
+      .map(([configId, value]) => ({
+        configId,
+        value: value as string,
+      }));
+  }
+
+  private async updateSavedConfigOptionValue(
+    configId: string,
+    value: string
+  ): Promise<void> {
+    await this.globalState.update(SELECTED_CONFIG_OPTIONS_KEY, [
+      ...this.getSavedConfigOptionValues().filter(
+        (entry) => entry.configId !== configId
+      ),
+      { configId, value },
+    ]);
   }
 
   private postMessage(message: Record<string, unknown>): void {
@@ -3671,6 +3879,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <span id="input-hint" class="sr-only" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.</span>
   
   <div id="options-bar" role="toolbar" aria-label="Session options">
+    <div id="config-options" class="config-options" role="group" aria-label="Session configuration"></div>
     <select id="mode-selector" class="inline-select" style="display: none;" aria-label="Select mode"></select>
     <select id="model-selector" class="inline-select" style="display: none;" aria-label="Select model"></select>
   </div>

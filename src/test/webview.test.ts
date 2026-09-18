@@ -80,6 +80,7 @@ function createWebviewHTML(): string {
   <span id="input-hint" role="status" aria-live="polite">Press Enter to send, Shift+Enter for new line, Escape to clear. Type / for ACP commands advertised by the agent.</span>
   
   <div id="options-bar">
+    <div id="config-options"></div>
     <select id="mode-selector" style="display: none;"></select>
     <select id="model-selector" style="display: none;"></select>
   </div>
@@ -801,7 +802,7 @@ suite("Webview", () => {
         assert.strictEqual(elements.agentSelector.value, "opencode");
       });
 
-      test("handles sessionMetadata with modes", () => {
+      test("renders legacy mode and model controls when configOptions is absent", () => {
         controller.handleMessage({
           type: "sessionMetadata",
           modes: {
@@ -811,10 +812,229 @@ suite("Webview", () => {
             ],
             currentModeId: "code",
           },
-          models: null,
+          models: {
+            availableModels: [
+              { modelId: "fast", name: "Fast" },
+              { modelId: "accurate", name: "Accurate" },
+            ],
+            currentModelId: "fast",
+          },
         });
         assert.strictEqual(elements.modeSelector.style.display, "inline-block");
         assert.strictEqual(elements.modeSelector.options.length, 2);
+        assert.strictEqual(
+          elements.modelSelector.style.display,
+          "inline-block"
+        );
+        assert.strictEqual(elements.modelSelector.options.length, 2);
+      });
+
+      test("renders every supported select with grouped labels and posts exact values", () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          modes: {
+            availableModes: [{ id: "legacy", name: "Legacy" }],
+            currentModeId: "legacy",
+          },
+          models: {
+            availableModels: [{ modelId: "legacy", name: "Legacy" }],
+            currentModelId: "legacy",
+          },
+          configOptions: [
+            {
+              id: "interaction",
+              type: "select",
+              name: "Interaction",
+              currentValue: "build",
+              options: [
+                { value: "build", name: "Build" },
+                { value: "review", name: "Review" },
+              ],
+            },
+            {
+              id: "model",
+              type: "select",
+              name: "Model",
+              currentValue: "accurate",
+              options: [
+                {
+                  group: "speed",
+                  name: "Fast models",
+                  options: [{ value: "fast", name: "Fast" }],
+                },
+                {
+                  group: "quality",
+                  name: "Quality models",
+                  options: [{ value: "accurate", name: "Accurate" }],
+                },
+              ],
+            },
+            {
+              id: "thought",
+              type: "select",
+              name: "Thought level",
+              currentValue: "medium",
+              options: [
+                { value: "low", name: "Low" },
+                { value: "medium", name: "Medium" },
+                { value: "high", name: "High" },
+              ],
+            },
+          ],
+        });
+
+        const selectors = elements.configOptionsContainer.querySelectorAll(
+          ".session-config-select"
+        );
+        assert.strictEqual(selectors.length, 3);
+        assert.strictEqual(elements.modeSelector.style.display, "none");
+        assert.strictEqual(elements.modelSelector.style.display, "none");
+        const model =
+          elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+            '[data-config-id="model"]'
+          );
+        assert.ok(model);
+        assert.deepStrictEqual(
+          Array.from(model.querySelectorAll("optgroup"), (group) => [
+            group.dataset.group,
+            group.label,
+          ]),
+          [
+            ["speed", "Fast models"],
+            ["quality", "Quality models"],
+          ]
+        );
+        assert.deepStrictEqual(
+          Array.from(model.options, (option) => [
+            option.value,
+            option.dataset.label,
+          ]),
+          [
+            ["fast", "Fast"],
+            ["accurate", "Accurate"],
+          ]
+        );
+        assert.strictEqual(model.value, "accurate");
+
+        mockVsCode._clearMessages();
+        const thought =
+          elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+            '[data-config-id="thought"]'
+          );
+        assert.ok(thought);
+        thought.value = "high";
+        thought.dispatchEvent(new window.Event("change", { bubbles: true }));
+        assert.deepStrictEqual(mockVsCode._getMessages(), [
+          {
+            type: "selectConfigOption",
+            configId: "thought",
+            value: "high",
+          },
+        ]);
+      });
+
+      test("atomically replaces options and clears them at session boundaries", () => {
+        const metadata: ExtensionMessage = {
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "mode",
+              type: "select",
+              name: "Mode",
+              currentValue: "build",
+              options: [{ value: "build", name: "Build" }],
+            },
+            {
+              id: "stale",
+              type: "select",
+              name: "Stale",
+              currentValue: "old",
+              options: [{ value: "old", name: "Old" }],
+            },
+          ],
+        };
+        controller.handleMessage(metadata);
+        controller.handleMessage({
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "mode",
+              type: "select",
+              name: "Mode",
+              currentValue: "review",
+              options: [{ value: "review", name: "Review" }],
+            },
+          ],
+        });
+        assert.deepStrictEqual(
+          Array.from(
+            elements.configOptionsContainer.querySelectorAll<HTMLSelectElement>(
+              ".session-config-select"
+            ),
+            (select) => [select.dataset.configId, select.value]
+          ),
+          [["mode", "review"]]
+        );
+
+        for (const boundary of [
+          { type: "sessionTransition", active: true },
+          { type: "connectionState", state: "connecting" },
+          { type: "connectionState", state: "disconnected" },
+          { type: "replayStart" },
+          { type: "agentChanged" },
+          { type: "chatCleared" },
+        ] satisfies ExtensionMessage[]) {
+          controller.handleMessage(metadata);
+          controller.handleMessage(boundary);
+          assert.strictEqual(
+            elements.configOptionsContainer.children.length,
+            0,
+            boundary.type
+          );
+        }
+      });
+
+      test("restores keyboard focus to a surviving config selector", () => {
+        controller.handleMessage({
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "interaction",
+              type: "select",
+              name: "Interaction",
+              currentValue: "build",
+              options: [
+                { value: "build", name: "Build" },
+                { value: "review", name: "Review" },
+              ],
+            },
+          ],
+        });
+        const previous = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+          '[data-config-id="interaction"]'
+        );
+        assert.ok(previous);
+        previous.focus();
+
+        controller.handleMessage({
+          type: "sessionMetadata",
+          configOptions: [
+            {
+              id: "interaction",
+              type: "select",
+              name: "Interaction",
+              currentValue: "review",
+              options: [{ value: "review", name: "Review" }],
+            },
+          ],
+        });
+
+        const replacement = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+          '[data-config-id="interaction"]'
+        );
+        assert.ok(replacement);
+        assert.notStrictEqual(replacement, previous);
+        assert.strictEqual(document.activeElement, replacement);
       });
 
       test("handles chatCleared", () => {
@@ -2983,6 +3203,63 @@ suite("Webview", () => {
       assert.strictEqual(input.disabled, false);
     });
 
+    test("returns focus to a surviving config selector after history closes", () => {
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "fast",
+            options: [{ value: "fast", name: "Fast" }],
+          },
+        ],
+      });
+      const original = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(original);
+      original.focus();
+      controller.handleMessage({
+        type: "sessionHistory",
+        mode: "load",
+        sessions: [
+          {
+            sessionId: "session-1",
+            cwd: "/workspace/project",
+            createdAt: 1,
+            lastUsedAt: 2,
+            preview: "Restore this conversation",
+            messageCount: 2,
+          },
+        ],
+      });
+
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "accurate",
+            options: [{ value: "accurate", name: "Accurate" }],
+          },
+        ],
+      });
+      const replacement = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(replacement);
+      document
+        .querySelector<HTMLButtonElement>(".session-picker-close")
+        ?.click();
+
+      assert.notStrictEqual(replacement, original);
+      assert.strictEqual(document.activeElement, replacement);
+    });
+
     test("keeps Tab and Shift+Tab focus inside session history", () => {
       controller.handleMessage({
         type: "sessionHistory",
@@ -3263,6 +3540,50 @@ suite("Webview", () => {
 
       const modal = document.getElementById("permission-modal");
       assert.ok(!modal?.classList.contains("visible"));
+    });
+
+    test("returns focus to a surviving config selector after permission closes", () => {
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "fast",
+            options: [{ value: "fast", name: "Fast" }],
+          },
+        ],
+      });
+      const original = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(original);
+      original.focus();
+      controller.showPermissionModal("req-focus", "Test", "content", [
+        { id: "reject", kind: "reject_once" },
+      ]);
+
+      controller.handleMessage({
+        type: "sessionMetadata",
+        configOptions: [
+          {
+            id: "model",
+            type: "select",
+            name: "Model",
+            currentValue: "accurate",
+            options: [{ value: "accurate", name: "Accurate" }],
+          },
+        ],
+      });
+      const replacement = document.querySelector<HTMLSelectElement>(
+        '[data-config-id="model"]'
+      );
+      assert.ok(replacement);
+      controller.hidePermissionModal();
+
+      assert.notStrictEqual(replacement, original);
+      assert.strictEqual(document.activeElement, replacement);
     });
 
     test("clicking option sends permissionResponse message", () => {

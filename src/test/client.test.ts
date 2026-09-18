@@ -451,7 +451,7 @@ suite("ACPClient with Mock Server", () => {
 
       assert.deepStrictEqual(
         mockProcesses[0].server.getInitializeRequest()?.clientCapabilities,
-        {}
+        { session: { configOptions: {} } }
       );
     });
     test("exposes negotiated MCP transport capabilities", async () => {
@@ -684,9 +684,14 @@ suite("ACPClient with Mock Server", () => {
       const metadata = client.getSessionMetadata();
       assert.ok(metadata);
       assert.ok(metadata.modes);
-      assert.ok(metadata.models);
+      assert.deepStrictEqual(
+        metadata.configOptions?.map(({ id, currentValue }) => ({
+          id,
+          currentValue,
+        })),
+        [{ id: "model", currentValue: "claude-3-sonnet" }]
+      );
       assert.strictEqual(metadata.modes?.currentModeId, "code");
-      assert.strictEqual(metadata.models?.currentModelId, "claude-3-sonnet");
     });
 
     test("should receive available commands update", async () => {
@@ -711,20 +716,45 @@ suite("ACPClient with Mock Server", () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      const models = client.getSessionMetadata()?.models;
-      assert.deepStrictEqual(models?.availableModels, [
-        { modelId: "claude-3-sonnet", name: "Claude 3 Sonnet" },
-        { modelId: "claude-3-opus", name: "Claude 3 Opus" },
+      assert.deepStrictEqual(client.getSessionMetadata()?.configOptions, [
+        {
+          id: "model",
+          type: "select",
+          name: "Model",
+          category: "model",
+          currentValue: "claude-3-opus",
+          options: [
+            {
+              group: "anthropic",
+              name: "Anthropic",
+              options: [
+                { value: "claude-3-sonnet", name: "Claude 3 Sonnet" },
+                { value: "claude-3-opus", name: "Claude 3 Opus" },
+              ],
+            },
+          ],
+        },
       ]);
-      assert.strictEqual(models?.currentModelId, "claude-3-opus");
     });
 
-    test("does not expose a model selector with an invalid current value", async () => {
+    test("drops a select option with an invalid current value", async () => {
       demoMode = "invalid-config";
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
-      assert.strictEqual(client.getSessionMetadata()?.models, null);
+      assert.deepStrictEqual(client.getSessionMetadata()?.configOptions, []);
+    });
+
+    test("does not commit a session with malformed nested config options", async () => {
+      demoMode = "malformed-config";
+      await client.connect();
+
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Invalid session configuration options/
+      );
+      assert.strictEqual(client.getCurrentSessionId(), null);
+      assert.strictEqual(client.getSessionMetadata(), null);
     });
 
     test("tracks current mode updates in session metadata", async () => {
@@ -759,7 +789,10 @@ suite("ACPClient with Mock Server", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
 
       const metadata = client.getSessionMetadata();
-      assert.strictEqual(metadata?.models?.currentModelId, "session-2-model");
+      assert.strictEqual(
+        metadata?.configOptions?.[0]?.currentValue,
+        "session-2-model"
+      );
       assert.strictEqual(metadata?.commands?.[0]?.name, "session-2");
       assert.deepStrictEqual(observedSessionIds, []);
       assert.strictEqual(staleReadCount, 0);
@@ -857,6 +890,108 @@ suite("ACPClient with Mock Server", () => {
       );
     });
 
+    test("reconciles a pending mutation after its replacement fails", async () => {
+      demoMode = "replacement-failure-pending-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Replacement session failed/
+      );
+      await mutation;
+
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("preserves notification order while a failed replacement is pending", async () => {
+      demoMode = "replacement-failure-ordered-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await assert.rejects(
+        () => client.newSession({ cwd: "/test/dir", mcpServers: [] }),
+        /Replacement session failed/
+      );
+      await mutation;
+
+      const clientState = client
+        .getSessionMetadata()
+        ?.configOptions?.map(({ id, currentValue }) => ({ id, currentValue }));
+      const agentState = mockProcesses[0].server
+        .getSessionConfigOptions(active.sessionId)
+        ?.map(({ id, currentValue }) => ({ id, currentValue }));
+      assert.deepStrictEqual(clientState, [
+        { id: "interaction", currentValue: "review" },
+        { id: "model", currentValue: "latest" },
+      ]);
+      assert.deepStrictEqual(clientState, agentState);
+    });
+
+    test("rejects a pending mutation after a successful replacement", async () => {
+      demoMode = "replacement-success-pending-config";
+      await client.connect();
+      const original = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const staleMutation = assert.rejects(
+        client.setSessionConfigOption("interaction", "review"),
+        /Configuration selection is stale/
+      );
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const replacement = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+      await staleMutation;
+
+      assert.notStrictEqual(replacement.sessionId, original.sessionId);
+      assert.strictEqual(client.getCurrentSessionId(), replacement.sessionId);
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "build" },
+          { id: "model", currentValue: "fast" },
+          { id: "thought", currentValue: "medium" },
+        ]
+      );
+    });
+
     test("rejects overlapping session creation", async () => {
       await client.connect();
 
@@ -926,12 +1061,49 @@ suite("ACPClient with Mock Server", () => {
 
       assert.strictEqual(client.supportsSessionLoad(), true);
       assert.strictEqual(client.getCurrentSessionId(), created.sessionId);
+      assert.strictEqual(
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
+        "claude-3-sonnet"
+      );
       assert.deepStrictEqual(updates, [
         { sessionUpdate: "user_message_chunk", text: "Restored " },
         { sessionUpdate: "user_message_chunk", text: "question" },
         { sessionUpdate: "agent_message_chunk", text: "Restored " },
         { sessionUpdate: "agent_message_chunk", text: "answer" },
       ]);
+    });
+
+    test("reconciles a pending mutation across a same-session load", async () => {
+      demoMode = "same-session-load-pending-config";
+      await client.connect();
+      const active = await client.newSession({
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+
+      const mutation = client.setSessionConfigOption("interaction", "review");
+      while (mockProcesses[0].server.getConfigOptionRequests().length === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      await client.loadSession({
+        sessionId: active.sessionId,
+        cwd: "/test/dir",
+        mcpServers: [],
+      });
+      await mutation;
+
+      const clientState = client
+        .getSessionMetadata()
+        ?.configOptions?.map(({ id, currentValue }) => ({ id, currentValue }));
+      const agentState = mockProcesses[0].server
+        .getSessionConfigOptions(active.sessionId)
+        ?.map(({ id, currentValue }) => ({ id, currentValue }));
+      assert.strictEqual(client.getCurrentSessionId(), active.sessionId);
+      assert.deepStrictEqual(clientState, [
+        { id: "interaction", currentValue: "review" },
+        { id: "model", currentValue: "accurate" },
+      ]);
+      assert.deepStrictEqual(clientState, agentState);
     });
     test("passes the same MCP servers to session/new and session/load", async () => {
       demoMode = "load";
@@ -1361,26 +1533,196 @@ suite("ACPClient with Mock Server", () => {
   });
 
   suite("setModel", () => {
-    test("should change model", async () => {
+    test("changes a legacy model only when configOptions is absent", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const metadata = client.getSessionMetadata();
+      assert.ok(metadata?.models);
+      metadata.configOptions = null;
 
       await client.setModel("claude-3-opus");
 
-      const metadata = client.getSessionMetadata();
-      assert.strictEqual(metadata?.models?.currentModelId, "claude-3-opus");
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        [
+          {
+            sessionId: "mock-session-1",
+            configId: "model",
+            value: "claude-3-opus",
+          },
+        ]
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.models?.currentModelId,
+        "claude-3-opus"
+      );
+      assert.strictEqual(
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
+        "claude-3-opus"
+      );
     });
 
-    test("rejects a model value that the agent did not offer", async () => {
+    test("rejects the legacy model path when configOptions is present", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
 
       await assert.rejects(
-        () => client.setModel("missing-model"),
-        /Model is not available: missing-model/
+        () => client.setModel("claude-3-opus"),
+        /Legacy model selection is unavailable/
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        []
+      );
+    });
+  });
+
+  suite("setSessionConfigOption", () => {
+    test("replaces the full option set returned by a cascading change", async () => {
+      demoMode = "cascading-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.setSessionConfigOption("interaction", "review");
+
+      assert.deepStrictEqual(
+        mockProcesses[0].server.getConfigOptionRequests(),
+        [
+          {
+            sessionId: "mock-session-1",
+            configId: "interaction",
+            value: "review",
+          },
+        ]
+      );
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("keeps an earlier cascade when a queued later selection fails", async () => {
+      demoMode = "overlapping-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      const cascade = client.setSessionConfigOption("interaction", "review");
+      const rejectedSelection = assert.rejects(
+        client.setSessionConfigOption("model", "fast")
+      );
+      await cascade;
+      await rejectedSelection;
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+      assert.deepStrictEqual(
+        mockProcesses[0].server
+          .getConfigOptionRequests()
+          .map(({ configId, value }) => ({ configId, value })),
+        [{ configId: "interaction", value: "review" }]
+      );
+    });
+
+    test("applies the authoritative response after a preceding notification", async () => {
+      demoMode = "pre-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.setSessionConfigOption("interaction", "review");
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "accurate" },
+        ]
+      );
+    });
+
+    test("applies a superseding notification sent after the response", async () => {
+      demoMode = "post-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await client.setSessionConfigOption("interaction", "review");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "latest" },
+        ]
+      );
+    });
+
+    test("applies a superseding notification in the response transport chunk", async () => {
+      demoMode = "same-chunk-post-response-config";
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const configUpdateReceived = new Promise<void>((resolve) => {
+        client.setOnSessionUpdate((update) => {
+          if (update.update.sessionUpdate === "config_option_update") {
+            resolve();
+          }
+        });
+      });
+
+      await client.setSessionConfigOption("interaction", "review");
+      await configUpdateReceived;
+
+      assert.deepStrictEqual(
+        client
+          .getSessionMetadata()
+          ?.configOptions?.map(({ id, currentValue }) => ({
+            id,
+            currentValue,
+          })),
+        [
+          { id: "interaction", currentValue: "review" },
+          { id: "model", currentValue: "latest" },
+        ]
+      );
+    });
+
+    test("rejects values that the advertised option does not offer", async () => {
+      await client.connect();
+      await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+
+      await assert.rejects(
+        () => client.setSessionConfigOption("model", "missing-model"),
+        /Configuration value is not available: missing-model/
       );
       assert.strictEqual(
-        client.getSessionMetadata()?.models?.currentModelId,
+        client.getSessionMetadata()?.configOptions?.[0]?.currentValue,
         "claude-3-sonnet"
       );
     });
@@ -1389,7 +1731,7 @@ suite("ACPClient with Mock Server", () => {
       await client.connect();
 
       await assert.rejects(async () => {
-        await client.setModel("claude-3-opus");
+        await client.setSessionConfigOption("model", "claude-3-opus");
       }, /No active session/);
     });
   });
