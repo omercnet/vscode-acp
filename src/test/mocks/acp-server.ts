@@ -1295,7 +1295,7 @@ export interface MockChildProcess extends EventEmitter {
   stdin: Writable;
   stdout: Readable;
   stderr: Readable;
-  pid: number;
+  pid: number | undefined;
   killed: boolean;
   server: MockACPServer;
   kill: () => boolean;
@@ -1324,7 +1324,10 @@ export function createMockProcess(
     value: server.stderr,
     writable: false,
   });
-  Object.defineProperty(mockProcess, "pid", { value: 99999, writable: false });
+  Object.defineProperty(mockProcess, "pid", {
+    value: undefined,
+    writable: false,
+  });
 
   let killed = false;
   Object.defineProperty(mockProcess, "killed", { get: () => killed });

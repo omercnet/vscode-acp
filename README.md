@@ -22,6 +22,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user settings, workspace settings, or a trusted `.vscode/mcp.json`
 - **📎 Rich Attachments**: Send file links, embedded text context, and image prompts through one capability-aware attachment flow
 - **Editor Selection Context** — Press `Cmd+Shift+I` on macOS or `Ctrl+Alt+Shift+I` on Windows/Linux to attach the selected code and focus the ACP composer
+- **ACP Diagnostics:** Opt-in request, response, and notification tracing with bounded structural metadata and no protocol bodies
 
 ## Requirements
 
@@ -83,6 +84,16 @@ Sessions are stored in the current workspace after the first completed turn, whe
 | -------------------------------- | ------- | ------------------------------------------------------------------ |
 | `vscode-acp.sessions.autoSave`   | `true`  | Persist newly created and completed sessions in workspace history. |
 | `vscode-acp.sessions.maxHistory` | `50`    | Retain the most recently used 1–200 workspace sessions.            |
+
+### Agent Lifecycle and Diagnostics
+
+Use **ACP: Restart Agent** to tear down the current agent process, revoke pending permissions, stop owned terminals, and start a fresh session through the serialized session lifecycle. Use **ACP: Disconnect Agent** for the same cleanup without reconnecting.
+
+ACP traffic diagnostics are disabled by default. Set `vscode-acp.diagnostics.enabled` to `true`, then run **ACP: Show Diagnostics** to open the dedicated output channel. Each JSON record contains direction, method, request correlation, duration, outcome, and fixed-size structural metadata. The channel does not record prompt text, resource data, MCP header or environment values, authentication material, permission payload details, filesystem contents, terminal environment or output, or agent stderr. Unknown methods expose no payload metadata.
+
+| Setting                          | Default | Effect                                                         |
+| -------------------------------- | ------- | -------------------------------------------------------------- |
+| `vscode-acp.diagnostics.enabled` | `false` | Record bounded, secret-safe ACP traffic metadata when enabled. |
 
 ### Tool Calls
 

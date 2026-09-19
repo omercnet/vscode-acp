@@ -154,6 +154,7 @@ export interface ExtensionMessage {
   messages?: ReplayMessage[];
   sessions?: SessionHistoryEntry[];
   sessionId?: string;
+  lifecycleGeneration?: number;
   promptCapabilities?: {
     image?: boolean;
     embeddedContext?: boolean;
@@ -2385,7 +2386,10 @@ export class WebviewController {
         break;
       case "triggerNewChat":
         this.setInputLock("session", true, "Starting a new session…");
-        this.vscode.postMessage({ type: "newChat" });
+        this.vscode.postMessage({
+          type: "newChat",
+          lifecycleGeneration: msg.lifecycleGeneration,
+        });
         break;
       case "triggerClearChat":
         this.vscode.postMessage({ type: "clearChat" });

@@ -5,6 +5,9 @@ import {
   describeACPError,
   formatACPError,
   isAgentAuthMethod,
+  runBoundedTerminationCommand,
+  terminateWindowsProcessTree,
+  type WindowsProcessIdentity,
   type SpawnFunction,
 } from "../acp/client";
 import { getAgent } from "../acp/agents";
@@ -87,6 +90,164 @@ suite("ACPClient", () => {
       assert.strictEqual(client.getCurrentSessionId(), null);
       assert.strictEqual(client.getSessionMetadata(), null);
     });
+  });
+});
+
+function windowsProcessIdentity(processId: number): WindowsProcessIdentity {
+  const now = Date.now();
+  return {
+    processId,
+    createdNotBeforeMs: now - 1000,
+    createdNotAfterMs: now + 1000,
+    ownershipCutoffMs: now + 1000,
+  };
+}
+
+suite("Agent process termination helpers", () => {
+  test("bounds and escalates a stalled termination helper", async () => {
+    const commandProcess = createMockProcess() as unknown as ChildProcess;
+    const signals: Array<NodeJS.Signals | number | undefined> = [];
+    commandProcess.kill = (signal?: NodeJS.Signals | number) => {
+      signals.push(signal);
+      return true;
+    };
+    let triggerTimeout!: () => void;
+    const cancelled: unknown[] = [];
+    const running = runBoundedTerminationCommand("taskkill", [], {
+      spawn: () => commandProcess,
+      timeoutMs: 1,
+      scheduler: {
+        schedule(callback) {
+          triggerTimeout = callback;
+          return "termination-timeout";
+        },
+        cancel(handle) {
+          cancelled.push(handle);
+        },
+      },
+    });
+
+    triggerTimeout();
+
+    assert.strictEqual(await running, false);
+    assert.deepStrictEqual(signals, ["SIGKILL"]);
+    assert.deepStrictEqual(cancelled, ["termination-timeout"]);
+  });
+
+  test("uses identity-validated PowerShell cleanup", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    const commands: Array<{ command: string; args: string[] }> = [];
+
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (command, args) => {
+        commands.push({ command, args });
+        return true;
+      },
+      waitForExit: async () => true,
+    });
+
+    assert.strictEqual(commands.length, 1);
+    assert.ok(commands[0].command.endsWith("powershell.exe"));
+    assert.ok(commands[0].args.includes("-NonInteractive"));
+    const script = commands[0].args.at(-1) ?? "";
+    assert.ok(script.includes("delta>10"));
+    assert.ok(script.includes("$rootCreated -ge $notBefore"));
+    const rootTermination = script.indexOf(
+      "[AcpOwnedProcess]::TerminateIfCreated($root"
+    );
+    const processSnapshot = script.indexOf(
+      "$all=@(Get-CimInstance Win32_Process"
+    );
+    assert.ok(rootTermination >= 0 && rootTermination < processSnapshot);
+    assert.ok(script.includes("$pass -lt 64"));
+    assert.ok(script.includes("$parentCutoffs.TryGetValue"));
+    assert.ok(script.includes("if($owned.Count -eq 0){exit 0}"));
+    assert.ok(script.includes("Descendant process identity changed"));
+    const initialExitCheck = script.indexOf(
+      "uint state=WaitForSingleObject(handle,0)"
+    );
+    const termination = script.indexOf("if(!TerminateProcess(handle,1))");
+    const racedExitCheck = script.indexOf(
+      "state=WaitForSingleObject(handle,0)",
+      termination + 1
+    );
+    assert.ok(initialExitCheck >= 0 && initialExitCheck < termination);
+    assert.ok(racedExitCheck > termination);
+  });
+
+  test("does not issue a stale taskkill after the parent exits", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    const commands: Array<{ command: string; args: string[] }> = [];
+
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (command, args) => {
+        commands.push({ command, args });
+        Object.defineProperty(parent, "exitCode", { value: 0 });
+        return true;
+      },
+      waitForExit: async () => true,
+    });
+
+    assert.strictEqual(commands.length, 1);
+    assert.ok(commands[0].command.endsWith("powershell.exe"));
+    assert.ok(!commands[0].args.includes("/F"));
+  });
+
+  test("fails closed when descendant identity validation fails", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+
+    await assert.rejects(
+      () =>
+        terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
+          windowsRoot: "C:\\Windows",
+          runCommand: async (_command, args) => {
+            assert.ok(
+              (args.at(-1) ?? "").includes(
+                "Descendant process identity changed"
+              )
+            );
+            return false;
+          },
+          waitForExit: async () =>
+            assert.fail("failed identity validation must not await the root"),
+        }),
+      /Failed to terminate ACP agent process tree/
+    );
+  });
+
+  test("does not terminate a reused root pid after parent exit", async () => {
+    const parent = createMockProcess() as unknown as ChildProcess;
+    Object.defineProperty(parent, "exitCode", { value: 0 });
+    let script = "";
+
+    await terminateWindowsProcessTree(parent, windowsProcessIdentity(42), {
+      windowsRoot: "C:\\Windows",
+      runCommand: async (_command, args) => {
+        script = args.at(-1) ?? "";
+        return true;
+      },
+      waitForExit: async () => assert.fail("exited parent must not be awaited"),
+    });
+
+    assert.ok(!script.includes("Stop-OwnedProcess $root"));
+    assert.ok(script.includes("$cutoff=$ownershipCutoff"));
+    assert.ok(script.includes("$created -lt $parentCutoff"));
+    assert.ok(script.includes("delta>10"));
+  });
+
+  test("treats an already-exited Windows root as successful", async function () {
+    if (process.platform !== "win32") {
+      this.skip();
+    }
+    const parent = createMockProcess() as unknown as ChildProcess;
+    Object.defineProperty(parent, "exitCode", { value: 0 });
+
+    await terminateWindowsProcessTree(
+      parent,
+      windowsProcessIdentity(2_000_000_000)
+    );
   });
 });
 
@@ -343,6 +504,7 @@ suite("ACPClient with Mock Server", () => {
             PATH: "/trusted/bin",
             AGENT_TEST_VALUE: "preserved",
           },
+          detached: process.platform !== "win32",
           shell: false,
         },
       });
@@ -407,6 +569,31 @@ suite("ACPClient with Mock Server", () => {
         assert.ok(!error.message.includes("private-user"));
         return true;
       });
+    });
+
+    test("disconnect invalidates capability discovery before spawn", async () => {
+      let markDiscoveryStarted!: () => void;
+      let releaseDiscovery!: () => void;
+      const discoveryStarted = new Promise<void>((resolve) => {
+        markDiscoveryStarted = resolve;
+      });
+      const discoveryGate = new Promise<void>((resolve) => {
+        releaseDiscovery = resolve;
+      });
+      client.setFileSystemCapabilities(async () => {
+        markDiscoveryStarted();
+        await discoveryGate;
+        return { readTextFile: true, writeTextFile: true };
+      });
+
+      const connecting = client.connect();
+      await discoveryStarted;
+      await client.disconnect();
+      releaseDiscovery();
+
+      await assert.rejects(connecting, /Connection attempt was disposed/);
+      assert.strictEqual(mockProcesses.length, 0);
+      assert.strictEqual(client.getState(), "disconnected");
     });
 
     test("should notify multiple state change listeners", async () => {
@@ -1190,10 +1377,10 @@ suite("ACPClient with Mock Server", () => {
         second.sessions.map((session) => session.sessionId),
         ["listed-session-2"]
       );
-      assert.deepStrictEqual(
-        mockProcesses[0].server.getListSessionRequests(),
-        [{}, { cursor: "page-2" }]
-      );
+      assert.deepStrictEqual(mockProcesses[0].server.getListSessionRequests(), [
+        {},
+        { cursor: "page-2" },
+      ]);
     });
 
     test("resumes with the selected directories and MCP snapshot", async () => {
@@ -1767,22 +1954,59 @@ suite("ACPClient with Mock Server", () => {
       assert.strictEqual(client.getSessionMetadata(), null);
     });
 
-    test("keeps the new connection usable when reconnecting right after dispose", async () => {
+    test("waits for the old process to exit before reconnecting", async () => {
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
+      const previousProcess = mockProcesses[0];
+      previousProcess.kill = () => true;
 
       client.dispose();
-      await client.connect();
-      // Let the killed process deliver its exit event.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const reconnecting = client.connect();
 
+      assert.strictEqual(mockProcesses.length, 1);
+      previousProcess.emit("exit", 0);
+      await reconnecting;
+      assert.strictEqual(mockProcesses.length, 2);
       assert.strictEqual(client.getState(), "connected");
       const session = await client.newSession({
         cwd: "/test/dir",
         mcpServers: [],
       });
       assert.ok(session.sessionId);
+    });
+
+    test("escalates process termination when graceful shutdown hangs", async () => {
+      await client.connect();
+      const previousProcess = mockProcesses[0];
+      const signals: Array<NodeJS.Signals | number | undefined> = [];
+      previousProcess.kill = (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        if (signal === "SIGKILL") {
+          setImmediate(() => previousProcess.emit("exit", null, "SIGKILL"));
+        }
+        return true;
+      };
+      await client.disconnect();
+
+      assert.deepStrictEqual(signals, ["SIGTERM", "SIGKILL"]);
+      assert.strictEqual(client.getState(), "disconnected");
+    });
+
+    test("retains process-tree ownership after the parent exits", async () => {
+      await client.connect();
+      const previousProcess = mockProcesses[0];
+      const signals: Array<NodeJS.Signals | number | undefined> = [];
+      previousProcess.kill = (signal?: NodeJS.Signals | number) => {
+        signals.push(signal);
+        setImmediate(() => previousProcess.emit("exit", 0));
+        return true;
+      };
+
+      previousProcess.emit("exit", 0);
+      await client.disconnect();
+
+      assert.deepStrictEqual(signals, ["SIGTERM"]);
+      assert.strictEqual(client.getState(), "disconnected");
     });
 
     test("does not let a disposed connection attempt tear down its replacement", async () => {

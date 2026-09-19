@@ -1,6 +1,8 @@
 import { ChildProcess, spawn as nodeSpawn, SpawnOptions } from "child_process";
 import { Readable, Writable } from "stream";
+import { join } from "path";
 import * as acp from "@agentclientprotocol/sdk";
+import { ACPDiagnostics } from "./diagnostics";
 import {
   buildPromptContent,
   type PromptAttachment,
@@ -494,14 +496,314 @@ export type SpawnFunction = (
   options: SpawnOptions
 ) => ChildProcess;
 
+const AGENT_TERMINATION_GRACE_MS = 1000;
+const WINDOWS_TERMINATION_COMMAND_TIMEOUT_MS = 15_000;
+
+function hasExited(child: ChildProcess): boolean {
+  return (
+    typeof child.exitCode === "number" || typeof child.signalCode === "string"
+  );
+}
+
+function processGroupExists(processId: number): boolean {
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForProcessGroupExit(processId: number): Promise<boolean> {
+  const deadline = Date.now() + AGENT_TERMINATION_GRACE_MS;
+  while (processGroupExists(processId)) {
+    if (Date.now() >= deadline) {
+      return false;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+function waitForChildExit(child: ChildProcess): Promise<boolean> {
+  if (hasExited(child)) {
+    return Promise.resolve(true);
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (exited: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timeout = setTimeout(
+      () => finish(hasExited(child)),
+      AGENT_TERMINATION_GRACE_MS
+    );
+    child.once("exit", onExit);
+  });
+}
+
+interface TerminationScheduler {
+  schedule(callback: () => void, delayMs: number): unknown;
+  cancel(handle: unknown): void;
+}
+
+const DEFAULT_TERMINATION_SCHEDULER: TerminationScheduler = {
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  cancel: (handle) => clearTimeout(handle as NodeJS.Timeout),
+};
+
+export function runBoundedTerminationCommand(
+  command: string,
+  args: string[],
+  options: {
+    spawn?: SpawnFunction;
+    timeoutMs?: number;
+    scheduler?: TerminationScheduler;
+  } = {}
+): Promise<boolean> {
+  const spawnCommand = options.spawn ?? (nodeSpawn as SpawnFunction);
+  const scheduler = options.scheduler ?? DEFAULT_TERMINATION_SCHEDULER;
+  const timeoutMs = options.timeoutMs ?? WINDOWS_TERMINATION_COMMAND_TIMEOUT_MS;
+  return new Promise<boolean>((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawnCommand(command, args, {
+        shell: false,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    let timeout: unknown;
+    const finish = (succeeded: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      scheduler.cancel(timeout);
+      resolve(succeeded);
+    };
+    timeout = scheduler.schedule(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      finish(false);
+    }, timeoutMs);
+    child.once("error", () => finish(false));
+    child.once("close", (code) => finish(code === 0));
+  });
+}
+
+export interface WindowsProcessIdentity {
+  processId: number;
+  createdNotBeforeMs: number;
+  createdNotAfterMs: number;
+  ownershipCutoffMs: number;
+}
+
+interface WindowsTerminationOptions {
+  windowsRoot?: string;
+  runCommand?: (command: string, args: string[]) => Promise<boolean>;
+  waitForExit?: (child: ChildProcess) => Promise<boolean>;
+}
+
+export function createWindowsProcessIdentity(
+  processId: number | undefined,
+  createdNotBeforeMs: number,
+  createdNotAfterMs: number
+): WindowsProcessIdentity | null {
+  if (
+    process.platform !== "win32" ||
+    !processId ||
+    !Number.isSafeInteger(processId) ||
+    !Number.isSafeInteger(createdNotBeforeMs) ||
+    !Number.isSafeInteger(createdNotAfterMs) ||
+    createdNotBeforeMs > createdNotAfterMs
+  ) {
+    return null;
+  }
+  return {
+    processId,
+    createdNotBeforeMs,
+    createdNotAfterMs,
+    ownershipCutoffMs: createdNotAfterMs,
+  };
+}
+
+export function buildWindowsOrphanTerminationScript(
+  identity: WindowsProcessIdentity,
+  terminateRoot: boolean
+): string {
+  const {
+    processId,
+    createdNotBeforeMs,
+    createdNotAfterMs,
+    ownershipCutoffMs,
+  } = identity;
+  if (
+    !Number.isSafeInteger(processId) ||
+    processId <= 0 ||
+    !Number.isSafeInteger(createdNotBeforeMs) ||
+    !Number.isSafeInteger(createdNotAfterMs) ||
+    createdNotBeforeMs > createdNotAfterMs ||
+    !Number.isSafeInteger(ownershipCutoffMs)
+  ) {
+    throw new Error("Invalid ACP agent process identity");
+  }
+  const nativeProcessType = [
+    "using System;",
+    "using System.Runtime.InteropServices;",
+    "public static class AcpOwnedProcess{",
+    "[StructLayout(LayoutKind.Sequential)]public struct FILETIME{public uint Low;public uint High;}",
+    '[DllImport("kernel32.dll",SetLastError=true)]static extern IntPtr OpenProcess(uint access,bool inherit,uint processId);',
+    '[DllImport("kernel32.dll",SetLastError=true)]static extern bool GetProcessTimes(IntPtr process,out FILETIME creation,out FILETIME exit,out FILETIME kernel,out FILETIME user);',
+    '[DllImport("kernel32.dll",SetLastError=true)]static extern bool TerminateProcess(IntPtr process,uint exitCode);',
+    '[DllImport("kernel32.dll",SetLastError=true)]static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);',
+    '[DllImport("kernel32.dll")]static extern bool CloseHandle(IntPtr handle);',
+    "public static bool TerminateIfCreated(uint processId,long expected){",
+    "IntPtr handle=OpenProcess(0x00101001u,false,processId);",
+    'if(handle==IntPtr.Zero){int error=Marshal.GetLastWin32Error();if(error==87)return true;throw new InvalidOperationException("OpenProcess failed: "+error);}',
+    'try{FILETIME creation,exit,kernel,user;if(!GetProcessTimes(handle,out creation,out exit,out kernel,out user))throw new InvalidOperationException("GetProcessTimes failed: "+Marshal.GetLastWin32Error());',
+    "long actual=((long)creation.High<<32)|creation.Low;long delta=actual>=expected?actual-expected:expected-actual;if(delta>10)return false;",
+    'uint state=WaitForSingleObject(handle,0);if(state==0)return true;if(state!=258)throw new InvalidOperationException("Process wait failed: "+state);',
+    'if(!TerminateProcess(handle,1)){state=WaitForSingleObject(handle,0);if(state==0)return true;throw new InvalidOperationException("TerminateProcess failed: "+Marshal.GetLastWin32Error());}',
+    'state=WaitForSingleObject(handle,1000);if(state!=0)throw new InvalidOperationException("Process did not exit: "+state);return true;}',
+    "finally{CloseHandle(handle);}}}",
+  ].join("");
+  return [
+    "$ErrorActionPreference='Stop'",
+    `Add-Type -TypeDefinition '${nativeProcessType}'`,
+    `$root=[uint32]${processId}`,
+    `$notBefore=[long]${createdNotBeforeMs}`,
+    `$notAfter=[long]${createdNotAfterMs}`,
+    `$ownershipCutoff=[long]${ownershipCutoffMs}`,
+    "function Get-CreatedAtMs([object]$p){return ([DateTimeOffset]$p.CreationDate).ToUnixTimeMilliseconds()}",
+    ...(terminateRoot
+      ? [
+          `$rootProcess=@(Get-CimInstance Win32_Process -Filter "ProcessId = ${processId}" -Property ProcessId,CreationDate)|Select-Object -First 1`,
+          "$rootCreated=$null",
+          "$cutoff=$ownershipCutoff",
+          "if($null -ne $rootProcess){$rootCreated=Get-CreatedAtMs $rootProcess;if($rootCreated -ge $notBefore -and $rootCreated -le $notAfter){",
+          '$terminated=[AcpOwnedProcess]::TerminateIfCreated($root,[long]$rootProcess.CreationDate.ToFileTimeUtc());if(!$terminated){throw new InvalidOperationException("Root process identity changed")};$cutoff=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()',
+          "}else{$cutoff=[Math]::Min($ownershipCutoff,$rootCreated)}}else{$cutoff=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}",
+        ]
+      : ["$cutoff=$ownershipCutoff"]),
+    "$known=New-Object 'System.Collections.Generic.HashSet[uint32]'",
+    "$parentCutoffs=New-Object 'System.Collections.Generic.Dictionary[uint32,long]'",
+    "$known.Add($root)|Out-Null;$parentCutoffs[$root]=$cutoff",
+    "$deadline=[DateTimeOffset]::UtcNow.AddSeconds(10)",
+    "for($pass=0;$pass -lt 64 -and [DateTimeOffset]::UtcNow -lt $deadline;$pass++){",
+    "$all=@(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate)",
+    "$owned=New-Object 'System.Collections.Generic.List[object]'",
+    "foreach($p in $all){if($null -eq $p.CreationDate -or $known.Contains([uint32]$p.ProcessId)){continue};[long]$parentCutoff=0;if($parentCutoffs.TryGetValue([uint32]$p.ParentProcessId,[ref]$parentCutoff)){$created=Get-CreatedAtMs $p;if($created -ge $notBefore -and $created -lt $parentCutoff -and $known.Add([uint32]$p.ProcessId)){$owned.Add([pscustomobject]@{Id=[uint32]$p.ProcessId;Created=[long]$p.CreationDate.ToFileTimeUtc()})}}}",
+    "if($owned.Count -eq 0){exit 0}",
+    'foreach($p in $owned){$terminated=[AcpOwnedProcess]::TerminateIfCreated($p.Id,$p.Created);if(!$terminated){throw new InvalidOperationException("Descendant process identity changed")};$parentCutoffs[$p.Id]=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}',
+    "}",
+    'throw new InvalidOperationException("Process tree did not quiesce")',
+  ].join(";");
+}
+
+export async function terminateWindowsProcessTree(
+  child: ChildProcess,
+  identity: WindowsProcessIdentity,
+  options: WindowsTerminationOptions = {}
+): Promise<void> {
+  const windowsRoot =
+    options.windowsRoot ??
+    process.env.SystemRoot ??
+    process.env.WINDIR ??
+    "C:\\Windows";
+  const runCommand = options.runCommand ?? runBoundedTerminationCommand;
+  const waitForExit = options.waitForExit ?? waitForChildExit;
+  const terminateRoot = !hasExited(child);
+  if (terminateRoot) {
+    identity.ownershipCutoffMs = Date.now();
+  }
+  const powershell = join(
+    windowsRoot,
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe"
+  );
+  const script = buildWindowsOrphanTerminationScript(identity, terminateRoot);
+  const terminated = await runCommand(powershell, [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    script,
+  ]);
+  if (!terminated || (!hasExited(child) && !(await waitForExit(child)))) {
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+}
+
+async function terminateAgentProcessTree(
+  child: ChildProcess,
+  windowsIdentity: WindowsProcessIdentity | null
+): Promise<void> {
+  const processId = child.pid;
+  if (windowsIdentity) {
+    await terminateWindowsProcessTree(child, windowsIdentity);
+    return;
+  }
+
+  if (processId && processGroupExists(processId)) {
+    try {
+      process.kill(-processId, "SIGTERM");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw new Error("Failed to terminate ACP agent process tree");
+      }
+    }
+    if (await waitForProcessGroupExit(processId)) {
+      return;
+    }
+    try {
+      process.kill(-processId, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw new Error("Failed to terminate ACP agent process tree");
+      }
+    }
+    if (await waitForProcessGroupExit(processId)) {
+      return;
+    }
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+
+  child.kill("SIGTERM");
+  if (await waitForChildExit(child)) {
+    return;
+  }
+  child.kill("SIGKILL");
+  if (!(await waitForChildExit(child))) {
+    throw new Error("Failed to terminate ACP agent process tree");
+  }
+}
+
 export interface ACPClientOptions {
   agentConfig?: AgentConfig;
   spawn?: SpawnFunction;
   resolutionOptions?: () => AgentCommandResolutionOptions;
+  diagnostics?: ACPDiagnostics;
 }
 
 export class ACPClient {
   private process: ChildProcess | null = null;
+  private ownedProcessTree: ChildProcess | null = null;
+  private ownedProcessCleanup: Promise<void> | null = null;
   private connection: acp.ClientConnection | null = null;
   private state: ACPConnectionState = "disconnected";
   private currentSessionId: string | null = null;
@@ -519,6 +821,10 @@ export class ACPClient {
   private pendingModeBySession = new Map<acp.SessionId, acp.SessionModeId>();
   private fileSystemCapabilitiesHandler: FileSystemCapabilitiesCallback | null =
     null;
+  private windowsProcessIdentities = new WeakMap<
+    ChildProcess,
+    WindowsProcessIdentity
+  >();
   private connectionGeneration = 0;
   private sessionRequestGeneration = 0;
   private pendingSessionRequestGeneration: number | null = null;
@@ -553,16 +859,20 @@ export class ACPClient {
   private agentConfig: AgentConfig;
   private spawnFn: SpawnFunction;
   private resolutionOptions: () => AgentCommandResolutionOptions;
+  private diagnostics: ACPDiagnostics | null;
+  private processTermination: Promise<void> = Promise.resolve();
 
   constructor(options?: ACPClientOptions | AgentConfig) {
     if (options && "id" in options) {
       this.agentConfig = options;
       this.spawnFn = nodeSpawn as SpawnFunction;
       this.resolutionOptions = () => ({});
+      this.diagnostics = null;
     } else {
       this.agentConfig = options?.agentConfig ?? getDefaultAgent();
       this.spawnFn = options?.spawn ?? (nodeSpawn as SpawnFunction);
       this.resolutionOptions = options?.resolutionOptions ?? (() => ({}));
+      this.diagnostics = options?.diagnostics ?? null;
     }
   }
 
@@ -726,10 +1036,6 @@ export class ACPClient {
       );
     }
 
-    const availableFileSystemCapabilities = this.fileSystemCapabilitiesHandler
-      ? await this.fileSystemCapabilitiesHandler()
-      : { readTextFile: true, writeTextFile: true };
-
     const attemptGeneration = ++this.connectionGeneration;
     let child: ChildProcess | null = null;
     let connection: acp.ClientConnection | null = null;
@@ -757,15 +1063,27 @@ export class ACPClient {
     this.setState("connecting");
 
     try {
+      await this.processTermination;
+      if (attemptGeneration !== this.connectionGeneration) {
+        throw new Error("Connection attempt was disposed");
+      }
+      const availableFileSystemCapabilities = this.fileSystemCapabilitiesHandler
+        ? await this.fileSystemCapabilitiesHandler()
+        : { readTextFile: true, writeTextFile: true };
+      if (attemptGeneration !== this.connectionGeneration) {
+        throw new Error("Connection attempt was disposed");
+      }
       console.log(
         `[ACP] Launching ${this.agentConfig.name} via ${launch.source}`
       );
+      const processCreatedNotBeforeMs = Date.now();
       try {
         child = this.spawnFn(launch.command, launch.args, {
           stdio: ["pipe", "pipe", "pipe"],
           cwd: launch.cwd,
           env: createAgentEnvironment(resolutionOptions),
           shell: false,
+          detached: process.platform !== "win32",
         });
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code ?? "unknown";
@@ -773,7 +1091,17 @@ export class ACPClient {
           `Unable to launch agent "${this.agentConfig.name}" (${code})`
         );
       }
+      const windowsIdentity = createWindowsProcessIdentity(
+        child.pid,
+        processCreatedNotBeforeMs,
+        Date.now()
+      );
+      if (windowsIdentity) {
+        this.windowsProcessIdentities.set(child, windowsIdentity);
+      }
       this.process = child;
+      this.ownedProcessTree = child;
+      this.ownedProcessCleanup = null;
 
       child.stderr?.on("data", (data: Buffer) => {
         if (this.process !== child) {
@@ -796,7 +1124,15 @@ export class ACPClient {
 
       child.on("exit", (code) => {
         console.log("[ACP] Process exited with code:", code);
-        if (this.process !== child) {
+        const exitedChild = child;
+        if (!exitedChild) {
+          return;
+        }
+        const windowsIdentity = this.windowsProcessIdentities.get(exitedChild);
+        if (windowsIdentity) {
+          windowsIdentity.ownershipCutoffMs = Date.now();
+        }
+        if (this.process !== exitedChild) {
           return;
         }
         connection?.close();
@@ -804,6 +1140,10 @@ export class ACPClient {
           this.connection = null;
         }
         this.process = null;
+        const processCleanup = this.cleanupOwnedProcessTree(exitedChild);
+        void processCleanup.catch(() => {
+          console.error("[ACP] Failed to terminate exited agent process tree");
+        });
         this.agentInfo = null;
         this.currentSessionId = null;
         this.sessionMetadata = null;
@@ -824,12 +1164,13 @@ export class ACPClient {
         this.setState("disconnected");
       });
 
-      const stream = preserveConfigResponseOrder(
-        acp.ndJsonStream(
-          Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-          Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
-        ),
-        () => this.waitForConfigResponseContinuation()
+      const transport = acp.ndJsonStream(
+        Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
+      );
+      const diagnosticsStream = this.diagnostics?.wrap(transport) ?? transport;
+      const stream = preserveConfigResponseOrder(diagnosticsStream, () =>
+        this.waitForConfigResponseContinuation()
       );
 
       connection = acp
@@ -1001,8 +1342,14 @@ export class ACPClient {
         this.connection = null;
       }
       if (this.process === child) {
-        child?.kill();
         this.process = null;
+      }
+      const processCleanup =
+        child && this.ownedProcessTree === child
+          ? this.cleanupOwnedProcessTree(child)
+          : null;
+      if (processCleanup) {
+        await processCleanup;
       }
       if (isCurrentAttempt) {
         this.currentSessionId = null;
@@ -1671,15 +2018,13 @@ export class ACPClient {
     });
   }
 
-  dispose(): void {
+  disconnect(): Promise<void> {
     ++this.connectionGeneration;
     ++this.sessionRequestGeneration;
     this.connection?.close();
     this.connection = null;
-    if (this.process) {
-      this.process.kill();
-      this.process = null;
-    }
+    const child = this.ownedProcessTree ?? this.process;
+    this.process = null;
     this.currentSessionId = null;
     this.agentInfo = null;
     this.sessionMetadata = null;
@@ -1703,6 +2048,59 @@ export class ACPClient {
     this.activePrompt = null;
     this.authenticationMethods = [];
     this.setState("disconnected");
+    return child
+      ? this.cleanupOwnedProcessTree(child)
+      : (this.ownedProcessCleanup ?? this.processTermination);
+  }
+
+  dispose(): void {
+    void this.disconnect().catch(() => {
+      console.error("[ACP] Failed to terminate agent process tree");
+    });
+  }
+
+  private cleanupOwnedProcessTree(child: ChildProcess): Promise<void> {
+    if (this.ownedProcessTree !== child) {
+      return this.processTermination;
+    }
+    if (this.ownedProcessCleanup) {
+      return this.ownedProcessCleanup;
+    }
+    const cleanup = this.queueProcessTermination(child);
+    let tracked!: Promise<void>;
+    tracked = cleanup.then(
+      () => {
+        if (this.ownedProcessTree === child) {
+          this.ownedProcessTree = null;
+        }
+        if (this.ownedProcessCleanup === tracked) {
+          this.ownedProcessCleanup = null;
+        }
+      },
+      (error) => {
+        if (this.ownedProcessCleanup === tracked) {
+          this.ownedProcessCleanup = null;
+        }
+        throw error;
+      }
+    );
+    tracked.catch(() => undefined);
+    this.ownedProcessCleanup = tracked;
+    return tracked;
+  }
+
+  private queueProcessTermination(child: ChildProcess): Promise<void> {
+    const previous = this.processTermination.catch(() => undefined);
+    const current = Promise.all([
+      previous,
+      terminateAgentProcessTree(
+        child,
+        this.windowsProcessIdentities.get(child) ?? null
+      ),
+    ]).then(() => undefined);
+    current.catch(() => undefined);
+    this.processTermination = current;
+    return current;
   }
 
   private setState(state: ACPConnectionState): void {
