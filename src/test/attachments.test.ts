@@ -545,12 +545,24 @@ suite("Resource link attachments", () => {
           transport: "image",
           payload: { type: "image", data: "iVBORw0KGgo=" },
         },
+        {
+          id: "audio",
+          uri: "vscode-acp-attachment:///memory/audio/sample.wav",
+          name: "sample.wav",
+          mimeType: "audio/wav",
+          size: 12,
+          source: "memory",
+          kind: "audio",
+          transport: "audio",
+          payload: { type: "audio", data: "UklGRgAAAABXQVZF" },
+        },
       ];
 
       assert.deepStrictEqual(
         buildPromptContent("Inspect", rich, {
           embeddedContext: true,
           image: true,
+          audio: true,
         }),
         [
           { type: "text", text: "Inspect" },
@@ -563,6 +575,11 @@ suite("Resource link attachments", () => {
             },
           },
           { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+          {
+            type: "audio",
+            mimeType: "audio/wav",
+            data: "UklGRgAAAABXQVZF",
+          },
         ]
       );
     });

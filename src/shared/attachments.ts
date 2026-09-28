@@ -19,6 +19,9 @@ export const MAX_ATTACHMENTS = 10;
 /** Maximum raw bytes for one image content block. */
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
+/** Maximum raw bytes for one audio content block. */
+export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+
 /** Maximum UTF-8 bytes for one embedded text resource. */
 export const MAX_EMBEDDED_RESOURCE_BYTES = 1024 * 1024;
 
@@ -39,6 +42,13 @@ export const SUPPORTED_IMAGE_MIME_TYPES = [
   "image/jpeg",
   "image/gif",
   "image/webp",
+] as const;
+
+export const SUPPORTED_AUDIO_MIME_TYPES = [
+  "audio/mpeg",
+  "audio/wav",
+  "audio/webm",
+  "audio/ogg",
 ] as const;
 
 const EMBEDDABLE_APPLICATION_MIME_TYPES: Readonly<Record<string, true>> = {
@@ -63,9 +73,12 @@ export function isEmbeddableTextMimeType(
 
 export type SupportedImageMimeType =
   (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
+export type SupportedAudioMimeType =
+  (typeof SUPPORTED_AUDIO_MIME_TYPES)[number];
 export type AttachmentSource = "file" | "memory";
-export type AttachmentKind = "file" | "image" | "selection";
-export type AttachmentTransport = "resource_link" | "resource" | "image";
+export type AttachmentKind = "file" | "image" | "audio" | "selection";
+export type AttachmentTransport =
+  "resource_link" | "resource" | "image" | "audio";
 /**
  * Safe metadata rendered by the webview. Prompt payloads remain host-only;
  * only a bounded, validated raster preview may cross back to the webview.
@@ -83,16 +96,18 @@ export interface FileAttachment {
   size?: number;
   /** Defaults to `file` for legacy ResourceLink metadata. */
   source?: AttachmentSource;
-  /** Defaults to `file`; image attachments use an image-specific chip. */
+  /** Defaults to `file`; media attachments use media-specific chips. */
   kind?: AttachmentKind;
   /** Actual or currently negotiated ACP transport. */
   transport?: AttachmentTransport;
-  /** Bounded raster data URL used only for a local image preview. */
+  /** Bounded media data URL used only for a local preview. */
   previewDataUrl?: string;
 }
 
 export type PromptAttachmentPayload =
-  { type: "image"; data: string } | { type: "text"; text: string };
+  | { type: "image"; data: string }
+  | { type: "audio"; data: string }
+  | { type: "text"; text: string };
 
 /** Host-only attachment state used to construct ACP content blocks. */
 export interface PromptAttachment extends FileAttachment {
@@ -242,6 +257,24 @@ export function isSupportedImageAttachment(
   );
 }
 
+export function isSupportedAudioMimeType(
+  mimeType: string | undefined
+): mimeType is SupportedAudioMimeType {
+  return SUPPORTED_AUDIO_MIME_TYPES.includes(
+    mimeType as SupportedAudioMimeType
+  );
+}
+
+export function isSupportedAudioAttachment(
+  name: string,
+  mimeType: string | undefined
+): boolean {
+  return (
+    isSupportedAudioMimeType(mimeType) ||
+    (mimeType === undefined && /\.(?:mp3|wav|webm|ogg)$/i.test(name))
+  );
+}
+
 function base64Value(code: number): number {
   if (code >= 65 && code <= 90) return code - 65;
   if (code >= 97 && code <= 122) return code - 71;
@@ -333,6 +366,54 @@ export function detectedImageMimeType(
   return null;
 }
 
+export function detectedAudioMimeType(
+  bytes: Uint8Array
+): SupportedAudioMimeType | null {
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x41 &&
+    bytes[10] === 0x56 &&
+    bytes[11] === 0x45
+  ) {
+    return "audio/wav";
+  }
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0x49 &&
+    bytes[1] === 0x44 &&
+    bytes[2] === 0x33
+  ) {
+    return "audio/mpeg";
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) {
+    return "audio/mpeg";
+  }
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x1a &&
+    bytes[1] === 0x45 &&
+    bytes[2] === 0xdf &&
+    bytes[3] === 0xa3
+  ) {
+    return "audio/webm";
+  }
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x4f &&
+    bytes[1] === 0x67 &&
+    bytes[2] === 0x67 &&
+    bytes[3] === 0x53
+  ) {
+    return "audio/ogg";
+  }
+  return null;
+}
+
 function decodedBase64Prefix(
   data: string,
   maximumBytes: number
@@ -366,6 +447,13 @@ function detectedBase64ImageMimeType(
   return prefix ? detectedImageMimeType(prefix) : null;
 }
 
+function detectedBase64AudioMimeType(
+  data: string
+): SupportedAudioMimeType | null {
+  const prefix = decodedBase64Prefix(data, 12);
+  return prefix ? detectedAudioMimeType(prefix) : null;
+}
+
 export function isFileAttachmentValid(attachment: FileAttachment): boolean {
   const source = attachment.source ?? "file";
   const kind = attachment.kind ?? "file";
@@ -378,7 +466,10 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
       attachment.size
     ) ||
     (source !== "file" && source !== "memory") ||
-    (kind !== "file" && kind !== "image" && kind !== "selection") ||
+    (kind !== "file" &&
+      kind !== "image" &&
+      kind !== "audio" &&
+      kind !== "selection") ||
     (source === "file"
       ? !hasMatchingCanonicalFileName(attachment.name, attachment.uri)
       : kind === "selection"
@@ -387,28 +478,32 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
     (transport !== undefined &&
       transport !== "resource_link" &&
       transport !== "resource" &&
-      transport !== "image") ||
+      transport !== "image" &&
+      transport !== "audio") ||
     (source === "memory" &&
       transport !== "resource" &&
-      transport !== "image") ||
+      transport !== "image" &&
+      transport !== "audio") ||
     (transport === "resource_link" && source !== "file") ||
     (transport === "resource" && kind !== "file" && kind !== "selection") ||
     (transport === "image" && kind !== "image") ||
+    (transport === "audio" && kind !== "audio") ||
     (kind === "selection" &&
       (source !== "memory" ||
         transport !== "resource" ||
         attachment.mimeType !== "text/plain")) ||
-    (kind === "image" && !isSupportedImageMimeType(attachment.mimeType))
+    (kind === "image" && !isSupportedImageMimeType(attachment.mimeType)) ||
+    (kind === "audio" && !isSupportedAudioMimeType(attachment.mimeType))
   ) {
     return false;
   }
 
   if (attachment.previewDataUrl !== undefined) {
-    if (
-      typeof attachment.previewDataUrl !== "string" ||
-      kind !== "image" ||
-      !isSupportedImageMimeType(attachment.mimeType)
-    ) {
+    const media = kind === "image" || kind === "audio";
+    const supported =
+      (kind === "image" && isSupportedImageMimeType(attachment.mimeType)) ||
+      (kind === "audio" && isSupportedAudioMimeType(attachment.mimeType));
+    if (typeof attachment.previewDataUrl !== "string" || !media || !supported) {
       return false;
     }
     const prefix = `data:${attachment.mimeType};base64,`;
@@ -416,15 +511,20 @@ export function isFileAttachmentValid(attachment: FileAttachment): boolean {
       return false;
     }
     const data = attachment.previewDataUrl.slice(prefix.length);
-    if (data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4) {
+    const maximumBytes = kind === "image" ? MAX_IMAGE_BYTES : MAX_AUDIO_BYTES;
+    if (data.length > Math.ceil(maximumBytes / 3) * 4) {
       return false;
     }
     const size = decodedBase64Size(data);
+    const detectedMime =
+      kind === "image"
+        ? detectedBase64ImageMimeType(data)
+        : detectedBase64AudioMimeType(data);
     if (
       size === null ||
-      size > MAX_IMAGE_BYTES ||
+      size > maximumBytes ||
       (attachment.size !== undefined && attachment.size !== size) ||
-      detectedBase64ImageMimeType(data) !== attachment.mimeType
+      detectedMime !== attachment.mimeType
     ) {
       return false;
     }
@@ -461,6 +561,24 @@ export function isPromptAttachmentValid(attachment: PromptAttachment): boolean {
       size <= MAX_IMAGE_BYTES &&
       (attachment.size === undefined || attachment.size === size) &&
       detectedBase64ImageMimeType(payload.data) === attachment.mimeType
+    );
+  }
+  if (transport === "audio") {
+    if (
+      kind !== "audio" ||
+      payload?.type !== "audio" ||
+      typeof payload.data !== "string" ||
+      !isSupportedAudioMimeType(attachment.mimeType) ||
+      payload.data.length > Math.ceil(MAX_AUDIO_BYTES / 3) * 4
+    ) {
+      return false;
+    }
+    const size = decodedBase64Size(payload.data);
+    return (
+      size !== null &&
+      size <= MAX_AUDIO_BYTES &&
+      (attachment.size === undefined || attachment.size === size) &&
+      detectedBase64AudioMimeType(payload.data) === attachment.mimeType
     );
   }
   if (
@@ -500,7 +618,7 @@ export function toAttachmentMetadata(
 
 /**
  * Builds one ordered ACP prompt path for links, embedded resources, images,
- * and editor selections. User text always precedes attached context.
+ * audio, and editor selections. User text always precedes attached context.
  */
 export function buildPromptContent(
   text: string,
@@ -532,6 +650,27 @@ export function buildPromptContent(
       ) {
         blocks.push({
           type: "image",
+          data: attachment.payload.data,
+          mimeType: attachment.mimeType,
+        });
+        inlineBytes += size;
+        continue;
+      }
+    }
+    if (
+      attachment.payload?.type === "audio" &&
+      attachment.transport === "audio" &&
+      capabilities.audio === true &&
+      isPromptAttachmentValid(attachment)
+    ) {
+      const size = decodedBase64Size(attachment.payload.data);
+      if (
+        size !== null &&
+        inlineBytes + size <= MAX_INLINE_ATTACHMENT_BYTES &&
+        isSupportedAudioMimeType(attachment.mimeType)
+      ) {
+        blocks.push({
+          type: "audio",
           data: attachment.payload.data,
           mimeType: attachment.mimeType,
         });

@@ -1523,7 +1523,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
     const replayInlineBytes = message.attachments.reduce(
       (total, existing) =>
-        existing.transport === "resource" || existing.transport === "image"
+        existing.transport === "resource" ||
+        existing.transport === "image" ||
+        existing.transport === "audio"
           ? total + (existing.size ?? 0)
           : total,
       0
@@ -2621,7 +2623,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         update.sessionUpdate === "user_message_chunk" &&
         (update.content.type === "resource_link" ||
           update.content.type === "resource" ||
-          update.content.type === "image")
+          update.content.type === "image" ||
+          update.content.type === "audio")
       ) {
         this.appendReplayAttachment(update.messageId, update.content);
       }
@@ -3605,12 +3608,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           ...metadata,
           source: "file",
           transport:
-            capabilities.embeddedContext === true &&
-            isEmbeddableTextMimeType(metadata.mimeType)
-              ? "resource"
-              : "resource_link",
+            metadata.kind === "image" && capabilities.image === true
+              ? "image"
+              : metadata.kind === "audio" && capabilities.audio === true
+                ? "audio"
+                : capabilities.embeddedContext === true &&
+                    isEmbeddableTextMimeType(metadata.mimeType)
+                  ? "resource"
+                  : "resource_link",
         };
-        if (metadata.kind === "image" && capabilities.image === true) {
+        if (
+          (metadata.kind === "image" && capabilities.image === true) ||
+          (metadata.kind === "audio" && capabilities.audio === true)
+        ) {
           const prepared = await prepareFileAttachment(
             attachment,
             capabilities,

@@ -659,6 +659,7 @@ suite("ACPClient with Mock Server", () => {
 
       assert.deepStrictEqual(client.getPromptCapabilities(), {
         image: true,
+        audio: true,
         embeddedContext: true,
       });
       client.dispose();
@@ -1503,7 +1504,7 @@ suite("ACPClient with Mock Server", () => {
       ]);
     });
 
-    test("sends embedded resource and image blocks only with negotiated support", async () => {
+    test("sends embedded resource, image, and audio blocks only with negotiated support", async () => {
       demoMode = "rich-attachments";
       await client.connect();
       await client.newSession({ cwd: "/test/dir", mcpServers: [] });
@@ -1531,6 +1532,17 @@ suite("ACPClient with Mock Server", () => {
           transport: "image",
           payload: { type: "image", data: "iVBORw0KGgo=" },
         },
+        {
+          id: "audio",
+          uri: "vscode-acp-attachment:///memory/audio/sample.wav",
+          name: "sample.wav",
+          mimeType: "audio/wav",
+          size: 12,
+          source: "memory",
+          kind: "audio",
+          transport: "audio",
+          payload: { type: "audio", data: "UklGRgAAAABXQVZF" },
+        },
       ]);
 
       const process = mockProcesses.at(-1);
@@ -1549,6 +1561,11 @@ suite("ACPClient with Mock Server", () => {
           type: "image",
           mimeType: "image/png",
           data: "iVBORw0KGgo=",
+        },
+        {
+          type: "audio",
+          mimeType: "audio/wav",
+          data: "UklGRgAAAABXQVZF",
         },
       ]);
     });

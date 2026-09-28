@@ -20,7 +20,7 @@ Chat with Claude, OpenCode, and other ACP-compatible AI agents directly in your 
 - **🎛️ Mode & Model Selection** — Switch between agent modes and models on the fly
 - **Authentication Handoff** — Select an ACP-advertised sign-in method when an agent requires authentication; the extension retries session creation once after successful authentication and never stores credentials.
 - **MCP Server Configuration** — Connect validated stdio, HTTP, or SSE servers from user settings, workspace settings, or a trusted `.vscode/mcp.json`
-- **📎 Rich Attachments**: Send file links, embedded text context, and image prompts through one capability-aware attachment flow
+- **📎 Rich Attachments**: Send file links, embedded text context, image prompts, and audio prompts through one capability-aware attachment flow
 - **Editor Selection Context** — Press `Cmd+Shift+I` on macOS or `Ctrl+Alt+Shift+I` on Windows/Linux to attach the selected code and focus the ACP composer
 - **ACP Diagnostics:** Opt-in request, response, and notification tracing with bounded structural metadata and no protocol bodies
 
@@ -62,13 +62,13 @@ Select code in a trusted workspace file, then press `Cmd+Shift+I` on macOS or `C
 
 The exact selected text is captured from the editor, including unsaved changes. Agents that advertise ACP embedded-context support receive it as a resource; other agents receive the same bounded selection as plain text.
 
-### File and Image Attachments
+### File, Image, and Audio Attachments
 
-Use the paperclip button beside the prompt to select an open workspace file, including an image preview tab, or browse for files inside a trusted local workspace. You can also paste images or drop image and text files onto the composer. Selected items use the same removable, keyboard-accessible chips and retain their order after the prompt text.
+Use the paperclip button beside the prompt to select an open workspace file, including image and audio preview tabs, or browse for files inside a trusted local workspace. You can also paste images or drop image, audio, and text files onto the composer. Selected items use the same removable, keyboard-accessible chips and retain their order after the prompt text.
 
-The extension follows the connected agent's ACP `promptCapabilities`: text files use embedded `resource` blocks, including current unsaved editor contents, only when `embeddedContext` is advertised; otherwise selected workspace files remain `resource_link` blocks. Supported PNG, JPEG, GIF, and WebP files use `image` blocks only when `image` is advertised. Pasted or dropped in-memory content is rejected with a visible error when the required capability is absent because it has no safe link fallback.
+The extension follows the connected agent's ACP `promptCapabilities`: text files use embedded `resource` blocks, including current unsaved editor contents, only when `embeddedContext` is advertised; otherwise selected workspace files remain `resource_link` blocks. Supported PNG, JPEG, GIF, and WebP files use `image` blocks only when `image` is advertised. Supported MP3, WAV, WebM, and Ogg files use `audio` blocks only when `audio` is advertised. Pasted or dropped in-memory content is rejected with a visible error when the required capability is absent because it has no safe link fallback.
 
-Only explicitly selected files inside a trusted local workspace are read. Symlink escapes and replacement of an already-authorized workspace root are rejected. Embedded text is limited to 1 MiB per file, images to 5 MiB each, all inline content to 10 MiB per prompt, and every prompt to 10 attachments. Oversized picked files fall back to links; oversized pasted or dropped content is rejected. Image payloads must match their declared raster format; embedded resources remain UTF-8 text rather than an alternate image transport.
+Only explicitly selected files inside a trusted local workspace are read. Symlink escapes and replacement of an already-authorized workspace root are rejected. Embedded text is limited to 1 MiB per file, images to 5 MiB each, audio to 10 MiB each, all inline content to 10 MiB per prompt, and every prompt to 10 attachments. Oversized picked files fall back to links; oversized pasted or dropped content is rejected. Image and audio payloads must match their declared format; embedded resources remain UTF-8 text rather than an alternate media transport.
 
 You can keep typing while attachments are prepared, but Send waits until their chips are ready. If prompt preparation fails, the text and every selected attachment are restored for retry. Switching conversations discards stale preparation results. Replayed attachments use display-only chips and do not become new draft attachments.
 

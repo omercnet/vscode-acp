@@ -1326,6 +1326,8 @@ export class ACPClient {
       this.promptCapabilities = {
         image:
           initResponse.agentCapabilities?.promptCapabilities?.image === true,
+        audio:
+          initResponse.agentCapabilities?.promptCapabilities?.audio === true,
         embeddedContext:
           initResponse.agentCapabilities?.promptCapabilities
             ?.embeddedContext === true,
