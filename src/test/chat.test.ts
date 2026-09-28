@@ -3238,7 +3238,10 @@ suite("ChatViewProvider", () => {
           .find((node) => node.kind === "session");
         assert.ok(listedSession && listedSession.kind === "session");
         assert.strictEqual(listedSession.session.cwd, "/moved-workspace");
-        assert.strictEqual(listedSession.session.additionalDirectories, undefined);
+        assert.strictEqual(
+          listedSession.session.additionalDirectories,
+          undefined
+        );
 
         await listingProvider.openSession(listedSession, mode);
         const persistence = chatProvider as unknown as {
@@ -6995,6 +6998,83 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(delivered.attachments[0].transport, "image");
     });
 
+    test("accepts bounded pasted audio into the existing draft without echoing payload bytes", () => {
+      class AudioClient extends TestACPClient {
+        getPromptCapabilities(): PromptCapabilities {
+          return { audio: true };
+        }
+
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new AudioClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, FileAttachment & { payload?: unknown }>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "sample.wav",
+        mimeType: "audio/wav",
+        data: "UklGRgAAAABXQVZF",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 1);
+      const delivered = messages.find(
+        (message) => message.type === "filesAttached"
+      ) as { attachments: Array<Record<string, unknown>> } | undefined;
+      assert.ok(delivered);
+      assert.strictEqual("payload" in delivered.attachments[0], false);
+      assert.strictEqual(delivered.attachments[0].transport, "audio");
+    });
+
+    test("rejects pasted audio bytes when the agent lacks audio support", () => {
+      class LinkOnlyClient extends TestACPClient {
+        isConnected(): boolean {
+          return true;
+        }
+      }
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        new LinkOnlyClient() as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const messages: Array<Record<string, unknown>> = [];
+      Object.defineProperty(provider, "postMessage", {
+        value: (message: Record<string, unknown>) => messages.push(message),
+      });
+      const internals = provider as unknown as {
+        pendingAttachments: Map<string, unknown>;
+        handleAttachContent(message: Record<string, unknown>): void;
+      };
+
+      internals.handleAttachContent({
+        type: "attachContent",
+        name: "sample.wav",
+        mimeType: "audio/wav",
+        data: "UklGRgAAAABXQVZF",
+      });
+
+      assert.strictEqual(internals.pendingAttachments.size, 0);
+      assert.ok(
+        messages.some(
+          (message) =>
+            message.type === "attachmentError" &&
+            String(message.text).includes("does not advertise audio")
+        )
+      );
+    });
+
     test("rejects pasted image bytes when the agent lacks image support", () => {
       class LinkOnlyClient extends TestACPClient {
         isConnected(): boolean {
@@ -7093,7 +7173,7 @@ suite("ChatViewProvider", () => {
       );
     });
 
-    test("replays bounded embedded resources and images without retaining prompt payloads", () => {
+    test("replays bounded embedded resources, images, and audio without retaining prompt payloads", () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,
         acpClient as unknown as ACPClient,
@@ -7106,33 +7186,35 @@ suite("ChatViewProvider", () => {
       };
       internals.isReplaying = true;
 
-      internals.handleSessionUpdate({
-        sessionId: "test-session",
-        update: {
-          sessionUpdate: "user_message_chunk",
-          messageId: "user-rich",
-          content: {
-            type: "resource",
-            resource: {
-              uri: "file:///workspace/current.ts",
-              mimeType: "text/typescript",
-              text: "const current = true;",
-            },
+      for (const content of [
+        {
+          type: "resource" as const,
+          resource: {
+            uri: "file:///workspace/current.ts",
+            mimeType: "text/typescript",
+            text: "const current = true;",
           },
         },
-      } satisfies SessionNotification);
-      internals.handleSessionUpdate({
-        sessionId: "test-session",
-        update: {
-          sessionUpdate: "user_message_chunk",
-          messageId: "user-rich",
-          content: {
-            type: "image",
-            mimeType: "image/png",
-            data: "iVBORw0KGgo=",
-          },
+        {
+          type: "image" as const,
+          mimeType: "image/png",
+          data: "iVBORw0KGgo=",
         },
-      } satisfies SessionNotification);
+        {
+          type: "audio" as const,
+          mimeType: "audio/wav",
+          data: "UklGRgAAAABXQVZF",
+        },
+      ]) {
+        internals.handleSessionUpdate({
+          sessionId: "test-session",
+          update: {
+            sessionUpdate: "user_message_chunk",
+            messageId: "user-rich",
+            content,
+          },
+        } satisfies SessionNotification);
+      }
 
       assert.deepStrictEqual(
         internals.replayMessages[0].attachments.map((attachment) => ({
@@ -7145,6 +7227,11 @@ suite("ChatViewProvider", () => {
           {
             name: internals.replayMessages[0].attachments[1].name,
             transport: "image",
+            hasPayload: false,
+          },
+          {
+            name: internals.replayMessages[0].attachments[2].name,
+            transport: "audio",
             hasPayload: false,
           },
         ]

@@ -1010,9 +1010,10 @@ suite("Webview", () => {
             },
           ],
         });
-        const previous = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
-          '[data-config-id="interaction"]'
-        );
+        const previous =
+          elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+            '[data-config-id="interaction"]'
+          );
         assert.ok(previous);
         previous.focus();
 
@@ -1029,9 +1030,10 @@ suite("Webview", () => {
           ],
         });
 
-        const replacement = elements.configOptionsContainer.querySelector<HTMLSelectElement>(
-          '[data-config-id="interaction"]'
-        );
+        const replacement =
+          elements.configOptionsContainer.querySelector<HTMLSelectElement>(
+            '[data-config-id="interaction"]'
+          );
         assert.ok(replacement);
         assert.notStrictEqual(replacement, previous);
         assert.strictEqual(document.activeElement, replacement);
@@ -1738,6 +1740,44 @@ suite("Webview", () => {
         );
       });
 
+      test("renders an accessible native audio attachment preview", () => {
+        controller.handleMessage({
+          type: "filesAttached",
+          attachments: [
+            {
+              id: "audio-preview",
+              uri: "vscode-acp-attachment:///memory/audio-preview/sample.wav",
+              name: "sample.wav",
+              mimeType: "audio/wav",
+              size: 12,
+              source: "memory",
+              kind: "audio",
+              transport: "audio",
+              previewDataUrl: "data:audio/wav;base64,UklGRgAAAABXQVZF",
+            },
+          ],
+        });
+
+        const chip = elements.attachmentsBar.querySelector(".attachment-chip");
+        assert.strictEqual(
+          chip?.getAttribute("aria-label"),
+          "Audio attachment sample.wav, Audio · audio/wav · 12 B"
+        );
+        assert.strictEqual(
+          chip?.querySelector(".attachment-chip-type")?.textContent,
+          "Audio"
+        );
+        const preview = chip?.querySelector("audio");
+        assert.strictEqual(
+          preview?.getAttribute("src"),
+          "data:audio/wav;base64,UklGRgAAAABXQVZF"
+        );
+        assert.strictEqual(
+          (preview as HTMLAudioElement | null)?.controls,
+          true
+        );
+      });
+
       test("renders an editor selection chip and focuses the composer", () => {
         elements.attachBtn.focus();
         controller.handleMessage({
@@ -1842,6 +1882,46 @@ suite("Webview", () => {
           name: "pasted.png",
           mimeType: undefined,
           data: "iVBORw0KGgo=",
+        });
+      });
+
+      test("pastes audio only after the agent advertises audio support", async () => {
+        const wav = Uint8Array.from([
+          0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45,
+        ]);
+        const file = new window.File([wav], "sample.wav", {
+          type: "audio/wav",
+        });
+        controller.handleMessage({
+          type: "sessionMetadata",
+          promptCapabilities: {
+            image: false,
+            audio: true,
+            embeddedContext: false,
+          },
+        });
+        mockVsCode._clearMessages();
+        const internals = controller as unknown as {
+          attachBrowserFiles(files: File[]): Promise<void>;
+        };
+
+        await internals.attachBrowserFiles([file]);
+
+        const attached = mockVsCode
+          ._getMessages()
+          .find(
+            (message) =>
+              typeof message === "object" &&
+              message !== null &&
+              "type" in message &&
+              message.type === "attachContent"
+          );
+        assert.deepStrictEqual(attached, {
+          type: "attachContent",
+          requestId: "attachment-1",
+          name: "sample.wav",
+          mimeType: "audio/wav",
+          data: "UklGRgAAAABXQVZF",
         });
       });
 
@@ -3189,7 +3269,9 @@ suite("Webview", () => {
         });
         const picker = document.getElementById("session-picker");
         assert.ok(picker);
-        picker.querySelector<HTMLButtonElement>(".session-history-item")?.click();
+        picker
+          .querySelector<HTMLButtonElement>(".session-history-item")
+          ?.click();
         assert.ok(picker.classList.contains("visible"));
         return picker;
       };

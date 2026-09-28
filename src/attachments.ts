@@ -7,15 +7,18 @@ import type {
 } from "@agentclientprotocol/sdk";
 import {
   MAX_ATTACHMENT_NAME_LENGTH,
+  MAX_AUDIO_BYTES,
   MAX_EMBEDDED_RESOURCE_BYTES,
   MAX_IMAGE_BYTES,
   MAX_INLINE_ATTACHMENT_BYTES,
   decodedBase64Size,
+  detectedAudioMimeType,
   detectedImageMimeType,
   isAttachmentMetadataValid,
   isEmbeddableTextMimeType,
   isFileAttachmentValid,
   isPromptAttachmentValid,
+  isSupportedAudioMimeType,
   isSupportedImageMimeType,
   sanitizeAttachmentLabel,
   toAttachmentMetadata,
@@ -81,6 +84,10 @@ const MIME_TYPES_BY_EXTENSION: Record<string, string> = {
   ".webp": "image/webp",
   ".svg": "image/svg+xml",
   ".pdf": "application/pdf",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".webm": "audio/webm",
+  ".ogg": "audio/ogg",
 };
 
 /** Guesses a MIME type from a file name's extension. Returns `undefined` for unknown extensions. */
@@ -228,7 +235,11 @@ export async function createFileAttachment(
     mimeType,
     size,
     source: "file",
-    kind: isSupportedImageMimeType(mimeType) ? "image" : "file",
+    kind: isSupportedImageMimeType(mimeType)
+      ? "image"
+      : isSupportedAudioMimeType(mimeType)
+        ? "audio"
+        : "file",
     transport: "resource_link",
   };
 }
@@ -326,7 +337,9 @@ export function createInlineAttachment(
   const mimeType = declaredMime || inferredMime;
   const maximumBytes = isSupportedImageMimeType(mimeType)
     ? MAX_IMAGE_BYTES
-    : MAX_EMBEDDED_RESOURCE_BYTES;
+    : isSupportedAudioMimeType(mimeType)
+      ? MAX_AUDIO_BYTES
+      : MAX_EMBEDDED_RESOURCE_BYTES;
   const maximumEncodedLength = Math.ceil(maximumBytes / 3) * 4;
   if (input.data.length > maximumEncodedLength) {
     throw new AttachmentInputError(
@@ -349,6 +362,7 @@ export function createInlineAttachment(
       "The image bytes do not match the declared MIME type."
     );
   }
+  const detectedAudioMime = detectedAudioMimeType(bytes);
 
   const uri = memoryAttachmentUri(id, name);
   if (isSupportedImageMimeType(mimeType)) {
@@ -386,6 +400,44 @@ export function createInlineAttachment(
     };
     if (!isPromptAttachmentValid(attachment)) {
       throw new AttachmentInputError("The image metadata is invalid.");
+    }
+    return attachment;
+  }
+  if (isSupportedAudioMimeType(mimeType)) {
+    if (capabilities.audio !== true) {
+      throw new AttachmentInputError(
+        "The current agent does not advertise audio prompt support."
+      );
+    }
+    if (size > MAX_AUDIO_BYTES) {
+      throw new AttachmentInputError(
+        `Audio files must be ${MAX_AUDIO_BYTES / 1024 / 1024} MB or smaller.`
+      );
+    }
+    if (currentInlineBytes + size > MAX_INLINE_ATTACHMENT_BYTES) {
+      throw new AttachmentInputError(
+        `Attachments may embed at most ${MAX_INLINE_ATTACHMENT_BYTES / 1024 / 1024} MB per prompt.`
+      );
+    }
+    if (detectedAudioMime !== mimeType) {
+      throw new AttachmentInputError(
+        "The audio bytes do not match the declared MIME type."
+      );
+    }
+    const attachment: PromptAttachment = {
+      id,
+      uri,
+      name,
+      mimeType,
+      size,
+      source: "memory",
+      kind: "audio",
+      transport: "audio",
+      previewDataUrl: `data:${mimeType};base64,${input.data}`,
+      payload: { type: "audio", data: input.data },
+    };
+    if (!isPromptAttachmentValid(attachment)) {
+      throw new AttachmentInputError("The audio metadata is invalid.");
     }
     return attachment;
   }
@@ -520,14 +572,16 @@ export async function prepareFileAttachment(
       );
     }
     const inlineBytes =
-      promptAttachment.payload.type === "image"
-        ? (decodedBase64Size(promptAttachment.payload.data) ??
-          MAX_INLINE_ATTACHMENT_BYTES + 1)
-        : Buffer.byteLength(promptAttachment.payload.text, "utf8");
+      promptAttachment.payload.type === "text"
+        ? Buffer.byteLength(promptAttachment.payload.text, "utf8")
+        : (decodedBase64Size(promptAttachment.payload.data) ??
+          MAX_INLINE_ATTACHMENT_BYTES + 1);
     if (
       currentInlineBytes + inlineBytes > MAX_INLINE_ATTACHMENT_BYTES ||
       (promptAttachment.payload.type === "image" &&
         capabilities.image !== true) ||
+      (promptAttachment.payload.type === "audio" &&
+        capabilities.audio !== true) ||
       (promptAttachment.payload.type === "text" &&
         promptAttachment.kind !== "selection" &&
         capabilities.embeddedContext !== true)
@@ -616,6 +670,80 @@ export async function prepareFileAttachment(
           ? { previewDataUrl: `data:${refreshed.mimeType};base64,${data}` }
           : {}),
         payload: { type: "image", data },
+      },
+      inlineBytes: bytes.byteLength,
+    };
+  }
+  if (
+    capabilities.audio === true &&
+    isSupportedAudioMimeType(refreshed.mimeType)
+  ) {
+    if (
+      refreshed.size !== undefined &&
+      (refreshed.size > MAX_AUDIO_BYTES ||
+        currentInlineBytes + refreshed.size > MAX_INLINE_ATTACHMENT_BYTES)
+    ) {
+      return {
+        attachment: { ...refreshed, transport: "resource_link" },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked instead of embedded because it exceeds the audio limit.`,
+      };
+    }
+    let bytes: Uint8Array;
+    try {
+      const opened = await openTrustedWorkspaceFile(
+        vscode.Uri.parse(refreshed.uri).fsPath,
+        "read"
+      );
+      try {
+        bytes = await readOpenedWorkspaceFileBytes(opened, MAX_AUDIO_BYTES);
+      } finally {
+        await opened.fileHandle.close();
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceFileTooLargeError) {
+        return {
+          attachment: { ...refreshed, transport: "resource_link" },
+          inlineBytes: 0,
+          warning: `${refreshed.name} was linked instead of embedded because it exceeds the audio limit.`,
+        };
+      }
+      throw error;
+    }
+    if (
+      bytes.byteLength > MAX_AUDIO_BYTES ||
+      currentInlineBytes + bytes.byteLength > MAX_INLINE_ATTACHMENT_BYTES
+    ) {
+      return {
+        attachment: { ...refreshed, size: bytes.byteLength },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked instead of embedded because it exceeds the audio limit.`,
+      };
+    }
+    if (detectedAudioMimeType(bytes) !== refreshed.mimeType) {
+      return {
+        attachment: {
+          ...refreshed,
+          mimeType: undefined,
+          size: bytes.byteLength,
+          kind: "file",
+          transport: "resource_link",
+        },
+        inlineBytes: 0,
+        warning: `${refreshed.name} was linked because its bytes do not match ${refreshed.mimeType}.`,
+      };
+    }
+    const data = Buffer.from(bytes).toString("base64");
+    return {
+      attachment: {
+        ...refreshed,
+        size: bytes.byteLength,
+        kind: "audio",
+        transport: "audio",
+        ...(includePreview || attachment.previewDataUrl !== undefined
+          ? { previewDataUrl: `data:${refreshed.mimeType};base64,${data}` }
+          : {}),
+        payload: { type: "audio", data },
       },
       inlineBytes: bytes.byteLength,
     };
@@ -748,7 +876,11 @@ export function createReplayAttachment(
       mimeType,
       size,
       source: "file",
-      kind: isSupportedImageMimeType(mimeType) ? "image" : "file",
+      kind: isSupportedImageMimeType(mimeType)
+        ? "image"
+        : isSupportedAudioMimeType(mimeType)
+          ? "audio"
+          : "file",
       transport: "resource_link",
     };
   }
@@ -802,7 +934,10 @@ export function createReplayAttachment(
         : selectionName
           ? "text/plain"
           : undefined;
-    if (isSupportedImageMimeType(mimeType)) {
+    if (
+      isSupportedImageMimeType(mimeType) ||
+      isSupportedAudioMimeType(mimeType)
+    ) {
       return null;
     }
     const source = uri.startsWith("file://") ? "file" : "memory";
@@ -855,6 +990,49 @@ export function createReplayAttachment(
       source: "memory",
       kind: "image",
       transport: "image",
+      previewDataUrl: `data:${content.mimeType};base64,${content.data}`,
+    };
+    return isFileAttachmentValid(attachment) ? attachment : null;
+  }
+  if (content.type === "audio" && isSupportedAudioMimeType(content.mimeType)) {
+    if (
+      typeof content.data !== "string" ||
+      content.data.length > Math.ceil(MAX_AUDIO_BYTES / 3) * 4
+    ) {
+      return null;
+    }
+    const size = decodedBase64Size(content.data);
+    if (size === null || size > MAX_AUDIO_BYTES) {
+      return null;
+    }
+    const bytes = Buffer.from(content.data, "base64");
+    if (
+      bytes.byteLength !== size ||
+      detectedAudioMimeType(bytes) !== content.mimeType
+    ) {
+      return null;
+    }
+    const extensionByMime: Record<
+      "audio/mpeg" | "audio/wav" | "audio/webm" | "audio/ogg",
+      string
+    > = {
+      "audio/mpeg": "mp3",
+      "audio/wav": "wav",
+      "audio/webm": "webm",
+      "audio/ogg": "ogg",
+    };
+    const suffix = id.split("-").at(-1) ?? "attachment";
+    const name = `Audio ${suffix}.${extensionByMime[content.mimeType]}`;
+    const uri = memoryAttachmentUri(id, name);
+    const attachment: FileAttachment = {
+      id,
+      uri,
+      name,
+      mimeType: content.mimeType,
+      size,
+      source: "memory",
+      kind: "audio",
+      transport: "audio",
       previewDataUrl: `data:${content.mimeType};base64,${content.data}`,
     };
     return isFileAttachmentValid(attachment) ? attachment : null;

@@ -2,10 +2,12 @@ import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
 import { Marked } from "marked";
 import {
   MAX_ATTACHMENTS,
+  MAX_AUDIO_BYTES,
   MAX_EMBEDDED_RESOURCE_BYTES,
   MAX_IMAGE_BYTES,
   formatByteSize,
   isFileAttachmentValid,
+  isSupportedAudioAttachment,
   isSupportedImageAttachment,
   type FileAttachment,
 } from "../../shared/attachments";
@@ -157,6 +159,7 @@ export interface ExtensionMessage {
   lifecycleGeneration?: number;
   promptCapabilities?: {
     image?: boolean;
+    audio?: boolean;
     embeddedContext?: boolean;
   };
   toolCallId?: string;
@@ -868,7 +871,11 @@ export class WebviewController {
   private attachmentPickerPending = false;
   private pendingAttachmentRequestIds = new Set<string>();
   private attachmentRequestCounter = 0;
-  private promptCapabilities = { image: false, embeddedContext: false };
+  private promptCapabilities = {
+    image: false,
+    audio: false,
+    embeddedContext: false,
+  };
 
   constructor(
     vscode: VsCodeApi,
@@ -1171,9 +1178,11 @@ export class WebviewController {
         ? "Selection"
         : transport === "image"
           ? "Image"
-          : transport === "resource"
-            ? "Embedded"
-            : "Link";
+          : transport === "audio"
+            ? "Audio"
+            : transport === "resource"
+              ? "Embedded"
+              : "Link";
 
     const details = [
       transportLabel,
@@ -1192,17 +1201,30 @@ export class WebviewController {
     );
 
     if (attachment.previewDataUrl) {
-      const preview = this.doc.createElement("img");
-      preview.className = "attachment-chip-preview";
-      preview.src = attachment.previewDataUrl;
-      preview.alt = "";
-      preview.setAttribute("aria-hidden", "true");
-      chip.appendChild(preview);
+      if (attachment.kind === "audio") {
+        const preview = this.doc.createElement("audio");
+        preview.className = "attachment-chip-preview";
+        preview.src = attachment.previewDataUrl;
+        preview.controls = true;
+        chip.appendChild(preview);
+      } else {
+        const preview = this.doc.createElement("img");
+        preview.className = "attachment-chip-preview";
+        preview.src = attachment.previewDataUrl;
+        preview.alt = "";
+        preview.setAttribute("aria-hidden", "true");
+        chip.appendChild(preview);
+      }
     } else {
       const icon = this.doc.createElement("span");
       icon.className = "attachment-chip-icon";
       icon.setAttribute("aria-hidden", "true");
-      icon.textContent = attachment.kind === "selection" ? "⌗" : "📄";
+      icon.textContent =
+        attachment.kind === "selection"
+          ? "⌗"
+          : attachment.kind === "audio"
+            ? "🔊"
+            : "📄";
       chip.appendChild(icon);
     }
 
@@ -1243,6 +1265,7 @@ export class WebviewController {
     const supportedKinds = [
       this.promptCapabilities.embeddedContext ? "embedded text" : "file links",
       this.promptCapabilities.image ? "image prompts" : "image links",
+      this.promptCapabilities.audio ? "audio prompts" : "audio links",
     ].join(" and ");
     this.elements.attachBtn.title = atLimit
       ? `Attachment limit reached (${MAX_ATTACHMENTS} files)`
@@ -1325,19 +1348,33 @@ export class WebviewController {
         file.name,
         file.type || undefined
       );
+      const audio = isSupportedAudioAttachment(
+        file.name,
+        file.type || undefined
+      );
       if (image && !this.promptCapabilities.image) {
         this.showSystemMessageOnce(
           "The current agent does not advertise image prompt support."
         );
         continue;
       }
-      if (!image && !this.promptCapabilities.embeddedContext) {
+      if (audio && !this.promptCapabilities.audio) {
+        this.showSystemMessageOnce(
+          "The current agent does not advertise audio prompt support."
+        );
+        continue;
+      }
+      if (!image && !audio && !this.promptCapabilities.embeddedContext) {
         this.showSystemMessageOnce(
           "The current agent does not advertise embedded context support."
         );
         continue;
       }
-      const limit = image ? MAX_IMAGE_BYTES : MAX_EMBEDDED_RESOURCE_BYTES;
+      const limit = image
+        ? MAX_IMAGE_BYTES
+        : audio
+          ? MAX_AUDIO_BYTES
+          : MAX_EMBEDDED_RESOURCE_BYTES;
       if (file.size > limit) {
         this.showSystemMessageOnce(
           `${file.name || "Attachment"} exceeds the ${limit / 1024 / 1024} MB limit.`
@@ -1376,7 +1413,9 @@ export class WebviewController {
         this.vscode.postMessage({
           type: "attachContent",
           requestId,
-          name: file.name || (image ? "Pasted image" : "Dropped file"),
+          name:
+            file.name ||
+            (image ? "Pasted image" : audio ? "Pasted audio" : "Dropped file"),
           mimeType: file.type || undefined,
           data: dataUrl.slice(comma + 1),
         });
@@ -2012,9 +2051,7 @@ export class WebviewController {
   private renderSessionConfigOptions(
     configOptions: readonly SessionConfigOption[]
   ): void {
-    const focusedConfigId = this.configIdForFocusTarget(
-      this.doc.activeElement
-    );
+    const focusedConfigId = this.configIdForFocusTarget(this.doc.activeElement);
     const sessionPickerConfigId = this.configIdForFocusTarget(
       this.sessionPickerPreviousFocus
     );
@@ -2337,12 +2374,14 @@ export class WebviewController {
           if (msg.state === "disconnected" || msg.state === "error") {
             this.promptCapabilities = {
               image: false,
+              audio: false,
               embeddedContext: false,
             };
             this.clearAttachments();
           } else if (msg.state === "connecting") {
             this.promptCapabilities = {
               image: false,
+              audio: false,
               embeddedContext: false,
             };
             this.renderAttachments();
@@ -2444,6 +2483,7 @@ export class WebviewController {
       case "sessionMetadata": {
         this.promptCapabilities = {
           image: msg.promptCapabilities?.image === true,
+          audio: msg.promptCapabilities?.audio === true,
           embeddedContext: msg.promptCapabilities?.embeddedContext === true,
         };
         this.renderAttachments();

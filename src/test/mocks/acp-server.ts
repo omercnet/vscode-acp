@@ -288,6 +288,7 @@ export class MockACPServer {
                 ? {
                     promptCapabilities: {
                       image: true,
+                      audio: true,
                       embeddedContext: true,
                     },
                   }
