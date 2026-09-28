@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.6.0](https://github.com/omercnet/vscode-acp/compare/v1.5.0...v1.6.0) (2026-09-19)
+
+
+### Features
+
+* **attachments:** support rich prompt content ([#121](https://github.com/omercnet/vscode-acp/issues/121)) ([1fe9afb](https://github.com/omercnet/vscode-acp/commit/1fe9afb280432faf7b5966400ff813defe9dc1d4))
+* **chat:** add editor selections to prompts ([#124](https://github.com/omercnet/vscode-acp/issues/124)) ([e72aa04](https://github.com/omercnet/vscode-acp/commit/e72aa043050f385aac2c616423e61004a82cedc0))
+* **chat:** default ACP view to secondary sidebar ([#119](https://github.com/omercnet/vscode-acp/issues/119)) ([ae7023d](https://github.com/omercnet/vscode-acp/commit/ae7023d2c4bd12f1c10db26fd86f17ba27195425))
+* **diagnostics:** add secret-safe ACP traffic tracing ([#128](https://github.com/omercnet/vscode-acp/issues/128)) ([cf01459](https://github.com/omercnet/vscode-acp/commit/cf014599936b576a8ec8ee481546ac7580ab0f5e))
+* **mcp:** load trusted project configuration ([#123](https://github.com/omercnet/vscode-acp/issues/123)) ([6dec1a2](https://github.com/omercnet/vscode-acp/commit/6dec1a24a769ee5c2490a5ee1609f30858e08a7a))
+* **session:** render ACP configuration options ([#126](https://github.com/omercnet/vscode-acp/issues/126)) ([5bc4874](https://github.com/omercnet/vscode-acp/commit/5bc4874114657c5d3f9bfcdda2a886dba083f16a))
+* **sessions:** browse agent-owned sessions ([#125](https://github.com/omercnet/vscode-acp/issues/125)) ([3b362d9](https://github.com/omercnet/vscode-acp/commit/3b362d9c3a88227dae6874a68c65b8b7a5b07767))
+* surface ACP protocol metadata ([#120](https://github.com/omercnet/vscode-acp/issues/120)) ([7046f0d](https://github.com/omercnet/vscode-acp/commit/7046f0d800980207d83aa374b0ddb5fd69bebe7f))
+
+
+### Bug Fixes
+
+* **acp:** preserve dirty editor changes ([#122](https://github.com/omercnet/vscode-acp/issues/122)) ([4c351ab](https://github.com/omercnet/vscode-acp/commit/4c351ab8f2f0f904495db196cb779bcff8eabdb9))
+* **ci:** harden extension publication ([#115](https://github.com/omercnet/vscode-acp/issues/115)) ([4b55bc5](https://github.com/omercnet/vscode-acp/commit/4b55bc597f6903a407f06049e50ee608aaa946a1))
+* **commands:** clarify agent-advertised slash commands ([#118](https://github.com/omercnet/vscode-acp/issues/118)) ([4b40c75](https://github.com/omercnet/vscode-acp/commit/4b40c75cc0196e82ec480c7aecd72e5041d38224))
+* **sessions:** preserve bounded restoration metadata ([#127](https://github.com/omercnet/vscode-acp/issues/127)) ([e2d633e](https://github.com/omercnet/vscode-acp/commit/e2d633e5ea93befed68f945b8ee1a9316897b526))
+
 ## [1.5.0](https://github.com/omercnet/vscode-acp/compare/v1.4.0...v1.5.0) (2026-09-14)
 
 
