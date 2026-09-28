@@ -39,9 +39,9 @@ jobs:
       - name: Agent resolution smoke (real spawn)
         run: npm run smoke:agent-resolution
 
-      - name: Restricted Mode agent resolution demo (Linux)
+      - name: Deterministic Extension Host tests (Linux)
         if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:e2e -- e2e/agent-resolution.spec.ts
+        run: xvfb-run -a npm run test:e2e
 
       - name: Restricted Mode agent resolution demo (non-Linux)
         if: runner.os != 'Linux'
@@ -54,20 +54,25 @@ jobs:
           name: coverage-report
           path: coverage/
 
-      - name: Coverage Summary
+      - name: Check coverage
         if: runner.os == 'Linux'
         run: |
-          COVERAGE=$(awk '
-            /^SF:/ { file=$0; sub("SF:", "", file); next }
-            /^LH:/ { hit=$0; sub("LH:", "", hit); next }
-            /^LF:/ { 
-              found=$0; sub("LF:", "", found)
-              if (found > 0) { total_hit += hit; total_found += found }
+          awk '
+            /^SF:/ { source = $0 ~ /^SF:src\// && $0 !~ /^SF:src\/test\// }
+            source && /^LH:/ { lh += substr($0, 4) }
+            source && /^LF:/ { lf += substr($0, 4) }
+            source && /^BRH:/ { brh += substr($0, 5) }
+            source && /^BRF:/ { brf += substr($0, 5) }
+            source && /^FNH:/ { fnh += substr($0, 5) }
+            source && /^FNF:/ { fnf += substr($0, 5) }
+            END {
+              lines = 100 * lh / lf
+              branches = 100 * brh / brf
+              functions = 100 * fnh / fnf
+              printf "## Coverage Report\n\n| Metric | Coverage |\n|---|---:|\n| Lines | %.2f%% (%d/%d) |\n| Branches | %.2f%% (%d/%d) |\n| Functions | %.2f%% (%d/%d) |\n", lines, lh, lf, branches, brh, brf, functions, fnh, fnf > ENVIRON["GITHUB_STEP_SUMMARY"]
+              if (lines < 87 || branches < 80 || functions < 83) exit 1
             }
-            END { if (total_found > 0) printf "%.1f%% (%d/%d lines)", (total_hit/total_found)*100, total_hit, total_found; else print "0.0% (0/0 lines)" }
-          ' coverage/lcov.info)
-          echo "## 📊 Coverage Report" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Lines:** $COVERAGE" >> "$GITHUB_STEP_SUMMARY"
+          ' coverage/lcov.info
 
       - name: Comment Coverage on PR
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
@@ -76,17 +81,16 @@ jobs:
           script: |
             const fs = require('fs');
             const lcov = fs.readFileSync('coverage/lcov.info', 'utf8');
-            let totalHit = 0, totalFound = 0;
-            let currentHit = 0;
-            for (const line of lcov.split('\n')) {
-              if (line.startsWith('LH:')) currentHit = parseInt(line.slice(3));
-              if (line.startsWith('LF:')) {
-                const found = parseInt(line.slice(3));
-                if (found > 0) { totalHit += currentHit; totalFound += found; }
+            const totals = { LF: 0, LH: 0, BRF: 0, BRH: 0, FNF: 0, FNH: 0 };
+            for (const record of lcov.split('end_of_record')) {
+              const source = record.match(/^SF:(.+)$/m)?.[1];
+              if (!source?.startsWith('src/') || source.startsWith('src/test/')) continue;
+              for (const key of Object.keys(totals)) {
+                totals[key] += Number(record.match(new RegExp(`^${key}:(\\d+)$`, 'm'))?.[1] ?? 0);
               }
             }
-            const pct = totalFound > 0 ? ((totalHit / totalFound) * 100).toFixed(1) : '0.0';
-            const body = `## 📊 Coverage Report\n\n**Lines:** ${pct}% (${totalHit}/${totalFound})`;
+            const metric = (hit, found) => `${(100 * hit / found).toFixed(2)}% (${hit}/${found})`;
+            const body = `## Coverage Report\n\n| Metric | Coverage |\n|---|---:|\n| Lines | ${metric(totals.LH, totals.LF)} |\n| Branches | ${metric(totals.BRH, totals.BRF)} |\n| Functions | ${metric(totals.FNH, totals.FNF)} |`;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
