@@ -253,6 +253,8 @@ npx playwright test e2e/real-opencode.spec.ts
 
 The smoke uses the configured provider and only checks ACP lifecycle behavior. It does not assert generated text or record prompts, responses, credentials, or provider configuration.
 
+CI runs this smoke after trusted pushes to `main` when the repository `OPENCODE_API_KEY` secret is configured. It writes that secret to OpenCode's ephemeral runner credential file and selects `opencode/big-pickle`, an OpenCode Zen free model. The secret-gated job never runs for pull requests, so untrusted branch code cannot read the provider credential.
+
 ## Contributing
 
 Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) first.

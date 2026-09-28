@@ -123,3 +123,46 @@ jobs:
         with:
           name: vscode-acp-vsix
           path: "*.vsix"
+
+  real-opencode-acp:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+
+      - name: Setup Node.js
+        if: env.OPENCODE_API_KEY != ''
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        if: env.OPENCODE_API_KEY != ''
+        run: npm ci
+
+      - name: Download VS Code and compile the extension
+        if: env.OPENCODE_API_KEY != ''
+        run: xvfb-run -a npm run coverage
+
+      - name: Install OpenCode
+        if: env.OPENCODE_API_KEY != ''
+        run: npm install --global opencode-ai@1.18.33
+
+      - name: Resolve OpenCode executable
+        if: env.OPENCODE_API_KEY != ''
+        run: echo "VSCODE_ACP_REAL_OPENCODE_PATH=$(command -v opencode)" >> "$GITHUB_ENV"
+
+      - name: Configure OpenCode Zen
+        if: env.OPENCODE_API_KEY != ''
+        run: |
+          node -e 'const fs = require("fs"); const path = require("path"); const directory = path.join(process.env.HOME, ".local", "share", "opencode"); fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, "auth.json"), JSON.stringify({ opencode: { type: "api", key: process.env.OPENCODE_API_KEY } }));'
+
+      - name: Run real OpenCode Zen ACP smoke
+        if: env.OPENCODE_API_KEY != ''
+        env:
+          VSCODE_ACP_REAL_OPENCODE: "1"
+          OPENCODE_CONFIG_CONTENT: '{"model":"opencode/big-pickle"}'
+        run: xvfb-run -a npx playwright test e2e/real-opencode.spec.ts
