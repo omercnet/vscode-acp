@@ -222,10 +222,38 @@ npm install
 
 # Compile
 npm run compile
-
-# Run in VS Code
-# Press F5 to open Extension Development Host
 ```
+
+Run with VS Code by pressing F5 to open an Extension Development Host.
+
+```bash
+# Unit and Extension Host tests
+npm test
+
+# Source coverage for production TypeScript
+npm run coverage
+
+# Deterministic VS Code Extension Host integration tests
+npm run test:e2e
+```
+
+The Playwright suite uses generated local ACP agents and does not require a model provider. On Linux, run it under `xvfb-run -a` when no desktop session is available.
+
+### Opt-in real OpenCode ACP smoke
+
+The real-agent smoke validates the installed OpenCode ACP process, one session, one completed turn, and clean shutdown. It is excluded from normal tests because model providers can require local services, credentials, or network access.
+
+Configure OpenCode outside this repository for the provider you want to exercise, such as a local Ollama model or OpenCode Zen. Then run:
+
+```bash
+VSCODE_ACP_REAL_OPENCODE=1 \
+VSCODE_ACP_REAL_OPENCODE_PATH="$(command -v opencode)" \
+npx playwright test e2e/real-opencode.spec.ts
+```
+
+The smoke uses the configured provider and only checks ACP lifecycle behavior. It does not assert generated text or record prompts, responses, credentials, or provider configuration.
+
+CI runs this smoke after trusted pushes to `main` when the repository `OPENCODE_API_KEY` secret is configured. It writes that secret to OpenCode's ephemeral runner credential file and selects `opencode/big-pickle`, an OpenCode Zen free model. The secret-gated job never runs for pull requests, so untrusted branch code cannot read the provider credential.
 
 ## Contributing
 

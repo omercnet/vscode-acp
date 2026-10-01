@@ -269,7 +269,10 @@ test("keeps auth retries on one MCP snapshot and reloads config at the next sess
         })
     );
     await expect(inputContainer).toHaveAttribute("data-auth-observer", "ready");
-    await window.keyboard.press("Enter");
+    await authPicker
+      .locator(".quick-input-list .monaco-list-row")
+      .first()
+      .click();
     await transitionComplete;
     await expect
       .poll(
