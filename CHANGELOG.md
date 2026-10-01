@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/omercnet/vscode-acp/compare/v1.6.0...v1.7.0) (2026-10-01)
+
+
+### Features
+
+* **attachments:** support audio prompt content ([#129](https://github.com/omercnet/vscode-acp/issues/129)) ([cd10dc6](https://github.com/omercnet/vscode-acp/commit/cd10dc662129f11412a63a59c6371df68487be9d))
+
 ## [1.6.0](https://github.com/omercnet/vscode-acp/compare/v1.5.0...v1.6.0) (2026-09-19)
 
 
