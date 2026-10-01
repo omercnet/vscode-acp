@@ -560,7 +560,7 @@
     "dompurify": "^3.4.15",
     "jsonc-parser": "^3.3.1",
     "marked": "^17.0.1",
-    "vscode-jsonrpc": "^8.2.0"
+    "vscode-jsonrpc": "^9.0.0"
   },
   "lint-staged": {
     "*.{ts,js,mjs}": [
