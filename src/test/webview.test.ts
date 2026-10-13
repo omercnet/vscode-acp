@@ -2757,18 +2757,43 @@ suite("Webview", () => {
         assert.strictEqual(thoughtEl, null);
       });
 
-      test("streamStart clears thought", () => {
-        controller.appendThought("Old thought");
+      test("streamEnd keeps the thought collapsed and retitled", () => {
         controller.handleMessage({ type: "streamStart" });
-        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
-        assert.strictEqual(thoughtEl, null);
+        controller.handleMessage({ type: "thoughtChunk", text: "Reasoning" });
+        controller.handleMessage({ type: "streamChunk", text: "Answer" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        const thoughtEl = elements.messagesEl.querySelector(
+          "details.agent-thought"
+        );
+        assert.ok(thoughtEl);
+        assert.strictEqual(thoughtEl.hasAttribute("open"), false);
+        assert.strictEqual(thoughtEl.getAttribute("role"), null);
+        assert.strictEqual(
+          thoughtEl.querySelector(".thought-title")?.textContent,
+          "Thought"
+        );
+        assert.strictEqual(
+          thoughtEl.querySelector(".thought-content")?.textContent,
+          "Reasoning"
+        );
       });
 
-      test("streamEnd clears thought", () => {
-        controller.appendThought("Thinking...");
-        controller.handleMessage({ type: "streamEnd" });
-        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
-        assert.strictEqual(thoughtEl, null);
+      test("next turn starts a separate thought panel", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "thoughtChunk", text: "First" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "thoughtChunk", text: "Second" });
+        const panels = elements.messagesEl.querySelectorAll(".agent-thought");
+        assert.strictEqual(panels.length, 2);
+        assert.strictEqual(
+          panels[0].querySelector(".thought-content")?.textContent,
+          "First"
+        );
+        assert.strictEqual(
+          panels[1].querySelector(".thought-content")?.textContent,
+          "Second"
+        );
       });
 
       test("chatCleared removes thought", () => {

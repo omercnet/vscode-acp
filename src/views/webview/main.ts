@@ -2235,7 +2235,7 @@ export class WebviewController {
       case "streamStart":
         this.currentAssistantText = "";
         this.hasActiveTool = false;
-        this.hideThought();
+        this.finalizeThought();
         break;
       case "streamChunk":
         if (this.hasActiveTool && msg.text) {
@@ -2288,7 +2288,7 @@ export class WebviewController {
         this.tools = {};
         this.hasActiveTool = false;
         this.expandedToolId = null;
-        this.hideThought();
+        this.finalizeThought();
         if (!msg.suppressStopReason) {
           this.renderStopReason(msg.stopReason);
         }
@@ -2641,6 +2641,22 @@ export class WebviewController {
       this.thoughtEl = null;
       this.thoughtText = "";
     }
+  }
+
+  finalizeThought(): void {
+    if (!this.thoughtEl) {
+      return;
+    }
+    this.thoughtEl.removeAttribute("open");
+    this.thoughtEl.removeAttribute("role");
+    this.thoughtEl.removeAttribute("aria-live");
+    this.thoughtEl.setAttribute("aria-label", "Assistant thought");
+    const title = this.thoughtEl.querySelector(".thought-title");
+    if (title) {
+      title.textContent = "Thought";
+    }
+    this.thoughtEl = null;
+    this.thoughtText = "";
   }
 
   private renderStopReason(stopReason: ExtensionMessage["stopReason"]): void {
