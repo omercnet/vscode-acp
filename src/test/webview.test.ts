@@ -2778,6 +2778,22 @@ suite("Webview", () => {
         );
       });
 
+      test("a kept thought stays above the answer", () => {
+        controller.handleMessage({ type: "streamStart" });
+        controller.handleMessage({ type: "thoughtChunk", text: "Reasoning" });
+        controller.handleMessage({ type: "streamChunk", text: "Answer" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        const children = Array.from(elements.messagesEl.children);
+        const thoughtIndex = children.findIndex((el) =>
+          el.classList.contains("agent-thought")
+        );
+        const answerIndex = children.findIndex(
+          (el) => el.textContent === "Answer"
+        );
+        assert.ok(thoughtIndex >= 0 && answerIndex >= 0);
+        assert.ok(thoughtIndex < answerIndex);
+      });
+
       test("next turn starts a separate thought panel", () => {
         controller.handleMessage({ type: "streamStart" });
         controller.handleMessage({ type: "thoughtChunk", text: "First" });
