@@ -2796,6 +2796,49 @@ suite("Webview", () => {
         );
       });
 
+      test("a finalized thought is no longer a live region", () => {
+        controller.handleMessage({ type: "thoughtChunk", text: "Reasoning" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.strictEqual(thoughtEl?.getAttribute("aria-live"), null);
+        assert.strictEqual(
+          thoughtEl?.getAttribute("aria-label"),
+          "Assistant thought"
+        );
+      });
+
+      test("cancelled and errored turns keep their thought", () => {
+        for (const stopReason of ["cancelled", "error"] as const) {
+          controller.handleMessage({ type: "chatCleared" });
+          controller.handleMessage({ type: "thoughtChunk", text: stopReason });
+          controller.handleMessage({ type: "streamEnd", stopReason });
+          const thoughtEl = elements.messagesEl.querySelector(
+            "details.agent-thought"
+          );
+          assert.ok(thoughtEl, stopReason);
+          assert.strictEqual(thoughtEl.hasAttribute("open"), false);
+        }
+      });
+
+      test("streamStart finalizes a thought left open by an unfinished turn", () => {
+        controller.handleMessage({ type: "thoughtChunk", text: "Orphan" });
+        controller.handleMessage({ type: "streamStart" });
+        const thoughtEl = elements.messagesEl.querySelector(".agent-thought");
+        assert.ok(thoughtEl);
+        assert.strictEqual(thoughtEl.hasAttribute("open"), false);
+        assert.strictEqual(thoughtEl.getAttribute("role"), null);
+      });
+
+      test("chatCleared removes a finalized thought", () => {
+        controller.handleMessage({ type: "thoughtChunk", text: "Done" });
+        controller.handleMessage({ type: "streamEnd", stopReason: "end_turn" });
+        controller.handleMessage({ type: "chatCleared" });
+        assert.strictEqual(
+          elements.messagesEl.querySelector(".agent-thought"),
+          null
+        );
+      });
+
       test("chatCleared removes thought", () => {
         controller.appendThought("Some thought");
         controller.handleMessage({ type: "chatCleared" });
