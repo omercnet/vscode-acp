@@ -197,7 +197,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install Marketplace CLI
         run: npm install --global @vscode/vsce@3.9.2
@@ -257,7 +257,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install Open VSX CLI
         run: npm install --global ovsx@1.1.1
