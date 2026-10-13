@@ -167,7 +167,7 @@ test("authenticates through the Extension Development Host before creating a ses
     await expect(offered.first()).toContainText("$(verified) Browser sign-in");
     await window.screenshot({ path: SCREENSHOT_PATH });
 
-    await window.keyboard.press("Enter");
+    await offered.first().click();
 
     await expect
       .poll(async () =>
