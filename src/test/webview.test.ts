@@ -2787,8 +2787,8 @@ suite("Webview", () => {
         const thoughtIndex = children.findIndex((el) =>
           el.classList.contains("agent-thought")
         );
-        const answerIndex = children.findIndex(
-          (el) => el.textContent === "Answer"
+        const answerIndex = children.findIndex((el) =>
+          el.classList.contains("assistant")
         );
         assert.ok(thoughtIndex >= 0 && answerIndex >= 0);
         assert.ok(thoughtIndex < answerIndex);
