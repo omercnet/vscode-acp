@@ -5852,6 +5852,57 @@ suite("ChatViewProvider", () => {
       assert.strictEqual(fakeWebview.messages.length, 0);
     });
 
+    test("accepts bounded full-file edits and retains other payload limits", async () => {
+      const provider = new ChatViewProvider(
+        mockExtensionUri,
+        acpClient as unknown as ACPClient,
+        memento as unknown as vscode.Memento
+      );
+      const fakeWebview = createFakeWebview();
+      const testProvider = provider as unknown as TerminalTestHarness;
+      testProvider.view = fakeWebview.view;
+      for (const length of [4096, 4097, 70_000, 1_048_576]) {
+        const rawInput = {
+          tool: "write_file",
+          arguments: { path: "example.py", content: "x".repeat(length) },
+        };
+        const decision = testProvider.handleRequestPermission(
+          makePermissionRequest({
+            toolCall: { toolCallId: "file-edit", kind: "edit", rawInput },
+          })
+        );
+        const sent = fakeWebview.messages.at(-1)!;
+        assert.strictEqual(sent.type, "permissionRequest");
+        assert.deepStrictEqual(sent.rawInput, rawInput);
+        testProvider.handlePermissionResponse({
+          requestId: sent.requestId as string,
+          optionId: "allow",
+        });
+        assert.deepStrictEqual(await decision, {
+          outcome: { outcome: "selected", optionId: "allow" },
+        });
+      }
+      for (const [kind, tool, content] of [
+        ["edit", "write_file", "x".repeat(1_048_577)],
+        ["edit", "write_file", "界".repeat(700_000)],
+        ["execute", "write_file", "x".repeat(4097)],
+        ["edit", "other_tool", "x".repeat(4097)],
+      ] as const) {
+        const posted = fakeWebview.messages.length;
+        const result = await testProvider.handleRequestPermission(
+          makePermissionRequest({
+            toolCall: {
+              toolCallId: "oversized",
+              kind,
+              rawInput: { tool, arguments: { path: "example.py", content } },
+            },
+          })
+        );
+        assert.deepStrictEqual(result, { outcome: { outcome: "cancelled" } });
+        assert.strictEqual(fakeWebview.messages.length, posted);
+      }
+    });
+
     test("bounds option count, duplicate kinds, and permission payload size", async () => {
       const provider = new ChatViewProvider(
         mockExtensionUri,

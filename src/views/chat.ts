@@ -1,3 +1,8 @@
+import {
+  isFileWritePermissionPayload,
+  MAX_FILE_WRITE_PERMISSION_VALUE_LENGTH,
+  MAX_FILE_WRITE_PERMISSION_BYTES,
+} from "../shared/permissionPayload";
 import * as vscode from "vscode";
 import { spawn, type ChildProcess } from "child_process";
 import { createHash, randomUUID } from "crypto";
@@ -366,14 +371,22 @@ function isSupportedPermissionOption(option: unknown): option is {
   );
 }
 
-function isBoundedPermissionPayload(value: unknown): boolean {
+function isBoundedPermissionPayload(
+  value: unknown,
+  fileWrite = false
+): boolean {
   let entries = 0;
   const visit = (candidate: unknown, depth: number): boolean => {
     if (depth > MAX_PERMISSION_PAYLOAD_DEPTH) {
       return false;
     }
     if (typeof candidate === "string") {
-      return candidate.length <= MAX_PERMISSION_PAYLOAD_VALUE_LENGTH;
+      return (
+        candidate.length <=
+        (fileWrite
+          ? MAX_FILE_WRITE_PERMISSION_VALUE_LENGTH
+          : MAX_PERMISSION_PAYLOAD_VALUE_LENGTH)
+      );
     }
     if (
       candidate === null ||
@@ -405,7 +418,10 @@ function isBoundedPermissionPayload(value: unknown): boolean {
     const serialized = JSON.stringify(value);
     return (
       typeof serialized === "string" &&
-      Buffer.byteLength(serialized, "utf8") <= MAX_PERMISSION_PAYLOAD_BYTES
+      Buffer.byteLength(serialized, "utf8") <=
+        (fileWrite
+          ? MAX_FILE_WRITE_PERMISSION_BYTES
+          : MAX_PERMISSION_PAYLOAD_BYTES)
     );
   } catch {
     return false;
@@ -2289,7 +2305,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       params.options.length === 0 ||
       params.options.length > MAX_PERMISSION_OPTIONS ||
       !params.options.every(isSupportedPermissionOption) ||
-      (rawInput !== undefined && !isBoundedPermissionPayload(rawInput))
+      (rawInput !== undefined &&
+        !isBoundedPermissionPayload(
+          rawInput,
+          params.toolCall?.kind === "edit" &&
+            isFileWritePermissionPayload(rawInput)
+        ))
     ) {
       console.log("[Chat] Invalid permission payload, cancelling request");
       return { outcome: { outcome: "cancelled" } };
