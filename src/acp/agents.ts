@@ -50,6 +50,12 @@ export const AGENTS: AgentConfig[] = [
     args: ["acp"],
   },
   {
+    id: "hermes",
+    name: "Hermes Agent",
+    command: "hermes",
+    args: ["acp"],
+  },
+  {
     id: "amp",
     name: "Amp",
     command: "amp",

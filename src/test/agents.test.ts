@@ -28,6 +28,14 @@ suite("agents", () => {
       assert.strictEqual(opencode?.command, "opencode");
     });
 
+    test("should include hermes agent", () => {
+      const hermes = AGENTS.find((a) => a.id === "hermes");
+      assert.ok(hermes, "hermes agent should exist");
+      assert.strictEqual(hermes.name, "Hermes Agent");
+      assert.strictEqual(hermes.command, "hermes");
+      assert.deepStrictEqual(hermes.args, ["acp"]);
+    });
+
     test("should include claude-code agent", () => {
       const claude = AGENTS.find((a) => a.id === "claude-code");
       assert.ok(claude, "claude-code agent should exist");

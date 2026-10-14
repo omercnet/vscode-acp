@@ -30,6 +30,7 @@ You need at least one ACP-compatible agent installed:
 
 - **[OpenCode](https://github.com/sst/opencode)**
 - **[Claude Code](https://claude.ai/code)**
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**
 
 ## Installation
 
@@ -130,10 +131,14 @@ workspace directories are removed before launch; the workspace path is sent
 separately when the ACP session starts. The same rules apply in local and remote
 extension hosts.
 
-| Agent       | Command    | Detection     |
-| ----------- | ---------- | ------------- |
-| OpenCode    | `opencode` | Checks `PATH` |
-| Claude Code | `npx`      | Checks `PATH` |
+| Agent        | Command    | Detection     |
+| ------------ | ---------- | ------------- |
+| OpenCode     | `opencode` | Checks `PATH` |
+| Claude Code  | `npx`      | Checks `PATH` |
+| Hermes Agent | `hermes`   | Checks `PATH` |
+
+For Hermes Agent, verify ACP support with `hermes acp --check`. The extension
+launches its ACP server using `hermes acp`.
 
 Use `vscode-acp.agentPaths` to map an agent ID to an absolute executable path
 when the command is not on `PATH`. User-level overrides remain available in
