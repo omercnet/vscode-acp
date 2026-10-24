@@ -3646,6 +3646,24 @@ suite("Webview", () => {
       assert.ok(details?.includes("\\u200b"));
     });
 
+    test("shows complete bounded file writes including escaped controls", () => {
+      for (const content of [
+        "x".repeat(70_000) + "END_OF_FILE",
+        "\u001b".repeat(300_000) + "END_OF_FILE",
+      ]) {
+        const formatted = formatPermissionContent({
+          tool: "write_file",
+          arguments: { path: "example.py", content },
+          token: "top-secret",
+        });
+        assert.ok(formatted.includes("END_OF_FILE"));
+        assert.ok(!formatted.includes("[truncated]"));
+        assert.ok(formatted.includes("[redacted]"));
+        assert.ok(!formatted.includes("top-secret"));
+        assert.ok(!formatted.includes("\u001b"));
+      }
+    });
+
     test("marks every truncated permission detail explicitly", () => {
       const formatted = formatPermissionContent({
         valueText: "x".repeat(4097),

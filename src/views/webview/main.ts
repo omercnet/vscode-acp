@@ -1,3 +1,8 @@
+import {
+  isFileWritePermissionPayload,
+  MAX_FILE_WRITE_PERMISSION_BYTES,
+  MAX_FILE_WRITE_PERMISSION_VALUE_LENGTH,
+} from "../../shared/permissionPayload";
 import createDOMPurify, { type DOMPurify, type WindowLike } from "dompurify";
 import { Marked } from "marked";
 import {
@@ -345,6 +350,12 @@ export function formatPermissionContent(content: unknown): string {
   if (content === null || typeof content !== "object") {
     return "[Agent-provided details omitted]";
   }
+  // Escaping controls and JSON quoting can expand each input character sevenfold.
+  const fileWrite = isFileWritePermissionPayload(content);
+  const valueLimit = fileWrite
+    ? MAX_FILE_WRITE_PERMISSION_VALUE_LENGTH * 7
+    : 4096;
+  const displayLimit = fileWrite ? MAX_FILE_WRITE_PERMISSION_BYTES * 8 : 65_536;
   const seen = new WeakSet<object>();
   const sanitize = (value: unknown, key = "", depth = 0): unknown => {
     if (SENSITIVE_PERMISSION_KEYS.test(key) || key === "value") {
@@ -356,8 +367,8 @@ export function formatPermissionContent(content: unknown): string {
         (character) =>
           `\\u${character.codePointAt(0)?.toString(16).padStart(4, "0")}`
       );
-      return escaped.length > 4096
-        ? `${escaped.slice(0, 4096)}… [truncated]`
+      return escaped.length > valueLimit
+        ? `${escaped.slice(0, valueLimit)}… [truncated]`
         : escaped;
     }
     if (value === null || typeof value !== "object") {
@@ -397,8 +408,8 @@ export function formatPermissionContent(content: unknown): string {
     if (typeof formatted !== "string") {
       return "[Agent-provided details unavailable]";
     }
-    return formatted.length > 65_536
-      ? `${formatted.slice(0, 65_536)}\n[truncated]`
+    return formatted.length > displayLimit
+      ? `${formatted.slice(0, displayLimit)}\n[truncated]`
       : formatted;
   } catch {
     return "[Agent-provided details unavailable]";
