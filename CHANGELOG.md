@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/omercnet/vscode-acp/compare/v1.6.0...v1.7.0) (2026-10-24)
+
+
+### Features
+
+* **attachments:** support audio prompt content ([#129](https://github.com/omercnet/vscode-acp/issues/129)) ([cd10dc6](https://github.com/omercnet/vscode-acp/commit/cd10dc662129f11412a63a59c6371df68487be9d))
+
+
+### Bug Fixes
+
+* **webview:** keep agent thoughts visible after the turn ends ([#134](https://github.com/omercnet/vscode-acp/issues/134)) ([6c89878](https://github.com/omercnet/vscode-acp/commit/6c89878718d0845a1636a224cdcdd1a3eaa5ca5c))
+
 ## [1.6.0](https://github.com/omercnet/vscode-acp/compare/v1.5.0...v1.6.0) (2026-09-19)
 
 
