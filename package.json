@@ -23,7 +23,7 @@
   "homepage": "https://github.com/omercnet/vscode-acp#readme",
   "engines": {
     "vscode": "^1.74.0",
-    "node": "^22"
+    "node": "^24.0.0"
   },
   "categories": [
     "AI",
